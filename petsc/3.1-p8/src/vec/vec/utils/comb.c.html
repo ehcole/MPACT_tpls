@@ -1,0 +1,731 @@
+<center><a href="comb.c">Actual source code: comb.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T18:45:28+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCVEC_DLL</font></strong>
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">      Split phase global vector reductions with support for combining the</font>
+<a name="line4">  4: </a><font color="#B22222">   communication portion of several operations. Using MPI-1.1 support only</font>
+
+<a name="line6">  6: </a><font color="#B22222">      The idea for this and much of the initial code is contributed by </font>
+<a name="line7">  7: </a><font color="#B22222">   Victor Eijkhout.</font>
+
+<a name="line9">  9: </a><font color="#B22222">       Usage:</font>
+<a name="line10"> 10: </a><font color="#B22222">             <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *);</font>
+<a name="line11"> 11: </a><font color="#B22222">             <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/NormType.html#NormType">NormType</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *);</font>
+<a name="line12"> 12: </a><font color="#B22222">             ....</font>
+<a name="line13"> 13: </a><font color="#B22222">             <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *);</font>
+<a name="line14"> 14: </a><font color="#B22222">             <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/NormType.html#NormType">NormType</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *);</font>
+
+<a name="line16"> 16: </a><font color="#B22222">       Limitations: </font>
+<a name="line17"> 17: </a><font color="#B22222">         - The order of the xxxEnd() functions MUST be in the same order</font>
+<a name="line18"> 18: </a><font color="#B22222">           as the xxxBegin(). There is extensive error checking to try to </font>
+<a name="line19"> 19: </a><font color="#B22222">           insure that the user calls the routines in the correct order</font>
+<a name="line20"> 20: </a><font color="#B22222">*/</font>
+
+<a name="line22"> 22: </a> #include <A href="../../../../include/private/vecimpl.h.html">private/vecimpl.h</A>
+
+<a name="line24"> 24: </a><strong><font color="#228B22">#define STATE_BEGIN 0</font></strong>
+<a name="line25"> 25: </a><strong><font color="#228B22">#define STATE_END   1</font></strong>
+
+<a name="line27"> 27: </a><strong><font color="#228B22">#define REDUCE_SUM  0</font></strong>
+<a name="line28"> 28: </a><strong><font color="#228B22">#define REDUCE_MAX  1</font></strong>
+<a name="line29"> 29: </a><strong><font color="#228B22">#define REDUCE_MIN  2</font></strong>
+
+<a name="line31"> 31: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line32"> 32: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>     comm;
+<a name="line33"> 33: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  *lvalues;    <font color="#B22222">/* this are the reduced values before call to <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>() */</font>
+<a name="line34"> 34: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  *gvalues;    <font color="#B22222">/* values after call to <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>() */</font>
+<a name="line35"> 35: </a>  void         **invecs;    <font color="#B22222">/* for debugging only, vector/memory used with each op */</font>
+<a name="line36"> 36: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     *reducetype; <font color="#B22222">/* is particular value to be summed or maxed? */</font>
+<a name="line37"> 37: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     state;       <font color="#B22222">/* are we calling xxxBegin() or xxxEnd()? */</font>
+<a name="line38"> 38: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     maxops;      <font color="#B22222">/* total amount of space we have for requests */</font>
+<a name="line39"> 39: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     numopsbegin; <font color="#B22222">/* number of requests that have been queued in */</font>
+<a name="line40"> 40: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     numopsend;   <font color="#B22222">/* number of requests that have been gotten by user */</font>
+<a name="line41"> 41: </a>} PetscSplitReduction;
+<a name="line42"> 42: </a><font color="#B22222">/*</font>
+<a name="line43"> 43: </a><font color="#B22222">   Note: the lvalues and gvalues are twice as long as maxops, this is to allow the second half of</font>
+<a name="line44"> 44: </a><font color="#B22222">the entries to have a flag indicating if they are REDUCE_SUM, REDUCE_MAX, or REDUCE_MIN these are used by </font>
+<a name="line45"> 45: </a><font color="#B22222">the custom reduction operation that replaces MPI_SUM, MPI_MAX, or MPI_MIN in the case when a reduction involves</font>
+<a name="line46"> 46: </a><font color="#B22222">some of each.</font>
+<a name="line47"> 47: </a><font color="#B22222">*/</font>
+
+<a name="line51"> 51: </a><font color="#B22222">/*</font>
+<a name="line52"> 52: </a><font color="#B22222">   PetscSplitReductionCreate - Creates a data structure to contain the queued information.</font>
+<a name="line53"> 53: </a><font color="#B22222">*/</font>
+<a name="line54"> 54: </a><strong><font color="#4169E1"><a name="PetscSplitReductionCreate"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PetscSplitReductionCreate(<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,PetscSplitReduction **sr)</font></strong>
+<a name="line55"> 55: </a>{
+
+<a name="line59"> 59: </a>  <A href="../../../../docs/manualpages/Sys/PetscNew.html#PetscNew">PetscNew</A>(PetscSplitReduction,sr);
+<a name="line60"> 60: </a>  (*sr)-&gt;numopsbegin = 0;
+<a name="line61"> 61: </a>  (*sr)-&gt;numopsend   = 0;
+<a name="line62"> 62: </a>  (*sr)-&gt;state       = STATE_BEGIN;
+<a name="line63"> 63: </a>  (*sr)-&gt;maxops      = 32;
+<a name="line64"> 64: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*32*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;(*sr)-&gt;lvalues);
+<a name="line65"> 65: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*32*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;(*sr)-&gt;gvalues);
+<a name="line66"> 66: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(32*<font color="#4169E1">sizeof</font>(void*),&amp;(*sr)-&gt;invecs);
+<a name="line67"> 67: </a>  (*sr)-&gt;comm        = comm;
+<a name="line68"> 68: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(32*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;(*sr)-&gt;reducetype);
+<a name="line69"> 69: </a>  <font color="#4169E1">return</font>(0);
+<a name="line70"> 70: </a>}
+
+<a name="line72"> 72: </a><font color="#B22222">/*</font>
+<a name="line73"> 73: </a><font color="#B22222">       This function is the MPI reduction operation used when there is </font>
+<a name="line74"> 74: </a><font color="#B22222">   a combination of sums and max in the reduction. The call below to </font>
+<a name="line75"> 75: </a><font color="#B22222">   <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Op_create.html#MPI_Op_create">MPI_Op_create</A>() converts the function PetscSplitReduction_Local() to the </font>
+<a name="line76"> 76: </a><font color="#B22222">   MPI operator PetscSplitReduction_Op.</font>
+<a name="line77"> 77: </a><font color="#B22222">*/</font>
+<a name="line78"> 78: </a>MPI_Op PetscSplitReduction_Op = 0;
+
+<a name="line83"> 83: </a><strong><font color="#4169E1"><a name="PetscSplitReduction_Local"></a>void  MPIAPI PetscSplitReduction_Local(void *in,void *out,<A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> *cnt,MPI_Datatype *datatype)</font></strong>
+<a name="line84"> 84: </a>{
+<a name="line85"> 85: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *xin = (<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *)in,*xout = (<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)out;
+<a name="line86"> 86: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    i,count = (<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)*cnt;
+
+<a name="line89"> 89: </a>  <font color="#4169E1">if</font> (*datatype != MPIU_REAL) {
+<a name="line90"> 90: </a>    (*<A href="../../../../docs/manualpages/Sys/PetscErrorPrintf.html#PetscErrorPrintf">PetscErrorPrintf</A>)(<font color="#666666">"Can only handle MPIU_REAL data types"</font>);
+<a name="line91"> 91: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Abort.html#MPI_Abort">MPI_Abort</A>(MPI_COMM_WORLD,1);
+<a name="line92"> 92: </a>  }
+<a name="line93"> 93: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line94"> 94: </a>  count = count/2;
+<a name="line95"> 95: </a><font color="#A020F0">#endif</font>
+<a name="line96"> 96: </a>  count = count/2;
+<a name="line97"> 97: </a>  <font color="#4169E1">for</font> (i=0; i&lt;count; i++) {
+<a name="line98"> 98: </a>    <font color="#4169E1">if</font> (((int)PetscRealPart(xin[count+i])) == REDUCE_SUM) { <font color="#B22222">/* second half of xin[] is flags for reduction type */</font>
+<a name="line99"> 99: </a>      xout[i] += xin[i];
+<a name="line100">100: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)PetscRealPart(xin[count+i]) == REDUCE_MAX) {
+<a name="line101">101: </a>      xout[i] = PetscMax(*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *)(xout+i),*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *)(xin+i));
+<a name="line102">102: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)PetscRealPart(xin[count+i]) == REDUCE_MIN) {
+<a name="line103">103: </a>      xout[i] = PetscMin(*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *)(xout+i),*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *)(xin+i));
+<a name="line104">104: </a>    } <font color="#4169E1">else</font> {
+<a name="line105">105: </a>      (*<A href="../../../../docs/manualpages/Sys/PetscErrorPrintf.html#PetscErrorPrintf">PetscErrorPrintf</A>)(<font color="#666666">"Reduction type input is not REDUCE_SUM, REDUCE_MAX, or REDUCE_MIN"</font>);
+<a name="line106">106: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Abort.html#MPI_Abort">MPI_Abort</A>(MPI_COMM_WORLD,1);
+<a name="line107">107: </a>    }
+<a name="line108">108: </a>  }
+<a name="line109">109: </a>  PetscStackPop; <font color="#B22222">/* since function returns void cannot use <A href="../../../../docs/manualpages/Sys/PetscFunctionReturn.html#PetscFunctionReturn">PetscFunctionReturn</A>(); */</font>
+<a name="line110">110: </a>  <font color="#4169E1">return</font>;
+<a name="line111">111: </a>}
+
+<a name="line116">116: </a><font color="#B22222">/*</font>
+<a name="line117">117: </a><font color="#B22222">   PetscSplitReductionApply - Actually do the communication required for a split phase reduction</font>
+<a name="line118">118: </a><font color="#B22222">*/</font>
+<a name="line119">119: </a><strong><font color="#4169E1"><a name="PetscSplitReductionApply"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PetscSplitReductionApply(PetscSplitReduction *sr)</font></strong>
+<a name="line120">120: </a>{
+<a name="line122">122: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,numops = sr-&gt;numopsbegin,*reducetype = sr-&gt;reducetype;
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *lvalues = sr-&gt;lvalues,*gvalues = sr-&gt;gvalues;
+<a name="line124">124: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       sum_flg = 0,max_flg = 0, min_flg = 0;
+<a name="line125">125: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>       comm = sr-&gt;comm;
+<a name="line126">126: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+
+<a name="line129">129: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend &gt; 0) {
+<a name="line130">130: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Cannot call this after VecxxxEnd() has been called"</font>);
+<a name="line131">131: </a>  }
+
+<a name="line133">133: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBarrierBegin.html#PetscLogEventBarrierBegin">PetscLogEventBarrierBegin</A>(VEC_ReduceBarrier,0,0,0,0,comm);
+<a name="line134">134: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(sr-&gt;comm,&amp;size);
+<a name="line135">135: </a>  <font color="#4169E1">if</font> (size == 1) {
+<a name="line136">136: </a>    <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(gvalues,lvalues,numops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line137">137: </a>  } <font color="#4169E1">else</font> {
+<a name="line138">138: </a>    <font color="#B22222">/* determine if all reductions are sum, max, or min */</font>
+<a name="line139">139: </a>    <font color="#4169E1">for</font> (i=0; i&lt;numops; i++) {
+<a name="line140">140: </a>      <font color="#4169E1">if</font> (reducetype[i] == REDUCE_MAX) {
+<a name="line141">141: </a>        max_flg = 1;
+<a name="line142">142: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == REDUCE_SUM) {
+<a name="line143">143: </a>        sum_flg = 1;
+<a name="line144">144: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == REDUCE_MIN) {
+<a name="line145">145: </a>        min_flg = 1;
+<a name="line146">146: </a>      } <font color="#4169E1">else</font> {
+<a name="line147">147: </a>        <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_PLIB,<font color="#666666">"Error in PetscSplitReduction() data structure, probably memory corruption"</font>);
+<a name="line148">148: </a>      }
+<a name="line149">149: </a>    }
+<a name="line150">150: </a>    <font color="#4169E1">if</font> (sum_flg + max_flg + min_flg &gt; 1) {
+<a name="line151">151: </a>      <font color="#B22222">/* </font>
+<a name="line152">152: </a><font color="#B22222">         after all the entires in lvalues we store the reducetype flags to indicate</font>
+<a name="line153">153: </a><font color="#B22222">         to the reduction operations what are sums and what are max</font>
+<a name="line154">154: </a><font color="#B22222">      */</font>
+<a name="line155">155: </a>      <font color="#4169E1">for</font> (i=0; i&lt;numops; i++) {
+<a name="line156">156: </a>        lvalues[numops+i] = reducetype[i];
+<a name="line157">157: </a>      }
+<a name="line158">158: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line159">159: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,2*2*numops,MPIU_REAL,PetscSplitReduction_Op,comm);
+<a name="line160">160: </a><font color="#A020F0">#else</font>
+<a name="line161">161: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,2*numops,MPIU_REAL,PetscSplitReduction_Op,comm);
+<a name="line162">162: </a><font color="#A020F0">#endif</font>
+<a name="line163">163: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (max_flg) {
+<a name="line164">164: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line165">165: </a>      <font color="#B22222">/* </font>
+<a name="line166">166: </a><font color="#B22222">        complex case we max both the real and imaginary parts, the imaginary part</font>
+<a name="line167">167: </a><font color="#B22222">        is just ignored later</font>
+<a name="line168">168: </a><font color="#B22222">      */</font>
+<a name="line169">169: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,2*numops,MPIU_REAL,MPI_MAX,comm);
+<a name="line170">170: </a><font color="#A020F0">#else</font>
+<a name="line171">171: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,numops,MPIU_REAL,MPI_MAX,comm);
+<a name="line172">172: </a><font color="#A020F0">#endif</font>
+<a name="line173">173: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (min_flg) {
+<a name="line174">174: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line175">175: </a>      <font color="#B22222">/* </font>
+<a name="line176">176: </a><font color="#B22222">        complex case we min both the real and imaginary parts, the imaginary part</font>
+<a name="line177">177: </a><font color="#B22222">        is just ignored later</font>
+<a name="line178">178: </a><font color="#B22222">      */</font>
+<a name="line179">179: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,2*numops,MPIU_REAL,MPI_MIN,comm);
+<a name="line180">180: </a><font color="#A020F0">#else</font>
+<a name="line181">181: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,numops,MPIU_REAL,MPI_MIN,comm);
+<a name="line182">182: </a><font color="#A020F0">#endif</font>
+<a name="line183">183: </a>    } <font color="#4169E1">else</font> {
+<a name="line184">184: </a>      <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(lvalues,gvalues,numops,<A href="../../../../docs/manualpages/Sys/MPIU_SCALAR.html#MPIU_SCALAR">MPIU_SCALAR</A>,MPIU_SUM,comm);
+<a name="line185">185: </a>    }
+<a name="line186">186: </a>  }
+<a name="line187">187: </a>  sr-&gt;state     = STATE_END;
+<a name="line188">188: </a>  sr-&gt;numopsend = 0;
+<a name="line189">189: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBarrierEnd.html#PetscLogEventBarrierEnd">PetscLogEventBarrierEnd</A>(VEC_ReduceBarrier,0,0,0,0,comm);
+<a name="line190">190: </a>  <font color="#4169E1">return</font>(0);
+<a name="line191">191: </a>}
+
+
+<a name="line196">196: </a><font color="#B22222">/*</font>
+<a name="line197">197: </a><font color="#B22222">   PetscSplitReductionExtend - Double the amount of space (slots) allocated for a split reduction object.</font>
+<a name="line198">198: </a><font color="#B22222">*/</font>
+<a name="line199">199: </a><strong><font color="#4169E1"><a name="PetscSplitReductionExtend"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PetscSplitReductionExtend(PetscSplitReduction *sr)</font></strong>
+<a name="line200">200: </a>{
+<a name="line202">202: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         maxops = sr-&gt;maxops,*reducetype = sr-&gt;reducetype;
+<a name="line203">203: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *lvalues = sr-&gt;lvalues,*gvalues = sr-&gt;gvalues;
+<a name="line204">204: </a>  void        *invecs = sr-&gt;invecs;
+
+<a name="line207">207: </a>  sr-&gt;maxops     = 2*maxops;
+<a name="line208">208: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*2*maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;sr-&gt;lvalues);
+<a name="line209">209: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*2*maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;sr-&gt;gvalues);
+<a name="line210">210: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;sr-&gt;reducetype);
+<a name="line211">211: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(2*maxops*<font color="#4169E1">sizeof</font>(void*),&amp;sr-&gt;invecs);
+<a name="line212">212: </a>  <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(sr-&gt;lvalues,lvalues,maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line213">213: </a>  <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(sr-&gt;gvalues,gvalues,maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line214">214: </a>  <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(sr-&gt;reducetype,reducetype,maxops*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>));
+<a name="line215">215: </a>  <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(sr-&gt;invecs,invecs,maxops*<font color="#4169E1">sizeof</font>(void*));
+<a name="line216">216: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(lvalues);
+<a name="line217">217: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(gvalues);
+<a name="line218">218: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(reducetype);
+<a name="line219">219: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(invecs);
+<a name="line220">220: </a>  <font color="#4169E1">return</font>(0);
+<a name="line221">221: </a>}
+
+<a name="line225">225: </a><strong><font color="#4169E1"><a name="PetscSplitReductionDestroy"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PetscSplitReductionDestroy(PetscSplitReduction *sr)</font></strong>
+<a name="line226">226: </a>{
+
+<a name="line230">230: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(sr-&gt;lvalues);
+<a name="line231">231: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(sr-&gt;gvalues);
+<a name="line232">232: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(sr-&gt;reducetype);
+<a name="line233">233: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(sr-&gt;invecs);
+<a name="line234">234: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(sr);
+<a name="line235">235: </a>  <font color="#4169E1">return</font>(0);
+<a name="line236">236: </a>}
+
+<a name="line238">238: </a>static <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> Petsc_Reduction_keyval = MPI_KEYVAL_INVALID;
+
+<a name="line243">243: </a><font color="#B22222">/*</font>
+<a name="line244">244: </a><font color="#B22222">   Private routine to delete internal storage when a communicator is freed.</font>
+<a name="line245">245: </a><font color="#B22222">  This is called by MPI, not by users.</font>
+
+<a name="line247">247: </a><font color="#B22222">  The binding for the first argument changed from MPI 1.0 to 1.1; in 1.0</font>
+<a name="line248">248: </a><font color="#B22222">  it was <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> *comm.  </font>
+<a name="line249">249: </a><font color="#B22222">*/</font>
+<a name="line250">250: </a><strong><font color="#4169E1"><a name="Petsc_DelReduction"></a>int  MPIAPI Petsc_DelReduction(<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,int keyval,void* attr_val,void* extra_state)</font></strong>
+<a name="line251">251: </a>{
+
+<a name="line255">255: </a>  PetscInfo1(0,<font color="#666666">"Deleting reduction data in an <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> %ld\n"</font>,(long)comm);
+<a name="line256">256: </a>  PetscSplitReductionDestroy((PetscSplitReduction *)attr_val);
+<a name="line257">257: </a>  <font color="#4169E1">return</font>(0);
+<a name="line258">258: </a>}
+
+<a name="line261">261: </a><font color="#B22222">/*</font>
+<a name="line262">262: </a><font color="#B22222">     PetscSplitReductionGet - Gets the split reduction object from a </font>
+<a name="line263">263: </a><font color="#B22222">        PETSc vector, creates if it does not exit.</font>
+
+<a name="line265">265: </a><font color="#B22222">*/</font>
+<a name="line268">268: </a><strong><font color="#4169E1"><a name="PetscSplitReductionGet"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PetscSplitReductionGet(<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,PetscSplitReduction **sr)</font></strong>
+<a name="line269">269: </a>{
+<a name="line271">271: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    flag;
+
+<a name="line274">274: </a>  <font color="#4169E1">if</font> (Petsc_Reduction_keyval == MPI_KEYVAL_INVALID) {
+<a name="line275">275: </a>    <font color="#B22222">/* </font>
+<a name="line276">276: </a><font color="#B22222">       The calling sequence of the 2nd argument to this function changed</font>
+<a name="line277">277: </a><font color="#B22222">       between MPI Standard 1.0 and the revisions 1.1 Here we match the </font>
+<a name="line278">278: </a><font color="#B22222">       new standard, if you are using an MPI implementation that uses </font>
+<a name="line279">279: </a><font color="#B22222">       the older version you will get a warning message about the next line;</font>
+<a name="line280">280: </a><font color="#B22222">       it is only a warning message and should do no harm.</font>
+<a name="line281">281: </a><font color="#B22222">    */</font>
+<a name="line282">282: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Keyval_create.html#MPI_Keyval_create">MPI_Keyval_create</A>(<A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_NULL_COPY_FN.html#MPI_NULL_COPY_FN">MPI_NULL_COPY_FN</A>,Petsc_DelReduction,&amp;Petsc_Reduction_keyval,0);
+<a name="line283">283: </a>  }
+<a name="line284">284: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Attr_get.html#MPI_Attr_get">MPI_Attr_get</A>(comm,Petsc_Reduction_keyval,(void **)sr,&amp;flag);
+<a name="line285">285: </a>  <font color="#4169E1">if</font> (!flag) {  <font color="#B22222">/* doesn't exist yet so create it and put it in */</font>
+<a name="line286">286: </a>    PetscSplitReductionCreate(comm,sr);
+<a name="line287">287: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Attr_put.html#MPI_Attr_put">MPI_Attr_put</A>(comm,Petsc_Reduction_keyval,*sr);
+<a name="line288">288: </a>    PetscInfo1(0,<font color="#666666">"Putting reduction data in an <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> %ld\n"</font>,(long)comm);
+<a name="line289">289: </a>  }
+
+<a name="line291">291: </a>  <font color="#4169E1">return</font>(0);
+<a name="line292">292: </a>}
+
+<a name="line294">294: </a><font color="#B22222">/* ----------------------------------------------------------------------------------------------------*/</font>
+
+<a name="line298">298: </a><font color="#B22222">/*@</font>
+<a name="line299">299: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A> - Starts a split phase dot product computation.</font>
+
+<a name="line301">301: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line302">302: </a><font color="#B22222">+   x - the first vector</font>
+<a name="line303">303: </a><font color="#B22222">.   y - the second vector</font>
+<a name="line304">304: </a><font color="#B22222">-   result - where the result will go (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line306">306: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line308">308: </a><font color="#B22222">   Notes:</font>
+<a name="line309">309: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>().</font>
+
+<a name="line311">311: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line312">312: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>()</font>
+<a name="line313">313: </a><font color="#B22222">@*/</font>
+<a name="line314">314: </a><strong><font color="#4169E1"><a name="VecDotBegin"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *result)</font></strong>
+<a name="line315">315: </a>{
+<a name="line316">316: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line317">317: </a>  PetscSplitReduction *sr;
+<a name="line318">318: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+
+<a name="line321">321: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line322">322: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line323">323: </a>  <font color="#4169E1">if</font> (sr-&gt;state == STATE_END) {
+<a name="line324">324: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line325">325: </a>  }
+<a name="line326">326: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops) {
+<a name="line327">327: </a>    PetscSplitReductionExtend(sr);
+<a name="line328">328: </a>  }
+<a name="line329">329: </a>  sr-&gt;reducetype[sr-&gt;numopsbegin] = REDUCE_SUM;
+<a name="line330">330: </a>  sr-&gt;invecs[sr-&gt;numopsbegin]     = (void*)x;
+<a name="line331">331: </a>  <font color="#4169E1">if</font> (!x-&gt;ops-&gt;dot_local) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Vector does not suppport local dots"</font>);
+<a name="line332">332: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line333">333: </a>  (*x-&gt;ops-&gt;dot_local)(x,y,sr-&gt;lvalues+sr-&gt;numopsbegin++);
+<a name="line334">334: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line335">335: </a>  <font color="#4169E1">return</font>(0);
+<a name="line336">336: </a>}
+
+<a name="line340">340: </a><font color="#B22222">/*@</font>
+<a name="line341">341: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A> - Ends a split phase dot product computation.</font>
+
+<a name="line343">343: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line344">344: </a><font color="#B22222">+  x - the first vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line345">345: </a><font color="#B22222">.  y - the second vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line346">346: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line348">348: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line350">350: </a><font color="#B22222">   Notes:</font>
+<a name="line351">351: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>().</font>
+
+<a name="line353">353: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line354">354: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(),<A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>()</font>
+
+<a name="line356">356: </a><font color="#B22222">@*/</font>
+<a name="line357">357: </a><strong><font color="#4169E1"><a name="VecDotEnd"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *result)</font></strong>
+<a name="line358">358: </a>{
+<a name="line359">359: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line360">360: </a>  PetscSplitReduction *sr;
+<a name="line361">361: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+
+<a name="line364">364: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line365">365: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line366">366: </a>
+<a name="line367">367: </a>  <font color="#4169E1">if</font> (sr-&gt;state != STATE_END) {
+<a name="line368">368: </a>    <font color="#B22222">/* this is the first call to VecxxxEnd() so do the communication */</font>
+<a name="line369">369: </a>    PetscSplitReductionApply(sr);
+<a name="line370">370: </a>  }
+
+<a name="line372">372: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend &gt;= sr-&gt;numopsbegin) {
+<a name="line373">373: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line374">374: </a>  }
+<a name="line375">375: </a>  <font color="#4169E1">if</font> (x &amp;&amp; (void*) x != sr-&gt;invecs[sr-&gt;numopsend]) {
+<a name="line376">376: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line377">377: </a>  }
+<a name="line378">378: </a>  <font color="#4169E1">if</font> (sr-&gt;reducetype[sr-&gt;numopsend] != REDUCE_SUM) {
+<a name="line379">379: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>() on a reduction started with <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>()"</font>);
+<a name="line380">380: </a>  }
+<a name="line381">381: </a>  *result = sr-&gt;gvalues[sr-&gt;numopsend++];
+
+<a name="line383">383: </a>  <font color="#B22222">/*</font>
+<a name="line384">384: </a><font color="#B22222">     We are finished getting all the results so reset to no outstanding requests</font>
+<a name="line385">385: </a><font color="#B22222">  */</font>
+<a name="line386">386: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line387">387: </a>    sr-&gt;state        = STATE_BEGIN;
+<a name="line388">388: </a>    sr-&gt;numopsend    = 0;
+<a name="line389">389: </a>    sr-&gt;numopsbegin  = 0;
+<a name="line390">390: </a>  }
+<a name="line391">391: </a>  <font color="#4169E1">return</font>(0);
+<a name="line392">392: </a>}
+
+<a name="line396">396: </a><font color="#B22222">/*@</font>
+<a name="line397">397: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A> - Starts a split phase transpose dot product computation.</font>
+
+<a name="line399">399: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line400">400: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line401">401: </a><font color="#B22222">.  y - the second vector</font>
+<a name="line402">402: </a><font color="#B22222">-  result - where the result will go (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line404">404: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line406">406: </a><font color="#B22222">   Notes:</font>
+<a name="line407">407: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>().</font>
+
+<a name="line409">409: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line410">410: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>()</font>
+
+<a name="line412">412: </a><font color="#B22222">@*/</font>
+<a name="line413">413: </a><strong><font color="#4169E1"><a name="VecTDotBegin"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *result)</font></strong>
+<a name="line414">414: </a>{
+<a name="line415">415: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line416">416: </a>  PetscSplitReduction *sr;
+<a name="line417">417: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+
+<a name="line420">420: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line421">421: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line422">422: </a>  <font color="#4169E1">if</font> (sr-&gt;state == STATE_END) {
+<a name="line423">423: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line424">424: </a>  }
+<a name="line425">425: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops) {
+<a name="line426">426: </a>    PetscSplitReductionExtend(sr);
+<a name="line427">427: </a>  }
+<a name="line428">428: </a>  sr-&gt;reducetype[sr-&gt;numopsbegin] = REDUCE_SUM;
+<a name="line429">429: </a>  sr-&gt;invecs[sr-&gt;numopsbegin]     = (void*)x;
+<a name="line430">430: </a>  <font color="#4169E1">if</font> (!x-&gt;ops-&gt;tdot_local) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Vector does not suppport local dots"</font>);
+<a name="line431">431: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line432">432: </a>  (*x-&gt;ops-&gt;dot_local)(x,y,sr-&gt;lvalues+sr-&gt;numopsbegin++);
+<a name="line433">433: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line434">434: </a>  <font color="#4169E1">return</font>(0);
+<a name="line435">435: </a>}
+
+<a name="line439">439: </a><font color="#B22222">/*@</font>
+<a name="line440">440: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A> - Ends a split phase transpose dot product computation.</font>
+
+<a name="line442">442: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line443">443: </a><font color="#B22222">+  x - the first vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line444">444: </a><font color="#B22222">.  y - the second vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line445">445: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line447">447: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line449">449: </a><font color="#B22222">   Notes:</font>
+<a name="line450">450: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>().</font>
+
+<a name="line452">452: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line453">453: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>()</font>
+<a name="line454">454: </a><font color="#B22222">@*/</font>
+<a name="line455">455: </a><strong><font color="#4169E1"><a name="VecTDotEnd"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *result)</font></strong>
+<a name="line456">456: </a>{
+
+<a name="line460">460: </a>  <font color="#B22222">/*</font>
+<a name="line461">461: </a><font color="#B22222">      TDotEnd() is the same as DotEnd() so reuse the code</font>
+<a name="line462">462: </a><font color="#B22222">  */</font>
+<a name="line463">463: </a>  <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(x,y,result);
+<a name="line464">464: </a>  <font color="#4169E1">return</font>(0);
+<a name="line465">465: </a>}
+
+<a name="line467">467: </a><font color="#B22222">/* -------------------------------------------------------------------------*/</font>
+
+<a name="line471">471: </a><font color="#B22222">/*@</font>
+<a name="line472">472: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A> - Starts a split phase norm computation.</font>
+
+<a name="line474">474: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line475">475: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line476">476: </a><font color="#B22222">.  ntype - norm type, one of <A href="../../../../docs/manualpages/Vec/NORM_1.html#NORM_1">NORM_1</A>, <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, <A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>, <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A></font>
+<a name="line477">477: </a><font color="#B22222">-  result - where the result will go (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line479">479: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line481">481: </a><font color="#B22222">   Notes:</font>
+<a name="line482">482: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>().</font>
+
+<a name="line484">484: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>()</font>
+
+<a name="line486">486: </a><font color="#B22222">@*/</font>
+<a name="line487">487: </a><strong><font color="#4169E1"><a name="VecNormBegin"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/NormType.html#NormType">NormType</A> ntype,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *result)</font></strong>
+<a name="line488">488: </a>{
+<a name="line489">489: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line490">490: </a>  PetscSplitReduction *sr;
+<a name="line491">491: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>           lresult[2];
+<a name="line492">492: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+
+<a name="line495">495: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line496">496: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line497">497: </a>  <font color="#4169E1">if</font> (sr-&gt;state == STATE_END) {
+<a name="line498">498: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line499">499: </a>  }
+<a name="line500">500: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops || (sr-&gt;numopsbegin == sr-&gt;maxops-1 &amp;&amp; ntype == <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A>)) {
+<a name="line501">501: </a>    PetscSplitReductionExtend(sr);
+<a name="line502">502: </a>  }
+<a name="line503">503: </a>
+<a name="line504">504: </a>  sr-&gt;invecs[sr-&gt;numopsbegin]     = (void*)x;
+<a name="line505">505: </a>  <font color="#4169E1">if</font> (!x-&gt;ops-&gt;norm_local) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Vector does not support local norms"</font>);
+<a name="line506">506: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line507">507: </a>  (*x-&gt;ops-&gt;norm_local)(x,ntype,lresult);
+<a name="line508">508: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line509">509: </a>  <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>)         lresult[0]                = lresult[0]*lresult[0];
+<a name="line510">510: </a>  <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A>)   lresult[1]                = lresult[1]*lresult[1];
+<a name="line511">511: </a>  <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>) sr-&gt;reducetype[sr-&gt;numopsbegin] = REDUCE_MAX;
+<a name="line512">512: </a>  <font color="#4169E1">else</font>                   sr-&gt;reducetype[sr-&gt;numopsbegin] = REDUCE_SUM;
+<a name="line513">513: </a>  sr-&gt;lvalues[sr-&gt;numopsbegin++] = lresult[0];
+<a name="line514">514: </a>  <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A>) {
+<a name="line515">515: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin] = REDUCE_SUM;
+<a name="line516">516: </a>    sr-&gt;lvalues[sr-&gt;numopsbegin++]  = lresult[1];
+<a name="line517">517: </a>  }
+<a name="line518">518: </a>  <font color="#4169E1">return</font>(0);
+<a name="line519">519: </a>}
+
+<a name="line523">523: </a><font color="#B22222">/*@</font>
+<a name="line524">524: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A> - Ends a split phase norm computation.</font>
+
+<a name="line526">526: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line527">527: </a><font color="#B22222">+  x - the first vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line528">528: </a><font color="#B22222">.  ntype - norm type, one of <A href="../../../../docs/manualpages/Vec/NORM_1.html#NORM_1">NORM_1</A>, <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, <A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>, <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A></font>
+<a name="line529">529: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line531">531: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line533">533: </a><font color="#B22222">   Notes:</font>
+<a name="line534">534: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>().</font>
+
+<a name="line536">536: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>()</font>
+
+<a name="line538">538: </a><font color="#B22222">@*/</font>
+<a name="line539">539: </a><strong><font color="#4169E1"><a name="VecNormEnd"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/NormType.html#NormType">NormType</A> ntype,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *result)</font></strong>
+<a name="line540">540: </a>{
+<a name="line541">541: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line542">542: </a>  PetscSplitReduction *sr;
+<a name="line543">543: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+
+<a name="line546">546: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line547">547: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line548">548: </a>
+<a name="line549">549: </a>  <font color="#4169E1">if</font> (sr-&gt;state != STATE_END) {
+<a name="line550">550: </a>    <font color="#B22222">/* this is the first call to VecxxxEnd() so do the communication */</font>
+<a name="line551">551: </a>    PetscSplitReductionApply(sr);
+<a name="line552">552: </a>  }
+
+<a name="line554">554: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend &gt;= sr-&gt;numopsbegin) {
+<a name="line555">555: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line556">556: </a>  }
+<a name="line557">557: </a>  <font color="#4169E1">if</font> (x &amp;&amp; (void*)x != sr-&gt;invecs[sr-&gt;numopsend]) {
+<a name="line558">558: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line559">559: </a>  }
+<a name="line560">560: </a>  <font color="#4169E1">if</font> (sr-&gt;reducetype[sr-&gt;numopsend] != REDUCE_MAX &amp;&amp; ntype == <A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>) {
+<a name="line561">561: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(,<A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>,) on a reduction started with <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>() or <A href="../../../../docs/manualpages/Vec/NORM_1.html#NORM_1">NORM_1</A> or <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>"</font>);
+<a name="line562">562: </a>  }
+<a name="line563">563: </a>  result[0] = PetscRealPart(sr-&gt;gvalues[sr-&gt;numopsend++]);
+
+<a name="line565">565: </a>  <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>) {
+<a name="line566">566: </a>    result[0] = sqrt(result[0]);
+<a name="line567">567: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ntype == <A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A>) {
+<a name="line568">568: </a>    result[1] = PetscRealPart(sr-&gt;gvalues[sr-&gt;numopsend++]);
+<a name="line569">569: </a>    result[1] = sqrt(result[1]);
+<a name="line570">570: </a>  }
+<a name="line571">571: </a>  <font color="#4169E1">if</font> (ntype!=<A href="../../../../docs/manualpages/Vec/NORM_1_AND_2.html#NORM_1_AND_2">NORM_1_AND_2</A>) {
+<a name="line572">572: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectComposedDataSetReal.html#PetscObjectComposedDataSetReal">PetscObjectComposedDataSetReal</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,NormIds[ntype],result[0]);
+<a name="line573">573: </a>  }
+
+<a name="line575">575: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line576">576: </a>    sr-&gt;state        = STATE_BEGIN;
+<a name="line577">577: </a>    sr-&gt;numopsend    = 0;
+<a name="line578">578: </a>    sr-&gt;numopsbegin  = 0;
+<a name="line579">579: </a>  }
+<a name="line580">580: </a>  <font color="#4169E1">return</font>(0);
+<a name="line581">581: </a>}
+
+<a name="line583">583: </a><font color="#B22222">/*</font>
+<a name="line584">584: </a><font color="#B22222">   Possibly add</font>
+
+<a name="line586">586: </a><font color="#B22222">     PetscReductionSumBegin/End()</font>
+<a name="line587">587: </a><font color="#B22222">     PetscReductionMaxBegin/End()</font>
+<a name="line588">588: </a><font color="#B22222">     PetscReductionMinBegin/End()</font>
+<a name="line589">589: </a><font color="#B22222">   or have more like MPI with a single function with flag for Op? Like first better</font>
+<a name="line590">590: </a><font color="#B22222">*/</font>
+
+<a name="line594">594: </a><font color="#B22222">/*@</font>
+<a name="line595">595: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A> - Starts a split phase multiple dot product computation.</font>
+
+<a name="line597">597: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line598">598: </a><font color="#B22222">+   x - the first vector</font>
+<a name="line599">599: </a><font color="#B22222">.   nv - number of vectors</font>
+<a name="line600">600: </a><font color="#B22222">.   y - array of vectors</font>
+<a name="line601">601: </a><font color="#B22222">-   result - where the result will go (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line603">603: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line605">605: </a><font color="#B22222">   Notes:</font>
+<a name="line606">606: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>().</font>
+
+<a name="line608">608: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line609">609: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A>()</font>
+<a name="line610">610: </a><font color="#B22222">@*/</font>
+<a name="line611">611: </a><strong><font color="#4169E1"><a name="VecMDotBegin"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nv,const <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y[],<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> result[])</font></strong>
+<a name="line612">612: </a>{
+<a name="line613">613: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line614">614: </a>  PetscSplitReduction *sr;
+<a name="line615">615: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+<a name="line616">616: </a>  int                 i;
+
+<a name="line619">619: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line620">620: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line621">621: </a>  <font color="#4169E1">if</font> (sr-&gt;state == STATE_END) {
+<a name="line622">622: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line623">623: </a>  }
+<a name="line624">624: </a>  <font color="#4169E1">for</font> (i=0;i&lt;nv;i++) {
+<a name="line625">625: </a>    <font color="#4169E1">if</font> (sr-&gt;numopsbegin+i &gt;= sr-&gt;maxops) {
+<a name="line626">626: </a>      PetscSplitReductionExtend(sr);
+<a name="line627">627: </a>    }
+<a name="line628">628: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin+i] = REDUCE_SUM;
+<a name="line629">629: </a>    sr-&gt;invecs[sr-&gt;numopsbegin+i]     = (void*)x;
+<a name="line630">630: </a>  }
+<a name="line631">631: </a>  <font color="#4169E1">if</font> (!x-&gt;ops-&gt;mdot_local) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Vector does not suppport local mdots"</font>);
+<a name="line632">632: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line633">633: </a>  (*x-&gt;ops-&gt;mdot_local)(x,nv,y,sr-&gt;lvalues+sr-&gt;numopsbegin);
+<a name="line634">634: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line635">635: </a>  sr-&gt;numopsbegin += nv;
+<a name="line636">636: </a>  <font color="#4169E1">return</font>(0);
+<a name="line637">637: </a>}
+
+<a name="line641">641: </a><font color="#B22222">/*@</font>
+<a name="line642">642: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A> - Ends a split phase multiple dot product computation.</font>
+
+<a name="line644">644: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line645">645: </a><font color="#B22222">+   x - the first vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line646">646: </a><font color="#B22222">.   nv - number of vectors</font>
+<a name="line647">647: </a><font color="#B22222">-   y - array of vectors (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line649">649: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line650">650: </a><font color="#B22222">.   result - where the result will go</font>
+
+<a name="line652">652: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line654">654: </a><font color="#B22222">   Notes:</font>
+<a name="line655">655: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>().</font>
+
+<a name="line657">657: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line658">658: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>(),<A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A>()</font>
+
+<a name="line660">660: </a><font color="#B22222">@*/</font>
+<a name="line661">661: </a><strong><font color="#4169E1"><a name="VecMDotEnd"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nv,const <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y[],<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> result[])</font></strong>
+<a name="line662">662: </a>{
+<a name="line663">663: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line664">664: </a>  PetscSplitReduction *sr;
+<a name="line665">665: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+<a name="line666">666: </a>  int                 i;
+
+<a name="line669">669: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line670">670: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line671">671: </a>
+<a name="line672">672: </a>  <font color="#4169E1">if</font> (sr-&gt;state != STATE_END) {
+<a name="line673">673: </a>    <font color="#B22222">/* this is the first call to VecxxxEnd() so do the communication */</font>
+<a name="line674">674: </a>    PetscSplitReductionApply(sr);
+<a name="line675">675: </a>  }
+
+<a name="line677">677: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend &gt;= sr-&gt;numopsbegin) {
+<a name="line678">678: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line679">679: </a>  }
+<a name="line680">680: </a>  <font color="#4169E1">if</font> (x &amp;&amp; (void*) x != sr-&gt;invecs[sr-&gt;numopsend]) {
+<a name="line681">681: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line682">682: </a>  }
+<a name="line683">683: </a>  <font color="#4169E1">if</font> (sr-&gt;reducetype[sr-&gt;numopsend] != REDUCE_SUM) {
+<a name="line684">684: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Called <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>() on a reduction started with <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>()"</font>);
+<a name="line685">685: </a>  }
+<a name="line686">686: </a>  <font color="#4169E1">for</font> (i=0;i&lt;nv;i++) {
+<a name="line687">687: </a>    result[i] = sr-&gt;gvalues[sr-&gt;numopsend++];
+<a name="line688">688: </a>  }
+<a name="line689">689: </a>
+<a name="line690">690: </a>  <font color="#B22222">/*</font>
+<a name="line691">691: </a><font color="#B22222">     We are finished getting all the results so reset to no outstanding requests</font>
+<a name="line692">692: </a><font color="#B22222">  */</font>
+<a name="line693">693: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line694">694: </a>    sr-&gt;state        = STATE_BEGIN;
+<a name="line695">695: </a>    sr-&gt;numopsend    = 0;
+<a name="line696">696: </a>    sr-&gt;numopsbegin  = 0;
+<a name="line697">697: </a>  }
+<a name="line698">698: </a>  <font color="#4169E1">return</font>(0);
+<a name="line699">699: </a>}
+
+<a name="line703">703: </a><font color="#B22222">/*@</font>
+<a name="line704">704: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A> - Starts a split phase transpose multiple dot product computation.</font>
+
+<a name="line706">706: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line707">707: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line708">708: </a><font color="#B22222">.  nv - number of vectors</font>
+<a name="line709">709: </a><font color="#B22222">.  y - array of  vectors</font>
+<a name="line710">710: </a><font color="#B22222">-  result - where the result will go (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line712">712: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line714">714: </a><font color="#B22222">   Notes:</font>
+<a name="line715">715: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A>().</font>
+
+<a name="line717">717: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line718">718: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>()</font>
+
+<a name="line720">720: </a><font color="#B22222">@*/</font>
+<a name="line721">721: </a><strong><font color="#4169E1"><a name="VecMTDotBegin"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nv,const <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y[],<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> result[])</font></strong>
+<a name="line722">722: </a>{
+<a name="line723">723: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+<a name="line724">724: </a>  PetscSplitReduction *sr;
+<a name="line725">725: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>            comm;
+<a name="line726">726: </a>  int                 i;
+
+<a name="line729">729: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,&amp;comm);
+<a name="line730">730: </a>  PetscSplitReductionGet(comm,&amp;sr);
+<a name="line731">731: </a>  <font color="#4169E1">if</font> (sr-&gt;state == STATE_END) {
+<a name="line732">732: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ORDER,<font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line733">733: </a>  }
+<a name="line734">734: </a>  <font color="#4169E1">for</font> (i=0;i&lt;nv;i++) {
+<a name="line735">735: </a>    <font color="#4169E1">if</font> (sr-&gt;numopsbegin+i &gt;= sr-&gt;maxops) {
+<a name="line736">736: </a>      PetscSplitReductionExtend(sr);
+<a name="line737">737: </a>    }
+<a name="line738">738: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin+i] = REDUCE_SUM;
+<a name="line739">739: </a>    sr-&gt;invecs[sr-&gt;numopsbegin+i]     = (void*)x;
+<a name="line740">740: </a>  }
+<a name="line741">741: </a>  <font color="#4169E1">if</font> (!x-&gt;ops-&gt;mtdot_local) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Vector does not suppport local mdots"</font>);
+<a name="line742">742: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line743">743: </a>  (*x-&gt;ops-&gt;mdot_local)(x,nv,y,sr-&gt;lvalues+sr-&gt;numopsbegin);
+<a name="line744">744: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(VEC_ReduceArithmetic,0,0,0,0);
+<a name="line745">745: </a>  sr-&gt;numopsbegin += nv;
+<a name="line746">746: </a>  <font color="#4169E1">return</font>(0);
+<a name="line747">747: </a>}
+
+<a name="line751">751: </a><font color="#B22222">/*@</font>
+<a name="line752">752: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A> - Ends a split phase transpose multiple dot product computation.</font>
+
+<a name="line754">754: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line755">755: </a><font color="#B22222">+  x - the first vector (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+<a name="line756">756: </a><font color="#B22222">.  nv - number of vectors</font>
+<a name="line757">757: </a><font color="#B22222">-  y - array of  vectors (can be <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>)</font>
+
+<a name="line759">759: </a><font color="#B22222">   Output Parameters</font>
+<a name="line760">760: </a><font color="#B22222">.  result - where the result will go</font>
+
+<a name="line762">762: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line764">764: </a><font color="#B22222">   Notes:</font>
+<a name="line765">765: </a><font color="#B22222">   Each call to <A href="../../../../docs/manualpages/Vec/VecTDotBegin.html#VecTDotBegin">VecTDotBegin</A>() should be paired with a call to <A href="../../../../docs/manualpages/Vec/VecTDotEnd.html#VecTDotEnd">VecTDotEnd</A>().</font>
+
+<a name="line767">767: </a><font color="#B22222">seealso: <A href="../../../../docs/manualpages/Vec/VecMTDotBegin.html#VecMTDotBegin">VecMTDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormBegin.html#VecNormBegin">VecNormBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecNormEnd.html#VecNormEnd">VecNormEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(), <A href="../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(), <A href="../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(), </font>
+<a name="line768">768: </a><font color="#B22222">         <A href="../../../../docs/manualpages/Vec/VecDotBegin.html#VecDotBegin">VecDotBegin</A>(), <A href="../../../../docs/manualpages/Vec/VecDotEnd.html#VecDotEnd">VecDotEnd</A>(), <A href="../../../../docs/manualpages/Vec/VecMDotBegin.html#VecMDotBegin">VecMDotBegin</A>(), VecMdotEnd()</font>
+<a name="line769">769: </a><font color="#B22222">@*/</font>
+<a name="line770">770: </a><strong><font color="#4169E1"><a name="VecMTDotEnd"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Vec/VecMTDotEnd.html#VecMTDotEnd">VecMTDotEnd</A>(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nv,const <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y[],<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> result[])</font></strong>
+<a name="line771">771: </a>{
+
+<a name="line775">775: </a>  <font color="#B22222">/*</font>
+<a name="line776">776: </a><font color="#B22222">      MTDotEnd() is the same as MDotEnd() so reuse the code</font>
+<a name="line777">777: </a><font color="#B22222">  */</font>
+<a name="line778">778: </a>  <A href="../../../../docs/manualpages/Vec/VecMDotEnd.html#VecMDotEnd">VecMDotEnd</A>(x,nv,y,result);
+<a name="line779">779: </a>  <font color="#4169E1">return</font>(0);
+<a name="line780">780: </a>}
+</pre>
+</body>
+
+</html>

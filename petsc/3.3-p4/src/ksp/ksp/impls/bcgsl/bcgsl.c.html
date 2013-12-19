@@ -1,0 +1,550 @@
+<center><a href="bcgsl.c">Actual source code: bcgsl.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/ksp/impls/bcgsl/bcgsl.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:17:50+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222"> * Implementation of BiCGstab(L) the paper by D.R. Fokkema,</font>
+<a name="line3">  3: </a><font color="#B22222"> * "Enhanced implementation of BiCGStab(L) for solving linear systems</font>
+<a name="line4">  4: </a><font color="#B22222"> * of equations". This uses tricky delayed updating ideas to prevent</font>
+<a name="line5">  5: </a><font color="#B22222"> * round-off buildup.</font>
+<a name="line6">  6: </a><font color="#B22222"> *</font>
+<a name="line7">  7: </a><font color="#B22222"> * This has not been completely cleaned up into PETSc style.</font>
+<a name="line8">  8: </a><font color="#B22222"> *</font>
+<a name="line9">  9: </a><font color="#B22222"> * All the BLAS and LAPACK calls below should be removed and replaced with </font>
+<a name="line10"> 10: </a><font color="#B22222"> * loops and the macros for block solvers converted from LINPACK; there is no way</font>
+<a name="line11"> 11: </a><font color="#B22222"> * calls to BLAS/LAPACK make sense for size 2, 3, 4, etc.</font>
+<a name="line12"> 12: </a><font color="#B22222"> */</font>
+<a name="line13"> 13: </a><font color="#A020F0">#include &lt;petsc-private/kspimpl.h&gt;              </font><font color="#B22222">/*I   "petscksp.h" I*/</font><font color="#A020F0"></font>
+<a name="line14"> 14: </a><font color="#A020F0">#include &lt;../src/ksp/ksp/impls/bcgsl/bcgslimpl.h&gt;</font>
+<a name="line15"> 15: </a><font color="#A020F0">#include &lt;petscblaslapack.h&gt;</font>
+
+
+<a name="line20"> 20: </a><strong><font color="#4169E1"><a name="KSPSolve_BCGSL"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  KSPSolve_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line21"> 21: </a>{
+<a name="line22"> 22: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *) ksp-&gt;data;
+<a name="line23"> 23: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    alpha, beta, omega, sigma;
+<a name="line24"> 24: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    rho0, rho1;
+<a name="line25"> 25: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      kappa0, kappaA, kappa1;
+<a name="line26"> 26: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      ghat;
+<a name="line27"> 27: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      zeta, zeta0, rnmax_computed, rnmax_true, nrm0;
+<a name="line28"> 28: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      bUpdateX;
+<a name="line29"> 29: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       maxit;
+<a name="line30"> 30: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       h, i, j, k, vi, ell;
+<a name="line31"> 31: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBLASInt.html#PetscBLASInt">PetscBLASInt</A>   ldMZ,bierr;
+
+
+<a name="line36"> 36: </a>  <font color="#B22222">/* set up temporary vectors */</font>
+<a name="line37"> 37: </a>  vi = 0;
+<a name="line38"> 38: </a>  ell = bcgsl-&gt;ell;
+<a name="line39"> 39: </a>  bcgsl-&gt;vB    = ksp-&gt;work[vi]; vi++;
+<a name="line40"> 40: </a>  bcgsl-&gt;vRt   = ksp-&gt;work[vi]; vi++;
+<a name="line41"> 41: </a>  bcgsl-&gt;vTm   = ksp-&gt;work[vi]; vi++;
+<a name="line42"> 42: </a>  bcgsl-&gt;vvR   = ksp-&gt;work+vi; vi += ell+1;
+<a name="line43"> 43: </a>  bcgsl-&gt;vvU   = ksp-&gt;work+vi; vi += ell+1;
+<a name="line44"> 44: </a>  bcgsl-&gt;vXr   = ksp-&gt;work[vi]; vi++;
+<a name="line45"> 45: </a>  ldMZ = PetscBLASIntCast(ell+1);
+
+<a name="line47"> 47: </a>  <font color="#B22222">/* Prime the iterative solver */</font>
+<a name="line48"> 48: </a>  <A href="../../../../../docs/manualpages/KSP/KSPInitialResidual.html#KSPInitialResidual">KSPInitialResidual</A>(ksp, VX, VTM, VB, VVR[0], ksp-&gt;vec_rhs);
+<a name="line49"> 49: </a>  <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(VVR[0], <A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, &amp;zeta0);
+<a name="line50"> 50: </a>  rnmax_computed = zeta0;
+<a name="line51"> 51: </a>  rnmax_true = zeta0;
+
+<a name="line53"> 53: </a>  (*ksp-&gt;converged)(ksp, 0, zeta0, &amp;ksp-&gt;reason, ksp-&gt;cnvP);
+<a name="line54"> 54: </a>  <font color="#4169E1">if</font> (ksp-&gt;reason) {
+<a name="line55"> 55: </a>    PetscObjectTakeAccess(ksp);
+<a name="line56"> 56: </a>    ksp-&gt;its   = 0;
+<a name="line57"> 57: </a>    ksp-&gt;rnorm = zeta0;
+<a name="line58"> 58: </a>    PetscObjectGrantAccess(ksp);
+<a name="line59"> 59: </a>    <font color="#4169E1">return</font>(0);
+<a name="line60"> 60: </a>  }
+
+<a name="line62"> 62: </a>  <A href="../../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(VVU[0],0.0);
+<a name="line63"> 63: </a>  alpha = 0.;
+<a name="line64"> 64: </a>  rho0 = omega = 1;
+
+<a name="line66"> 66: </a>  <font color="#4169E1">if</font> (bcgsl-&gt;delta&gt;0.0) {
+<a name="line67"> 67: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(VX, VXR);
+<a name="line68"> 68: </a>    <A href="../../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(VX,0.0);
+<a name="line69"> 69: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(VVR[0], VB);
+<a name="line70"> 70: </a>  } <font color="#4169E1">else</font> {
+<a name="line71"> 71: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(ksp-&gt;vec_rhs, VB);
+<a name="line72"> 72: </a>  }
+
+<a name="line74"> 74: </a>  <font color="#B22222">/* Life goes on */</font>
+<a name="line75"> 75: </a>  <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(VVR[0], VRT);
+<a name="line76"> 76: </a>  zeta = zeta0;
+
+<a name="line78"> 78: </a>  <A href="../../../../../docs/manualpages/KSP/KSPGetTolerances.html#KSPGetTolerances">KSPGetTolerances</A>(ksp, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, &amp;maxit);
+
+<a name="line80"> 80: </a>  <font color="#4169E1">for</font> (k=0; k&lt;maxit; k += bcgsl-&gt;ell) {
+<a name="line81"> 81: </a>    ksp-&gt;its   = k;
+<a name="line82"> 82: </a>    ksp-&gt;rnorm = zeta;
+
+<a name="line84"> 84: </a>    KSPLogResidualHistory(ksp, zeta);
+<a name="line85"> 85: </a>    <A href="../../../../../docs/manualpages/KSP/KSPMonitor.html#KSPMonitor">KSPMonitor</A>(ksp, ksp-&gt;its, zeta);
+
+<a name="line87"> 87: </a>    (*ksp-&gt;converged)(ksp, k, zeta, &amp;ksp-&gt;reason, ksp-&gt;cnvP);
+<a name="line88"> 88: </a>    <font color="#4169E1">if</font> (ksp-&gt;reason &lt; 0) <font color="#4169E1">return</font>(0);
+<a name="line89"> 89: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ksp-&gt;reason) <font color="#4169E1">break</font>;
+
+<a name="line91"> 91: </a>    <font color="#B22222">/* BiCG part */</font>
+<a name="line92"> 92: </a>    rho0 = -omega*rho0;
+<a name="line93"> 93: </a>    nrm0 = zeta;
+<a name="line94"> 94: </a>    <font color="#4169E1">for</font> (j=0; j&lt;bcgsl-&gt;ell; j++) {
+<a name="line95"> 95: </a>      <font color="#B22222">/* rho1 &lt;- r_j' * r_tilde */</font>
+<a name="line96"> 96: </a>      <A href="../../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(VVR[j], VRT, &amp;rho1);
+<a name="line97"> 97: </a>      <font color="#4169E1">if</font> (rho1 == 0.0) {
+<a name="line98"> 98: </a>        ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_BREAKDOWN_BICG.html#KSP_DIVERGED_BREAKDOWN_BICG">KSP_DIVERGED_BREAKDOWN_BICG</A>;
+<a name="line99"> 99: </a>        <font color="#4169E1">return</font>(0);
+<a name="line100">100: </a>      }
+<a name="line101">101: </a>      beta = alpha*(rho1/rho0);
+<a name="line102">102: </a>      rho0 = rho1;
+<a name="line103">103: </a>      <font color="#4169E1">for</font> (i=0; i&lt;=j; i++) {
+<a name="line104">104: </a>        <font color="#B22222">/* u_i &lt;- r_i - beta*u_i */</font>
+<a name="line105">105: </a>        <A href="../../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(VVU[i], -beta, VVR[i]);
+<a name="line106">106: </a>      }
+<a name="line107">107: </a>      <font color="#B22222">/* u_{j+1} &lt;- inv(K)*A*u_j */</font>
+<a name="line108">108: </a>      KSP_PCApplyBAorAB(ksp, VVU[j], VVU[j+1], VTM);
+
+<a name="line110">110: </a>      <A href="../../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(VVU[j+1], VRT, &amp;sigma);
+<a name="line111">111: </a>      <font color="#4169E1">if</font> (sigma == 0.0) {
+<a name="line112">112: </a>        ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_BREAKDOWN_BICG.html#KSP_DIVERGED_BREAKDOWN_BICG">KSP_DIVERGED_BREAKDOWN_BICG</A>;
+<a name="line113">113: </a>        <font color="#4169E1">return</font>(0);
+<a name="line114">114: </a>      }
+<a name="line115">115: </a>      alpha = rho1/sigma;
+
+<a name="line117">117: </a>      <font color="#B22222">/* x &lt;- x + alpha*u_0 */</font>
+<a name="line118">118: </a>      <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(VX, alpha, VVU[0]);
+
+<a name="line120">120: </a>      <font color="#4169E1">for</font> (i=0; i&lt;=j; i++) {
+<a name="line121">121: </a>        <font color="#B22222">/* r_i &lt;- r_i - alpha*u_{i+1} */</font>
+<a name="line122">122: </a>        <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(VVR[i], -alpha, VVU[i+1]);
+<a name="line123">123: </a>      }
+
+<a name="line125">125: </a>      <font color="#B22222">/* r_{j+1} &lt;- inv(K)*A*r_j */</font>
+<a name="line126">126: </a>      KSP_PCApplyBAorAB(ksp, VVR[j], VVR[j+1], VTM);
+
+<a name="line128">128: </a>      <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(VVR[0], <A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, &amp;nrm0);
+<a name="line129">129: </a>      <font color="#4169E1">if</font> (bcgsl-&gt;delta&gt;0.0) {
+<a name="line130">130: </a>        <font color="#4169E1">if</font> (rnmax_computed&lt;nrm0) rnmax_computed = nrm0;
+<a name="line131">131: </a>        <font color="#4169E1">if</font> (rnmax_true&lt;nrm0) rnmax_true = nrm0;
+<a name="line132">132: </a>      }
+
+<a name="line134">134: </a>      <font color="#B22222">/* NEW: check for early exit */</font>
+<a name="line135">135: </a>      (*ksp-&gt;converged)(ksp, k+j, nrm0, &amp;ksp-&gt;reason, ksp-&gt;cnvP);
+<a name="line136">136: </a>      <font color="#4169E1">if</font> (ksp-&gt;reason) {
+<a name="line137">137: </a>        PetscObjectTakeAccess(ksp);
+<a name="line138">138: </a>        ksp-&gt;its   = k+j;
+<a name="line139">139: </a>        ksp-&gt;rnorm = nrm0;
+<a name="line140">140: </a>        PetscObjectGrantAccess(ksp);
+<a name="line141">141: </a>        <font color="#4169E1">if</font> (ksp-&gt;reason &lt; 0) <font color="#4169E1">return</font>(0);
+<a name="line142">142: </a>      }
+<a name="line143">143: </a>    }
+
+<a name="line145">145: </a>    <font color="#B22222">/* Polynomial part */</font>
+<a name="line146">146: </a>    <font color="#4169E1">for</font>(i = 0; i &lt;= bcgsl-&gt;ell; ++i) {
+<a name="line147">147: </a>      <A href="../../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(VVR[i], i+1, VVR, &amp;MZa[i*ldMZ]);
+<a name="line148">148: </a>    }
+<a name="line149">149: </a>    <font color="#B22222">/* Symmetrize MZa */</font>
+<a name="line150">150: </a>    <font color="#4169E1">for</font>(i = 0; i &lt;= bcgsl-&gt;ell; ++i) {
+<a name="line151">151: </a>      <font color="#4169E1">for</font>(j = i+1; j &lt;= bcgsl-&gt;ell; ++j) {
+<a name="line152">152: </a>        MZa[i*ldMZ+j] = MZa[j*ldMZ+i] = PetscConj(MZa[j*ldMZ+i]);
+<a name="line153">153: </a>      }
+<a name="line154">154: </a>    }
+<a name="line155">155: </a>    <font color="#B22222">/* Copy MZa to MZb */</font>
+<a name="line156">156: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(MZb,MZa,ldMZ*ldMZ*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+
+<a name="line158">158: </a>    <font color="#4169E1">if</font> (!bcgsl-&gt;bConvex || bcgsl-&gt;ell==1) {
+<a name="line159">159: </a>      <A href="../../../../../docs/manualpages/Sys/PetscBLASInt.html#PetscBLASInt">PetscBLASInt</A> ione = 1,bell = PetscBLASIntCast(bcgsl-&gt;ell);
+
+<a name="line161">161: </a>      AY0c[0] = -1;
+<a name="line162">162: </a><font color="#A020F0">#if defined(PETSC_MISSING_LAPACK_POTRF)</font>
+<a name="line163">163: </a>  <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"POTRF - Lapack routine is unavailable."</font>);
+<a name="line164">164: </a><font color="#A020F0">#else</font>
+<a name="line165">165: </a>      LAPACKpotrf_(<font color="#666666">"Lower"</font>, &amp;bell, &amp;MZa[1+ldMZ], &amp;ldMZ, &amp;bierr);
+<a name="line166">166: </a><font color="#A020F0">#endif</font>
+<a name="line167">167: </a>      <font color="#4169E1">if</font> (ierr!=0) {
+<a name="line168">168: </a>        ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html#KSP_DIVERGED_BREAKDOWN">KSP_DIVERGED_BREAKDOWN</A>;
+<a name="line169">169: </a>        <font color="#4169E1">return</font>(0);
+<a name="line170">170: </a>      }
+<a name="line171">171: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(&amp;AY0c[1],&amp;MZb[1],bcgsl-&gt;ell*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line172">172: </a>      LAPACKpotrs_(<font color="#666666">"Lower"</font>, &amp;bell, &amp;ione, &amp;MZa[1+ldMZ], &amp;ldMZ, &amp;AY0c[1], &amp;ldMZ, &amp;bierr);
+<a name="line173">173: </a>    } <font color="#4169E1">else</font> {
+<a name="line174">174: </a>      <A href="../../../../../docs/manualpages/Sys/PetscBLASInt.html#PetscBLASInt">PetscBLASInt</A> ione = 1;
+<a name="line175">175: </a>      <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> aone = 1.0, azero = 0.0;
+<a name="line176">176: </a>      <A href="../../../../../docs/manualpages/Sys/PetscBLASInt.html#PetscBLASInt">PetscBLASInt</A> neqs = PetscBLASIntCast(bcgsl-&gt;ell-1);
+
+<a name="line178">178: </a><font color="#A020F0">#if defined(PETSC_MISSING_LAPACK_POTRF)</font>
+<a name="line179">179: </a>  <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"POTRF - Lapack routine is unavailable."</font>);
+<a name="line180">180: </a><font color="#A020F0">#else</font>
+<a name="line181">181: </a>      LAPACKpotrf_(<font color="#666666">"Lower"</font>, &amp;neqs, &amp;MZa[1+ldMZ], &amp;ldMZ, &amp;bierr);
+<a name="line182">182: </a><font color="#A020F0">#endif</font>
+<a name="line183">183: </a>      <font color="#4169E1">if</font> (ierr!=0) {
+<a name="line184">184: </a>        ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html#KSP_DIVERGED_BREAKDOWN">KSP_DIVERGED_BREAKDOWN</A>;
+<a name="line185">185: </a>        <font color="#4169E1">return</font>(0);
+<a name="line186">186: </a>      }
+<a name="line187">187: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(&amp;AY0c[1],&amp;MZb[1],(bcgsl-&gt;ell-1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line188">188: </a>      LAPACKpotrs_(<font color="#666666">"Lower"</font>, &amp;neqs, &amp;ione, &amp;MZa[1+ldMZ], &amp;ldMZ, &amp;AY0c[1], &amp;ldMZ, &amp;bierr);
+<a name="line189">189: </a>      AY0c[0] = -1;
+<a name="line190">190: </a>      AY0c[bcgsl-&gt;ell] = 0.;
+
+<a name="line192">192: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(&amp;AYlc[1],&amp;MZb[1+ldMZ*(bcgsl-&gt;ell)],(bcgsl-&gt;ell-1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line193">193: </a>      LAPACKpotrs_(<font color="#666666">"Lower"</font>, &amp;neqs, &amp;ione, &amp;MZa[1+ldMZ], &amp;ldMZ, &amp;AYlc[1], &amp;ldMZ, &amp;bierr);
+
+<a name="line195">195: </a>      AYlc[0] = 0.;
+<a name="line196">196: </a>      AYlc[bcgsl-&gt;ell] = -1;
+
+<a name="line198">198: </a>      BLASgemv_(<font color="#666666">"NoTr"</font>, &amp;ldMZ, &amp;ldMZ, &amp;aone, MZb, &amp;ldMZ, AY0c, &amp;ione, &amp;azero, AYtc, &amp;ione);
+
+<a name="line200">200: </a>      kappa0 = PetscRealPart(BLASdot_(&amp;ldMZ, AY0c, &amp;ione, AYtc, &amp;ione));
+
+<a name="line202">202: </a>      <font color="#B22222">/* round-off can cause negative kappa's */</font>
+<a name="line203">203: </a>      <font color="#4169E1">if</font> (kappa0&lt;0) kappa0 = -kappa0;
+<a name="line204">204: </a>      kappa0 = PetscSqrtReal(kappa0);
+
+<a name="line206">206: </a>      kappaA = PetscRealPart(BLASdot_(&amp;ldMZ, AYlc, &amp;ione, AYtc, &amp;ione));
+
+<a name="line208">208: </a>      BLASgemv_(<font color="#666666">"noTr"</font>, &amp;ldMZ, &amp;ldMZ, &amp;aone, MZb, &amp;ldMZ, AYlc, &amp;ione, &amp;azero, AYtc, &amp;ione);
+
+<a name="line210">210: </a>      kappa1 = PetscRealPart(BLASdot_(&amp;ldMZ, AYlc, &amp;ione, AYtc, &amp;ione));
+
+<a name="line212">212: </a>      <font color="#4169E1">if</font> (kappa1&lt;0) kappa1 = -kappa1;
+<a name="line213">213: </a>      kappa1 = PetscSqrtReal(kappa1);
+
+<a name="line215">215: </a>      <font color="#4169E1">if</font> (kappa0!=0.0 &amp;&amp; kappa1!=0.0) {
+<a name="line216">216: </a>        <font color="#4169E1">if</font> (kappaA&lt;0.7*kappa0*kappa1) {
+<a name="line217">217: </a>          ghat = (kappaA&lt;0.0) ?  -0.7*kappa0/kappa1 : 0.7*kappa0/kappa1;
+<a name="line218">218: </a>        } <font color="#4169E1">else</font> {
+<a name="line219">219: </a>          ghat = kappaA/(kappa1*kappa1);
+<a name="line220">220: </a>        }
+<a name="line221">221: </a>        <font color="#4169E1">for</font> (i=0; i&lt;=bcgsl-&gt;ell; i++) {
+<a name="line222">222: </a>          AY0c[i] = AY0c[i] - ghat* AYlc[i];
+<a name="line223">223: </a>        }
+<a name="line224">224: </a>      }
+<a name="line225">225: </a>    }
+
+<a name="line227">227: </a>    omega = AY0c[bcgsl-&gt;ell];
+<a name="line228">228: </a>    <font color="#4169E1">for</font> (h=bcgsl-&gt;ell; h&gt;0 &amp;&amp; omega==0.0; h--) {
+<a name="line229">229: </a>      omega = AY0c[h];
+<a name="line230">230: </a>    }
+<a name="line231">231: </a>    <font color="#4169E1">if</font> (omega==0.0) {
+<a name="line232">232: </a>      ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html#KSP_DIVERGED_BREAKDOWN">KSP_DIVERGED_BREAKDOWN</A>;
+<a name="line233">233: </a>      <font color="#4169E1">return</font>(0);
+<a name="line234">234: </a>    }
+
+
+<a name="line237">237: </a>    <A href="../../../../../docs/manualpages/Vec/VecMAXPY.html#VecMAXPY">VecMAXPY</A>(VX, bcgsl-&gt;ell,AY0c+1, VVR);
+<a name="line238">238: </a>    <font color="#4169E1">for</font> (i=1; i&lt;=bcgsl-&gt;ell; i++) {
+<a name="line239">239: </a>      AY0c[i] *= -1.0;
+<a name="line240">240: </a>    }
+<a name="line241">241: </a>    <A href="../../../../../docs/manualpages/Vec/VecMAXPY.html#VecMAXPY">VecMAXPY</A>(VVU[0], bcgsl-&gt;ell,AY0c+1, VVU+1);
+<a name="line242">242: </a>    <A href="../../../../../docs/manualpages/Vec/VecMAXPY.html#VecMAXPY">VecMAXPY</A>(VVR[0], bcgsl-&gt;ell,AY0c+1, VVR+1);
+<a name="line243">243: </a>    <font color="#4169E1">for</font> (i=1; i&lt;=bcgsl-&gt;ell; i++) {
+<a name="line244">244: </a>      AY0c[i] *= -1.0;
+<a name="line245">245: </a>    }
+<a name="line246">246: </a>    <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(VVR[0], <A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, &amp;zeta);
+
+<a name="line248">248: </a>    <font color="#B22222">/* Accurate Update */</font>
+<a name="line249">249: </a>    <font color="#4169E1">if</font> (bcgsl-&gt;delta&gt;0.0) {
+<a name="line250">250: </a>      <font color="#4169E1">if</font> (rnmax_computed&lt;zeta) rnmax_computed = zeta;
+<a name="line251">251: </a>      <font color="#4169E1">if</font> (rnmax_true&lt;zeta) rnmax_true = zeta;
+
+<a name="line253">253: </a>      bUpdateX = (<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>) (zeta&lt;bcgsl-&gt;delta*zeta0 &amp;&amp; zeta0&lt;=rnmax_computed);
+<a name="line254">254: </a>      <font color="#4169E1">if</font> ((zeta&lt;bcgsl-&gt;delta*rnmax_true &amp;&amp; zeta0&lt;=rnmax_true) || bUpdateX) {
+<a name="line255">255: </a>        <font color="#B22222">/* r0 &lt;- b-inv(K)*A*X */</font>
+<a name="line256">256: </a>        KSP_PCApplyBAorAB(ksp, VX, VVR[0], VTM);
+<a name="line257">257: </a>        <A href="../../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(VVR[0], -1.0, VB);
+<a name="line258">258: </a>        rnmax_true = zeta;
+
+<a name="line260">260: </a>        <font color="#4169E1">if</font> (bUpdateX) {
+<a name="line261">261: </a>          <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(VXR,1.0,VX);
+<a name="line262">262: </a>          <A href="../../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(VX,0.0);
+<a name="line263">263: </a>          <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(VVR[0], VB);
+<a name="line264">264: </a>          rnmax_computed = zeta;
+<a name="line265">265: </a>        }
+<a name="line266">266: </a>      }
+<a name="line267">267: </a>    }
+<a name="line268">268: </a>  }
+<a name="line269">269: </a>  <font color="#4169E1">if</font> (bcgsl-&gt;delta&gt;0.0) {
+<a name="line270">270: </a>    <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(VX,1.0,VXR);
+<a name="line271">271: </a>  }
+
+<a name="line273">273: </a>  (*ksp-&gt;converged)(ksp, k, zeta, &amp;ksp-&gt;reason, ksp-&gt;cnvP);
+<a name="line274">274: </a>  <font color="#4169E1">if</font> (!ksp-&gt;reason) ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_ITS.html#KSP_DIVERGED_ITS">KSP_DIVERGED_ITS</A>;
+<a name="line275">275: </a>  <font color="#4169E1">return</font>(0);
+<a name="line276">276: </a>}
+
+<a name="line280">280: </a><font color="#B22222">/*@</font>
+<a name="line281">281: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A> - Sets the parameter governing when</font>
+<a name="line282">282: </a><font color="#B22222">   exact residuals will be used instead of computed residuals.</font>
+
+<a name="line284">284: </a><font color="#B22222">   Logically Collective on <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A></font>
+
+<a name="line286">286: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line287">287: </a><font color="#B22222">+  ksp - iterative context obtained from <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A></font>
+<a name="line288">288: </a><font color="#B22222">-  delta - computed residuals are used alone when delta is not positive</font>
+
+<a name="line290">290: </a><font color="#B22222">   Options Database Keys:</font>
+
+<a name="line292">292: </a><font color="#B22222">.  -ksp_bcgsl_xres delta</font>
+
+<a name="line294">294: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line296">296: </a><font color="#B22222">.keywords: <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>, BiCGStab(L), set, exact residuals</font>
+
+<a name="line298">298: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>(), <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>()</font>
+<a name="line299">299: </a><font color="#B22222">@*/</font>
+<a name="line300">300: </a><strong><font color="#4169E1"><a name="KSPBCGSLSetXRes"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A>(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta)</font></strong>
+<a name="line301">301: </a>{
+<a name="line302">302: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+
+<a name="line307">307: </a>  <font color="#4169E1">if</font> (ksp-&gt;setupstage) {
+<a name="line308">308: </a>    <font color="#4169E1">if</font> ((delta&lt;=0 &amp;&amp; bcgsl-&gt;delta&gt;0) || (delta&gt;0 &amp;&amp; bcgsl-&gt;delta&lt;=0)) {
+<a name="line309">309: </a>      <A href="../../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>(ksp-&gt;nwork,&amp;ksp-&gt;work);
+<a name="line310">310: </a>      <A href="../../../../../docs/manualpages/Sys/PetscFree5.html#PetscFree5">PetscFree5</A>(AY0c,AYlc,AYtc,MZa,MZb);
+<a name="line311">311: </a>      ksp-&gt;setupstage = KSP_SETUP_NEW;
+<a name="line312">312: </a>    }
+<a name="line313">313: </a>  }
+<a name="line314">314: </a>  bcgsl-&gt;delta = delta;
+<a name="line315">315: </a>  <font color="#4169E1">return</font>(0);
+<a name="line316">316: </a>}
+
+<a name="line320">320: </a><font color="#B22222">/*@</font>
+<a name="line321">321: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A> - Sets the type of polynomial part will</font>
+<a name="line322">322: </a><font color="#B22222">   be used in the BiCGSTab(L) solver.</font>
+
+<a name="line324">324: </a><font color="#B22222">   Logically Collective on <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A></font>
+
+<a name="line326">326: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line327">327: </a><font color="#B22222">+  ksp - iterative context obtained from <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A></font>
+<a name="line328">328: </a><font color="#B22222">-  uMROR - set to <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> when the polynomial is a convex combination of an MR and an OR step.</font>
+
+<a name="line330">330: </a><font color="#B22222">   Options Database Keys:</font>
+
+<a name="line332">332: </a><font color="#B22222">+  -ksp_bcgsl_cxpoly - use enhanced polynomial</font>
+<a name="line333">333: </a><font color="#B22222">.  -ksp_bcgsl_mrpoly - use standard polynomial</font>
+
+<a name="line335">335: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line337">337: </a><font color="#B22222">.keywords: <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>, BiCGStab(L), set, polynomial</font>
+
+<a name="line339">339: </a><font color="#B22222">.seealso: @()</font>
+<a name="line340">340: </a><font color="#B22222">@*/</font>
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="KSPBCGSLSetPol"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  uMROR)</font></strong>
+<a name="line342">342: </a>{
+<a name="line343">343: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+
+
+<a name="line349">349: </a>  <font color="#4169E1">if</font> (!ksp-&gt;setupstage) {
+<a name="line350">350: </a>    bcgsl-&gt;bConvex = uMROR;
+<a name="line351">351: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (bcgsl-&gt;bConvex != uMROR) {
+<a name="line352">352: </a>    <font color="#B22222">/* free the data structures,</font>
+<a name="line353">353: </a><font color="#B22222">       then create them again</font>
+<a name="line354">354: </a><font color="#B22222">     */</font>
+<a name="line355">355: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>(ksp-&gt;nwork,&amp;ksp-&gt;work);
+<a name="line356">356: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree5.html#PetscFree5">PetscFree5</A>(AY0c,AYlc,AYtc,MZa,MZb);
+<a name="line357">357: </a>    bcgsl-&gt;bConvex = uMROR;
+<a name="line358">358: </a>    ksp-&gt;setupstage = KSP_SETUP_NEW;
+<a name="line359">359: </a>  }
+<a name="line360">360: </a>  <font color="#4169E1">return</font>(0);
+<a name="line361">361: </a>}
+
+<a name="line365">365: </a><font color="#B22222">/*@</font>
+<a name="line366">366: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A> - Sets the number of search directions in BiCGStab(L).</font>
+
+<a name="line368">368: </a><font color="#B22222">   Logically Collective on <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A></font>
+
+<a name="line370">370: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line371">371: </a><font color="#B22222">+  ksp - iterative context obtained from <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A></font>
+<a name="line372">372: </a><font color="#B22222">-  ell - number of search directions</font>
+
+<a name="line374">374: </a><font color="#B22222">   Options Database Keys:</font>
+
+<a name="line376">376: </a><font color="#B22222">.  -ksp_bcgsl_ell ell</font>
+
+<a name="line378">378: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line380">380: </a><font color="#B22222">.keywords: <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>, BiCGStab(L), set, exact residuals,</font>
+
+<a name="line382">382: </a><font color="#B22222">.seealso: @()</font>
+<a name="line383">383: </a><font color="#B22222">@*/</font>
+<a name="line384">384: </a><strong><font color="#4169E1"><a name="KSPBCGSLSetEll"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ell)</font></strong>
+<a name="line385">385: </a>{
+<a name="line386">386: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+
+<a name="line390">390: </a>  <font color="#4169E1">if</font> (ell &lt; 1) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp)-&gt;comm,PETSC_ERR_ARG_OUTOFRANGE, <font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>: second argument must be positive"</font>);
+
+<a name="line393">393: </a>  <font color="#4169E1">if</font> (!ksp-&gt;setupstage) {
+<a name="line394">394: </a>    bcgsl-&gt;ell = ell;
+<a name="line395">395: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (bcgsl-&gt;ell != ell) {
+<a name="line396">396: </a>    <font color="#B22222">/* free the data structures, then create them again */</font>
+<a name="line397">397: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>(ksp-&gt;nwork,&amp;ksp-&gt;work);
+<a name="line398">398: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree5.html#PetscFree5">PetscFree5</A>(AY0c,AYlc,AYtc,MZa,MZb);
+<a name="line399">399: </a>    bcgsl-&gt;ell = ell;
+<a name="line400">400: </a>    ksp-&gt;setupstage = KSP_SETUP_NEW;
+<a name="line401">401: </a>  }
+<a name="line402">402: </a>  <font color="#4169E1">return</font>(0);
+<a name="line403">403: </a>}
+
+<a name="line407">407: </a><strong><font color="#4169E1"><a name="KSPView_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPView_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp, <A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line408">408: </a>{
+<a name="line409">409: </a>  KSP_BCGSL       *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+<a name="line410">410: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line411">411: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       isascii, isstring;
+
+<a name="line414">414: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer, PETSCVIEWERASCII, &amp;isascii);
+<a name="line415">415: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer, PETSCVIEWERSTRING, &amp;isstring);
+
+<a name="line417">417: </a>  <font color="#4169E1">if</font> (isascii) {
+<a name="line418">418: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"  BCGSL: Ell = %D\n"</font>, bcgsl-&gt;ell);
+<a name="line419">419: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"  BCGSL: Delta = %lg\n"</font>, bcgsl-&gt;delta);
+<a name="line420">420: </a>  } <font color="#4169E1">else</font> {
+<a name="line421">421: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP, <font color="#666666">"Viewer type %s not supported for <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> BCGSL"</font>, ((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer)-&gt;type_name);
+<a name="line422">422: </a>  }
+<a name="line423">423: </a>  <font color="#4169E1">return</font>(0);
+<a name="line424">424: </a>}
+
+<a name="line428">428: </a><strong><font color="#4169E1"><a name="KSPSetFromOptions_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPSetFromOptions_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line429">429: </a>{
+<a name="line430">430: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+<a name="line432">432: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       this_ell;
+<a name="line433">433: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      delta;
+<a name="line434">434: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flga = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>, flg;
+
+<a name="line437">437: </a>  <font color="#B22222">/* <A href="../../../../../docs/manualpages/Sys/PetscOptionsBegin.html#PetscOptionsBegin">PetscOptionsBegin</A>/End are called in <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>. They</font>
+<a name="line438">438: </a><font color="#B22222">     don't need to be called here.</font>
+<a name="line439">439: </a><font color="#B22222">  */</font>
+<a name="line440">440: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> BiCGStab(L) Options"</font>);
+
+<a name="line442">442: </a>  <font color="#B22222">/* Set number of search directions */</font>
+<a name="line443">443: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-ksp_bcgsl_ell"</font>,<font color="#666666">"Number of Krylov search directions"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>"</font>,bcgsl-&gt;ell,&amp;this_ell,&amp;flg);
+<a name="line444">444: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line445">445: </a>    <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>(ksp, this_ell);
+<a name="line446">446: </a>  }
+
+<a name="line448">448: </a>  <font color="#B22222">/* Set polynomial type */</font>
+<a name="line449">449: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ksp_bcgsl_cxpoly"</font>, <font color="#666666">"Polynomial part of BiCGStabL is MinRes + OR"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>"</font>, flga,&amp;flga,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line450">450: </a>  <font color="#4169E1">if</font> (flga) {
+<a name="line451">451: </a>    <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>(ksp, <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+<a name="line452">452: </a>  } <font color="#4169E1">else</font> {
+<a name="line453">453: </a>    flg  = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line454">454: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ksp_bcgsl_mrpoly"</font>, <font color="#666666">"Polynomial part of BiCGStabL is MinRes"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>"</font>, flg,&amp;flg,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line455">455: </a>    <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>(ksp, <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line456">456: </a>  }
+
+<a name="line458">458: </a>  <font color="#B22222">/* Will computed residual be refreshed? */</font>
+<a name="line459">459: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-ksp_bcgsl_xres"</font>, <font color="#666666">"Threshold used to decide when to refresh computed residuals"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A>"</font>, bcgsl-&gt;delta, &amp;delta, &amp;flg);
+<a name="line460">460: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line461">461: </a>    <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A>(ksp, delta);
+<a name="line462">462: </a>  }
+<a name="line463">463: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line464">464: </a>  <font color="#4169E1">return</font>(0);
+<a name="line465">465: </a>}
+
+<a name="line469">469: </a><strong><font color="#4169E1"><a name="KSPSetUp_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPSetUp_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line470">470: </a>{
+<a name="line471">471: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+<a name="line472">472: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ell = bcgsl-&gt;ell,ldMZ = ell+1;
+
+<a name="line476">476: </a>  <font color="#4169E1">if</font> (ksp-&gt;pc_side == PC_SYMMETRIC) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp)-&gt;comm,PETSC_ERR_SUP, <font color="#666666">"no symmetric preconditioning for <A href="../../../../../docs/manualpages/KSP/KSPBCGSL.html#KSPBCGSL">KSPBCGSL</A>"</font>);
+<a name="line477">477: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ksp-&gt;pc_side == PC_RIGHT) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp)-&gt;comm,PETSC_ERR_SUP, <font color="#666666">"no right preconditioning for <A href="../../../../../docs/manualpages/KSP/KSPBCGSL.html#KSPBCGSL">KSPBCGSL</A>"</font>);
+<a name="line478">478: </a>  KSPDefaultGetWork(ksp, 6+2*ell);
+<a name="line479">479: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc5.html#PetscMalloc5">PetscMalloc5</A>(ldMZ,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;AY0c,ldMZ,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;AYlc,ldMZ,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;AYtc,ldMZ*ldMZ,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;MZa,ldMZ*ldMZ,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;MZb);
+<a name="line480">480: </a>  <font color="#4169E1">return</font>(0);
+<a name="line481">481: </a>}
+
+<a name="line485">485: </a><strong><font color="#4169E1"><a name="KSPReset_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPReset_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line486">486: </a>{
+<a name="line487">487: </a>  KSP_BCGSL      *bcgsl = (KSP_BCGSL *)ksp-&gt;data;
+<a name="line490">490: </a>  <A href="../../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>(ksp-&gt;nwork,&amp;ksp-&gt;work);
+<a name="line491">491: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree5.html#PetscFree5">PetscFree5</A>(AY0c,AYlc,AYtc,MZa,MZb);
+<a name="line492">492: </a>  <font color="#4169E1">return</font>(0);
+<a name="line493">493: </a>}
+
+<a name="line497">497: </a><strong><font color="#4169E1"><a name="KSPDestroy_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPDestroy_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line498">498: </a>{
+
+<a name="line502">502: </a>  KSPReset_BCGSL(ksp);
+<a name="line503">503: </a>  KSPDefaultDestroy(ksp);
+<a name="line504">504: </a>  <font color="#4169E1">return</font>(0);
+<a name="line505">505: </a>}
+
+<a name="line507">507: </a><font color="#B22222">/*MC</font>
+<a name="line508">508: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/KSP/KSPBCGSL.html#KSPBCGSL">KSPBCGSL</A> - Implements a slight variant of the Enhanced</font>
+<a name="line509">509: </a><font color="#B22222">                BiCGStab(L) algorithm in (3) and (2).  The variation</font>
+<a name="line510">510: </a><font color="#B22222">                concerns cases when either kappa0**2 or kappa1**2 is</font>
+<a name="line511">511: </a><font color="#B22222">                negative due to round-off. Kappa0 has also been pulled</font>
+<a name="line512">512: </a><font color="#B22222">                out of the denominator in the formula for ghat.</font>
+
+<a name="line514">514: </a><font color="#B22222">    References:</font>
+<a name="line515">515: </a><font color="#B22222">      1. G.L.G. Sleijpen, H.A. van der Vorst, "An overview of</font>
+<a name="line516">516: </a><font color="#B22222">         approaches for the stable computation of hybrid BiCG</font>
+<a name="line517">517: </a><font color="#B22222">         methods", Applied Numerical Mathematics: Transactions</font>
+<a name="line518">518: </a><font color="#B22222">         f IMACS, 19(3), pp 235-54, 1996.</font>
+<a name="line519">519: </a><font color="#B22222">      2. G.L.G. Sleijpen, H.A. van der Vorst, D.R. Fokkema,</font>
+<a name="line520">520: </a><font color="#B22222">         "BiCGStab(L) and other hybrid Bi-CG methods",</font>
+<a name="line521">521: </a><font color="#B22222">          Numerical Algorithms, 7, pp 75-109, 1994.</font>
+<a name="line522">522: </a><font color="#B22222">      3. D.R. Fokkema, "Enhanced implementation of BiCGStab(L)</font>
+<a name="line523">523: </a><font color="#B22222">         for solving linear systems of equations", preprint</font>
+<a name="line524">524: </a><font color="#B22222">         from www.citeseer.com.</font>
+
+<a name="line526">526: </a><font color="#B22222">   Contributed by: Joel M. Malard, email jm.malard@pnl.gov</font>
+
+<a name="line528">528: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line529">529: </a><font color="#B22222">+  -ksp_bcgsl_ell &lt;ell&gt; Number of Krylov search directions, defaults to 2 -- <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>()</font>
+<a name="line530">530: </a><font color="#B22222">.  -ksp_bcgsl_cxpol - Use a convex function of the MinRes and OR polynomials after the BiCG step instead of default MinRes -- <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>()</font>
+<a name="line531">531: </a><font color="#B22222">.  -ksp_bcgsl_mrpoly - Use the default MinRes polynomial after the BiCG step  -- <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetPol.html#KSPBCGSLSetPol">KSPBCGSLSetPol</A>()</font>
+<a name="line532">532: </a><font color="#B22222">-  -ksp_bcgsl_xres &lt;res&gt; Threshold used to decide when to refresh computed residuals -- <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A>()</font>
+
+<a name="line534">534: </a><font color="#B22222">   Notes: Supports left preconditioning only</font>
+
+<a name="line536">536: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line538">538: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(), <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(), <A href="../../../../../docs/manualpages/KSP/KSPType.html#KSPType">KSPType</A> (for list of available types), <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>, <A href="../../../../../docs/manualpages/KSP/KSPFGMRES.html#KSPFGMRES">KSPFGMRES</A>, <A href="../../../../../docs/manualpages/KSP/KSPBCGS.html#KSPBCGS">KSPBCGS</A>, <A href="../../../../../docs/manualpages/KSP/KSPSetPCSide.html#KSPSetPCSide">KSPSetPCSide</A>(), <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetEll.html#KSPBCGSLSetEll">KSPBCGSLSetEll</A>(), <A href="../../../../../docs/manualpages/KSP/KSPBCGSLSetXRes.html#KSPBCGSLSetXRes">KSPBCGSLSetXRes</A>()</font>
+
+<a name="line540">540: </a><font color="#B22222">M*/</font>
+<a name="line541">541: </a>EXTERN_C_BEGIN
+<a name="line544">544: </a><strong><font color="#4169E1"><a name="KSPCreate_BCGSL"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  KSPCreate_BCGSL(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line545">545: </a>{
+<a name="line547">547: </a>  KSP_BCGSL      *bcgsl;
+
+<a name="line550">550: </a>  <font color="#B22222">/* allocate BiCGStab(L) context */</font>
+<a name="line551">551: </a>  <A href="../../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(ksp, KSP_BCGSL, &amp;bcgsl);
+<a name="line552">552: </a>  ksp-&gt;data = (void*)bcgsl;
+
+<a name="line554">554: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A>,PC_LEFT,2);
+<a name="line555">555: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_UNPRECONDITIONED.html#KSP_NORM_UNPRECONDITIONED">KSP_NORM_UNPRECONDITIONED</A>,PC_RIGHT,1);
+
+<a name="line557">557: </a>  ksp-&gt;ops-&gt;setup           = KSPSetUp_BCGSL;
+<a name="line558">558: </a>  ksp-&gt;ops-&gt;solve           = KSPSolve_BCGSL;
+<a name="line559">559: </a>  ksp-&gt;ops-&gt;reset           = KSPReset_BCGSL;
+<a name="line560">560: </a>  ksp-&gt;ops-&gt;destroy         = KSPDestroy_BCGSL;
+<a name="line561">561: </a>  ksp-&gt;ops-&gt;buildsolution   = KSPDefaultBuildSolution;
+<a name="line562">562: </a>  ksp-&gt;ops-&gt;buildresidual   = KSPDefaultBuildResidual;
+<a name="line563">563: </a>  ksp-&gt;ops-&gt;setfromoptions  = KSPSetFromOptions_BCGSL;
+<a name="line564">564: </a>  ksp-&gt;ops-&gt;view            = KSPView_BCGSL;
+
+<a name="line566">566: </a>  <font color="#B22222">/* Let the user redefine the number of directions vectors */</font>
+<a name="line567">567: </a>  bcgsl-&gt;ell = 2;
+
+<a name="line569">569: </a>  <font color="#B22222">/*Choose between a single MR step or an averaged MR/OR */</font>
+<a name="line570">570: </a>  bcgsl-&gt;bConvex = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line572">572: </a>  <font color="#B22222">/* Set the threshold for when exact residuals will be used */</font>
+<a name="line573">573: </a>  bcgsl-&gt;delta = 0.0;
+<a name="line574">574: </a>  <font color="#4169E1">return</font>(0);
+<a name="line575">575: </a>}
+<a name="line576">576: </a>EXTERN_C_END
+
+</pre>
+</body>
+
+</html>

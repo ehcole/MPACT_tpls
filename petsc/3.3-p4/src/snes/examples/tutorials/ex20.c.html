@@ -1,0 +1,1423 @@
+<center><a href="ex20.c">Actual source code: ex20.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/examples/tutorials/ex20.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:22:19+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a>static char help[] =<font color="#666666">"Nonlinear Radiative Transport PDE with multigrid in 3d.\n\</font>
+<a name="line3">  3: </a><font color="#666666">Uses 3-dimensional distributed arrays.\n\</font>
+<a name="line4">  4: </a><font color="#666666">A 3-dim simplified Radiative Transport test problem is used, with analytic Jacobian. \n\</font>
+<a name="line5">  5: </a><font color="#666666">\n\</font>
+<a name="line6">  6: </a><font color="#666666">  Solves the linear systems via multilevel methods \n\</font>
+<a name="line7">  7: </a><font color="#666666">\n\</font>
+<a name="line8">  8: </a><font color="#666666">The command line\n\</font>
+<a name="line9">  9: </a><font color="#666666">options are:\n\</font>
+<a name="line10"> 10: </a><font color="#666666">  -tleft &lt;tl&gt;, where &lt;tl&gt; indicates the left Diriclet BC \n\</font>
+<a name="line11"> 11: </a><font color="#666666">  -tright &lt;tr&gt;, where &lt;tr&gt; indicates the right Diriclet BC \n\</font>
+<a name="line12"> 12: </a><font color="#666666">  -beta &lt;beta&gt;, where &lt;beta&gt; indicates the exponent in T \n\n"</font>;
+
+<a name="line14"> 14: </a><font color="#B22222">/*T</font>
+<a name="line15"> 15: </a><font color="#B22222">   Concepts: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>^solving a system of nonlinear equations</font>
+<a name="line16"> 16: </a><font color="#B22222">   Concepts: DM^using distributed arrays</font>
+<a name="line17"> 17: </a><font color="#B22222">   Concepts: multigrid;</font>
+<a name="line18"> 18: </a><font color="#B22222">   Processors: n</font>
+<a name="line19"> 19: </a><font color="#B22222">T*/</font>
+
+<a name="line21"> 21: </a><font color="#B22222">/*  </font>
+<a name="line22"> 22: </a><font color="#B22222">  </font>
+<a name="line23"> 23: </a><font color="#B22222">    This example models the partial differential equation </font>
+<a name="line24"> 24: </a><font color="#B22222">   </font>
+<a name="line25"> 25: </a><font color="#B22222">         - Div(alpha* T^beta (GRAD T)) = 0.</font>
+<a name="line26"> 26: </a><font color="#B22222">       </font>
+<a name="line27"> 27: </a><font color="#B22222">    where beta = 2.5 and alpha = 1.0</font>
+<a name="line28"> 28: </a><font color="#B22222"> </font>
+<a name="line29"> 29: </a><font color="#B22222">    BC: T_left = 1.0, T_right = 0.1, dT/dn_top = dTdn_bottom = dT/dn_up = dT/dn_down = 0.</font>
+<a name="line30"> 30: </a><font color="#B22222">    </font>
+<a name="line31"> 31: </a><font color="#B22222">    in the unit square, which is uniformly discretized in each of x and </font>
+<a name="line32"> 32: </a><font color="#B22222">    y in this simple encoding.  The degrees of freedom are cell centered.</font>
+<a name="line33"> 33: </a><font color="#B22222"> </font>
+<a name="line34"> 34: </a><font color="#B22222">    A finite volume approximation with the usual 7-point stencil </font>
+<a name="line35"> 35: </a><font color="#B22222">    is used to discretize the boundary value problem to obtain a </font>
+<a name="line36"> 36: </a><font color="#B22222">    nonlinear system of equations. </font>
+
+<a name="line38"> 38: </a><font color="#B22222">    This code was contributed by Nickolas Jovanovic based on ex18.c</font>
+<a name="line39"> 39: </a><font color="#B22222"> </font>
+<a name="line40"> 40: </a><font color="#B22222">*/</font>
+
+<a name="line42"> 42: </a><font color="#A020F0">#include &lt;petscsnes.h&gt;</font>
+<a name="line43"> 43: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+<a name="line44"> 44: </a><font color="#A020F0">#include &lt;petscpcmg.h&gt;</font>
+
+<a name="line46"> 46: </a><font color="#B22222">/* User-defined application context */</font>
+
+<a name="line48"> 48: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line49"> 49: </a>   <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   tleft,tright;  <font color="#B22222">/* Dirichlet boundary conditions */</font>
+<a name="line50"> 50: </a>   <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   beta,bm1,coef; <font color="#B22222">/* nonlinear diffusivity parameterizations */</font>
+<a name="line51"> 51: </a>} AppCtx;
+
+<a name="line53"> 53: </a><strong><font color="#228B22">#define POWFLOP 5 </font><font color="#B22222">/* assume a pow() takes five flops */</font><font color="#228B22"></font></strong>
+
+<a name="line55"> 55: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormInitialGuess(DM,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line56"> 56: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line57"> 57: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormJacobian(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>*,void*)</font></strong>;
+
+<a name="line61"> 61: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line62"> 62: </a>{
+<a name="line63"> 63: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes;
+<a name="line64"> 64: </a>  AppCtx         user;
+<a name="line66"> 66: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       its,lits;
+<a name="line67"> 67: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      litspit;
+<a name="line68"> 68: </a>  DM             da;
+
+<a name="line70"> 70: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,help);
+
+<a name="line72"> 72: </a>  <font color="#B22222">/* set problem parameters */</font>
+<a name="line73"> 73: </a>  user.tleft  = 1.0;
+<a name="line74"> 74: </a>  user.tright = 0.1;
+<a name="line75"> 75: </a>  user.beta   = 2.5;
+<a name="line76"> 76: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-tleft"</font>,&amp;user.tleft,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line77"> 77: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-tright"</font>,&amp;user.tright,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line78"> 78: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-beta"</font>,&amp;user.beta,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line79"> 79: </a>  user.bm1  = user.beta - 1.0;
+<a name="line80"> 80: </a>  user.coef = user.beta/2.0;
+
+<a name="line82"> 82: </a>  <font color="#B22222">/*</font>
+<a name="line83"> 83: </a><font color="#B22222">      Set the DMDA (grid structure) for the grids.</font>
+<a name="line84"> 84: </a><font color="#B22222">  */</font>
+<a name="line85"> 85: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DMDA_BOUNDARY_NONE,DMDA_BOUNDARY_NONE,DMDA_BOUNDARY_NONE,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_STAR.html#DMDA_STENCIL_STAR">DMDA_STENCIL_STAR</A>,-5,-5,-5,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,1,1,0,0,0,&amp;da);
+<a name="line86"> 86: </a>  <A href="../../../../docs/manualpages/DM/DMSetApplicationContext.html#DMSetApplicationContext">DMSetApplicationContext</A>(da,&amp;user);
+
+<a name="line88"> 88: </a>  <font color="#B22222">/*</font>
+<a name="line89"> 89: </a><font color="#B22222">     Create the nonlinear solver</font>
+<a name="line90"> 90: </a><font color="#B22222">  */</font>
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;snes);
+<a name="line92"> 92: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetDM.html#SNESSetDM">SNESSetDM</A>(snes,da);
+<a name="line93"> 93: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(snes,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,FormFunction,&amp;user);
+<a name="line94"> 94: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,FormJacobian,&amp;user);
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(snes);
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/DM/DMSetInitialGuess.html#DMSetInitialGuess">DMSetInitialGuess</A>(da,FormInitialGuess);
+
+<a name="line98"> 98: </a>  <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line99"> 99: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(snes,&amp;its);
+<a name="line100">100: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetLinearSolveIterations.html#SNESGetLinearSolveIterations">SNESGetLinearSolveIterations</A>(snes,&amp;lits);
+<a name="line101">101: </a>  litspit = ((<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)lits)/((<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)its);
+<a name="line102">102: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Number of <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> iterations = %D\n"</font>,its);
+<a name="line103">103: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Number of Linear iterations = %D\n"</font>,lits);
+<a name="line104">104: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Average Linear its / <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> = %e\n"</font>,litspit);
+
+<a name="line106">106: </a>  <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(&amp;snes);
+<a name="line107">107: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;da);
+<a name="line108">108: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+
+<a name="line110">110: </a>  <font color="#4169E1">return</font> 0;
+<a name="line111">111: </a>}
+<a name="line112">112: </a><font color="#B22222">/* --------------------  Form initial approximation ----------------- */</font>
+<a name="line115">115: </a><strong><font color="#4169E1"><a name="FormInitialGuess"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormInitialGuess(DM da,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X)</font></strong>
+<a name="line116">116: </a>{
+<a name="line117">117: </a>  AppCtx         *user;
+<a name="line118">118: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,k,xs,ys,xm,ym,zs,zm;
+<a name="line120">120: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    ***x;
+
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/DM/DMGetApplicationContext.html#DMGetApplicationContext">DMGetApplicationContext</A>(da,&amp;user);
+<a name="line124">124: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,&amp;zs,&amp;xm,&amp;ym,&amp;zm);
+<a name="line125">125: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,X,&amp;x);
+
+<a name="line127">127: </a>  <font color="#B22222">/* Compute initial guess */</font>
+<a name="line128">128: </a>  <font color="#4169E1">for</font> (k=zs; k&lt;zs+zm; k++) {
+<a name="line129">129: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line130">130: </a>      <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line131">131: </a>        x[k][j][i] = user-&gt;tleft;
+<a name="line132">132: </a>      }
+<a name="line133">133: </a>    }
+<a name="line134">134: </a>  }
+<a name="line135">135: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,X,&amp;x);
+<a name="line136">136: </a>  <font color="#4169E1">return</font>(0);
+<a name="line137">137: </a>}
+<a name="line138">138: </a><font color="#B22222">/* --------------------  Evaluate Function F(x) --------------------- */</font>
+<a name="line141">141: </a><strong><font color="#4169E1"><a name="FormFunction"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void* ptr)</font></strong>
+<a name="line142">142: </a>{
+<a name="line143">143: </a>  AppCtx         *user = (AppCtx*)ptr;
+<a name="line145">145: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,k,mx,my,mz,xs,ys,zs,xm,ym,zm;
+<a name="line146">146: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    zero = 0.0,one = 1.0;
+<a name="line147">147: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    hx,hy,hz,hxhydhz,hyhzdhx,hzhxdhy;
+<a name="line148">148: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    t0,tn,ts,te,tw,an,as,ae,aw,dn,ds,de,dw,fn = 0.0,fs = 0.0,fe =0.0,fw = 0.0;
+<a name="line149">149: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    tleft,tright,beta,td,ad,dd,fd=0.0,tu,au,du=0.0,fu=0.0;
+<a name="line150">150: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    ***x,***f;
+<a name="line151">151: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            localX;
+<a name="line152">152: </a>  DM             da;
+
+<a name="line155">155: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;da);
+<a name="line156">156: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(da,&amp;localX);
+<a name="line157">157: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;mx,&amp;my,&amp;mz,0,0,0,0,0,0,0,0,0);
+<a name="line158">158: </a>  hx    = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mx-1);  hy    = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(my-1);  hz = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mz-1);
+<a name="line159">159: </a>  hxhydhz = hx*hy/hz;   hyhzdhx = hy*hz/hx;   hzhxdhy = hz*hx/hy;
+<a name="line160">160: </a>  tleft = user-&gt;tleft;         tright = user-&gt;tright;
+<a name="line161">161: </a>  beta  = user-&gt;beta;
+<a name="line162">162: </a>
+<a name="line163">163: </a>  <font color="#B22222">/* Get ghost points */</font>
+<a name="line164">164: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localX);
+<a name="line165">165: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localX);
+<a name="line166">166: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,&amp;zs,&amp;xm,&amp;ym,&amp;zm);
+<a name="line167">167: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,localX,&amp;x);
+<a name="line168">168: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,F,&amp;f);
+
+<a name="line170">170: </a>  <font color="#B22222">/* Evaluate function */</font>
+<a name="line171">171: </a>  <font color="#4169E1">for</font> (k=zs; k&lt;zs+zm; k++) {
+<a name="line172">172: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line173">173: </a>      <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line174">174: </a>        t0 = x[k][j][i];
+
+<a name="line176">176: </a>        <font color="#4169E1">if</font> (i &gt; 0 &amp;&amp; i &lt; mx-1 &amp;&amp; j &gt; 0 &amp;&amp; j &lt; my-1 &amp;&amp; k &gt; 0 &amp;&amp; k &lt; mz-1) {
+
+<a name="line178">178: </a>            <font color="#B22222">/* general interior volume */</font>
+
+<a name="line180">180: </a>          tw = x[k][j][i-1];
+<a name="line181">181: </a>          aw = 0.5*(t0 + tw);
+<a name="line182">182: </a>          dw = pow(aw,beta);
+<a name="line183">183: </a>          fw = dw*(t0 - tw);
+
+<a name="line185">185: </a>                 te = x[k][j][i+1];
+<a name="line186">186: </a>          ae = 0.5*(t0 + te);
+<a name="line187">187: </a>          de = pow(ae,beta);
+<a name="line188">188: </a>          fe = de*(te - t0);
+
+<a name="line190">190: </a>          ts = x[k][j-1][i];
+<a name="line191">191: </a>          as = 0.5*(t0 + ts);
+<a name="line192">192: </a>          ds = pow(as,beta);
+<a name="line193">193: </a>          fs = ds*(t0 - ts);
+<a name="line194">194: </a>
+<a name="line195">195: </a>          tn = x[k][j+1][i];
+<a name="line196">196: </a>          an = 0.5*(t0 + tn);
+<a name="line197">197: </a>          dn = pow(an,beta);
+<a name="line198">198: </a>          fn = dn*(tn - t0);
+
+<a name="line200">200: </a>          td = x[k-1][j][i];
+<a name="line201">201: </a>          ad = 0.5*(t0 + td);
+<a name="line202">202: </a>          dd = pow(ad,beta);
+<a name="line203">203: </a>          fd = dd*(t0 - td);
+
+<a name="line205">205: </a>          tu = x[k+1][j][i];
+<a name="line206">206: </a>          au = 0.5*(t0 + tu);
+<a name="line207">207: </a>          du = pow(au,beta);
+<a name="line208">208: </a>          fu = du*(tu - t0);
+
+<a name="line210">210: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == 0) {
+
+<a name="line212">212: </a>           <font color="#B22222">/* left-hand (west) boundary */</font>
+<a name="line213">213: </a>          tw = tleft;
+<a name="line214">214: </a>          aw = 0.5*(t0 + tw);
+<a name="line215">215: </a>          dw = pow(aw,beta);
+<a name="line216">216: </a>          fw = dw*(t0 - tw);
+
+<a name="line218">218: </a>          te = x[k][j][i+1];
+<a name="line219">219: </a>          ae = 0.5*(t0 + te);
+<a name="line220">220: </a>          de = pow(ae,beta);
+<a name="line221">221: </a>          fe = de*(te - t0);
+
+<a name="line223">223: </a>          <font color="#4169E1">if</font> (j &gt; 0) {
+<a name="line224">224: </a>            ts = x[k][j-1][i];
+<a name="line225">225: </a>            as = 0.5*(t0 + ts);
+<a name="line226">226: </a>            ds = pow(as,beta);
+<a name="line227">227: </a>            fs = ds*(t0 - ts);
+<a name="line228">228: </a>          } <font color="#4169E1">else</font> {
+<a name="line229">229: </a>             fs = zero;
+<a name="line230">230: </a>          }
+
+<a name="line232">232: </a>          <font color="#4169E1">if</font> (j &lt; my-1) {
+<a name="line233">233: </a>            tn = x[k][j+1][i];
+<a name="line234">234: </a>            an = 0.5*(t0 + tn);
+<a name="line235">235: </a>            dn = pow(an,beta);
+<a name="line236">236: </a>            fn = dn*(tn - t0);
+<a name="line237">237: </a>          } <font color="#4169E1">else</font> {
+<a name="line238">238: </a>            fn = zero;
+<a name="line239">239: </a>             }
+
+<a name="line241">241: </a>          <font color="#4169E1">if</font> (k &gt; 0) {
+<a name="line242">242: </a>            td = x[k-1][j][i];
+<a name="line243">243: </a>            ad = 0.5*(t0 + td);
+<a name="line244">244: </a>            dd = pow(ad,beta);
+<a name="line245">245: </a>            fd = dd*(t0 - td);
+<a name="line246">246: </a>          } <font color="#4169E1">else</font> {
+<a name="line247">247: </a>             fd = zero;
+<a name="line248">248: </a>          }
+
+<a name="line250">250: </a>          <font color="#4169E1">if</font> (k &lt; mz-1) {
+<a name="line251">251: </a>            tu = x[k+1][j][i];
+<a name="line252">252: </a>            au = 0.5*(t0 + tu);
+<a name="line253">253: </a>            du = pow(au,beta);
+<a name="line254">254: </a>            fu = du*(tu - t0);
+<a name="line255">255: </a>          } <font color="#4169E1">else</font> {
+<a name="line256">256: </a>             fu = zero;
+<a name="line257">257: </a>          }
+
+<a name="line259">259: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == mx-1) {
+
+<a name="line261">261: </a>          <font color="#B22222">/* right-hand (east) boundary */</font>
+<a name="line262">262: </a>          tw = x[k][j][i-1];
+<a name="line263">263: </a>          aw = 0.5*(t0 + tw);
+<a name="line264">264: </a>          dw = pow(aw,beta);
+<a name="line265">265: </a>          fw = dw*(t0 - tw);
+<a name="line266">266: </a>
+<a name="line267">267: </a>          te = tright;
+<a name="line268">268: </a>          ae = 0.5*(t0 + te);
+<a name="line269">269: </a>          de = pow(ae,beta);
+<a name="line270">270: </a>          fe = de*(te - t0);
+<a name="line271">271: </a>
+<a name="line272">272: </a>          <font color="#4169E1">if</font> (j &gt; 0) {
+<a name="line273">273: </a>            ts = x[k][j-1][i];
+<a name="line274">274: </a>            as = 0.5*(t0 + ts);
+<a name="line275">275: </a>            ds = pow(as,beta);
+<a name="line276">276: </a>            fs = ds*(t0 - ts);
+<a name="line277">277: </a>          } <font color="#4169E1">else</font> {
+<a name="line278">278: </a>            fs = zero;
+<a name="line279">279: </a>          }
+<a name="line280">280: </a>
+<a name="line281">281: </a>          <font color="#4169E1">if</font> (j &lt; my-1) {
+<a name="line282">282: </a>            tn = x[k][j+1][i];
+<a name="line283">283: </a>            an = 0.5*(t0 + tn);
+<a name="line284">284: </a>            dn = pow(an,beta);
+<a name="line285">285: </a>            fn = dn*(tn - t0);
+<a name="line286">286: </a>          } <font color="#4169E1">else</font> {
+<a name="line287">287: </a>            fn = zero;
+<a name="line288">288: </a>          }
+
+<a name="line290">290: </a>          <font color="#4169E1">if</font> (k &gt; 0) {
+<a name="line291">291: </a>            td = x[k-1][j][i];
+<a name="line292">292: </a>            ad = 0.5*(t0 + td);
+<a name="line293">293: </a>            dd = pow(ad,beta);
+<a name="line294">294: </a>            fd = dd*(t0 - td);
+<a name="line295">295: </a>          } <font color="#4169E1">else</font> {
+<a name="line296">296: </a>             fd = zero;
+<a name="line297">297: </a>          }
+
+<a name="line299">299: </a>          <font color="#4169E1">if</font> (k &lt; mz-1) {
+<a name="line300">300: </a>            tu = x[k+1][j][i];
+<a name="line301">301: </a>            au = 0.5*(t0 + tu);
+<a name="line302">302: </a>            du = pow(au,beta);
+<a name="line303">303: </a>            fu = du*(tu - t0);
+<a name="line304">304: </a>          } <font color="#4169E1">else</font> {
+<a name="line305">305: </a>             fu = zero;
+<a name="line306">306: </a>          }
+
+<a name="line308">308: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == 0) {
+
+<a name="line310">310: </a>          <font color="#B22222">/* bottom (south) boundary, and i &lt;&gt; 0 or mx-1 */</font>
+<a name="line311">311: </a>          tw = x[k][j][i-1];
+<a name="line312">312: </a>          aw = 0.5*(t0 + tw);
+<a name="line313">313: </a>          dw = pow(aw,beta);
+<a name="line314">314: </a>          fw = dw*(t0 - tw);
+
+<a name="line316">316: </a>          te = x[k][j][i+1];
+<a name="line317">317: </a>          ae = 0.5*(t0 + te);
+<a name="line318">318: </a>          de = pow(ae,beta);
+<a name="line319">319: </a>          fe = de*(te - t0);
+
+<a name="line321">321: </a>          fs = zero;
+
+<a name="line323">323: </a>          tn = x[k][j+1][i];
+<a name="line324">324: </a>          an = 0.5*(t0 + tn);
+<a name="line325">325: </a>          dn = pow(an,beta);
+<a name="line326">326: </a>          fn = dn*(tn - t0);
+
+<a name="line328">328: </a>          <font color="#4169E1">if</font> (k &gt; 0) {
+<a name="line329">329: </a>            td = x[k-1][j][i];
+<a name="line330">330: </a>            ad = 0.5*(t0 + td);
+<a name="line331">331: </a>            dd = pow(ad,beta);
+<a name="line332">332: </a>            fd = dd*(t0 - td);
+<a name="line333">333: </a>          } <font color="#4169E1">else</font> {
+<a name="line334">334: </a>             fd = zero;
+<a name="line335">335: </a>          }
+
+<a name="line337">337: </a>          <font color="#4169E1">if</font> (k &lt; mz-1) {
+<a name="line338">338: </a>            tu = x[k+1][j][i];
+<a name="line339">339: </a>            au = 0.5*(t0 + tu);
+<a name="line340">340: </a>            du = pow(au,beta);
+<a name="line341">341: </a>            fu = du*(tu - t0);
+<a name="line342">342: </a>          } <font color="#4169E1">else</font> {
+<a name="line343">343: </a>             fu = zero;
+<a name="line344">344: </a>          }
+
+<a name="line346">346: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == my-1) {
+
+<a name="line348">348: </a>          <font color="#B22222">/* top (north) boundary, and i &lt;&gt; 0 or mx-1 */</font>
+<a name="line349">349: </a>          tw = x[k][j][i-1];
+<a name="line350">350: </a>          aw = 0.5*(t0 + tw);
+<a name="line351">351: </a>          dw = pow(aw,beta);
+<a name="line352">352: </a>          fw = dw*(t0 - tw);
+
+<a name="line354">354: </a>          te = x[k][j][i+1];
+<a name="line355">355: </a>          ae = 0.5*(t0 + te);
+<a name="line356">356: </a>          de = pow(ae,beta);
+<a name="line357">357: </a>          fe = de*(te - t0);
+
+<a name="line359">359: </a>          ts = x[k][j-1][i];
+<a name="line360">360: </a>          as = 0.5*(t0 + ts);
+<a name="line361">361: </a>          ds = pow(as,beta);
+<a name="line362">362: </a>          fs = ds*(t0 - ts);
+
+<a name="line364">364: </a>          fn = zero;
+
+<a name="line366">366: </a>          <font color="#4169E1">if</font> (k &gt; 0) {
+<a name="line367">367: </a>            td = x[k-1][j][i];
+<a name="line368">368: </a>            ad = 0.5*(t0 + td);
+<a name="line369">369: </a>            dd = pow(ad,beta);
+<a name="line370">370: </a>            fd = dd*(t0 - td);
+<a name="line371">371: </a>          } <font color="#4169E1">else</font> {
+<a name="line372">372: </a>             fd = zero;
+<a name="line373">373: </a>          }
+
+<a name="line375">375: </a>          <font color="#4169E1">if</font> (k &lt; mz-1) {
+<a name="line376">376: </a>            tu = x[k+1][j][i];
+<a name="line377">377: </a>            au = 0.5*(t0 + tu);
+<a name="line378">378: </a>            du = pow(au,beta);
+<a name="line379">379: </a>            fu = du*(tu - t0);
+<a name="line380">380: </a>          } <font color="#4169E1">else</font> {
+<a name="line381">381: </a>             fu = zero;
+<a name="line382">382: </a>          }
+
+<a name="line384">384: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line386">386: </a>          <font color="#B22222">/* down boundary (interior only) */</font>
+<a name="line387">387: </a>          tw = x[k][j][i-1];
+<a name="line388">388: </a>          aw = 0.5*(t0 + tw);
+<a name="line389">389: </a>          dw = pow(aw,beta);
+<a name="line390">390: </a>          fw = dw*(t0 - tw);
+
+<a name="line392">392: </a>          te = x[k][j][i+1];
+<a name="line393">393: </a>          ae = 0.5*(t0 + te);
+<a name="line394">394: </a>          de = pow(ae,beta);
+<a name="line395">395: </a>          fe = de*(te - t0);
+
+<a name="line397">397: </a>          ts = x[k][j-1][i];
+<a name="line398">398: </a>          as = 0.5*(t0 + ts);
+<a name="line399">399: </a>          ds = pow(as,beta);
+<a name="line400">400: </a>          fs = ds*(t0 - ts);
+
+<a name="line402">402: </a>          tn = x[k][j+1][i];
+<a name="line403">403: </a>          an = 0.5*(t0 + tn);
+<a name="line404">404: </a>          dn = pow(an,beta);
+<a name="line405">405: </a>          fn = dn*(tn - t0);
+
+<a name="line407">407: </a>           fd = zero;
+
+<a name="line409">409: </a>          tu = x[k+1][j][i];
+<a name="line410">410: </a>          au = 0.5*(t0 + tu);
+<a name="line411">411: </a>          du = pow(au,beta);
+<a name="line412">412: </a>          fu = du*(tu - t0);
+<a name="line413">413: </a>
+<a name="line414">414: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line416">416: </a>          <font color="#B22222">/* up boundary (interior only) */</font>
+<a name="line417">417: </a>          tw = x[k][j][i-1];
+<a name="line418">418: </a>          aw = 0.5*(t0 + tw);
+<a name="line419">419: </a>          dw = pow(aw,beta);
+<a name="line420">420: </a>          fw = dw*(t0 - tw);
+
+<a name="line422">422: </a>          te = x[k][j][i+1];
+<a name="line423">423: </a>          ae = 0.5*(t0 + te);
+<a name="line424">424: </a>          de = pow(ae,beta);
+<a name="line425">425: </a>          fe = de*(te - t0);
+
+<a name="line427">427: </a>          ts = x[k][j-1][i];
+<a name="line428">428: </a>          as = 0.5*(t0 + ts);
+<a name="line429">429: </a>          ds = pow(as,beta);
+<a name="line430">430: </a>          fs = ds*(t0 - ts);
+
+<a name="line432">432: </a>          tn = x[k][j+1][i];
+<a name="line433">433: </a>          an = 0.5*(t0 + tn);
+<a name="line434">434: </a>          dn = pow(an,beta);
+<a name="line435">435: </a>          fn = dn*(tn - t0);
+
+<a name="line437">437: </a>          td = x[k-1][j][i];
+<a name="line438">438: </a>          ad = 0.5*(t0 + td);
+<a name="line439">439: </a>          dd = pow(ad,beta);
+<a name="line440">440: </a>          fd = dd*(t0 - td);
+
+<a name="line442">442: </a>          fu = zero;
+<a name="line443">443: </a>        }
+
+<a name="line445">445: </a>        f[k][j][i] = - hyhzdhx*(fe-fw) - hzhxdhy*(fn-fs) - hxhydhz*(fu-fd);
+<a name="line446">446: </a>      }
+<a name="line447">447: </a>    }
+<a name="line448">448: </a>  }
+<a name="line449">449: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,localX,&amp;x);
+<a name="line450">450: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,F,&amp;f);
+<a name="line451">451: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(da,&amp;localX);
+<a name="line452">452: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>((22.0 + 4.0*POWFLOP)*ym*xm);
+<a name="line453">453: </a>  <font color="#4169E1">return</font>(0);
+<a name="line454">454: </a>}
+<a name="line455">455: </a><font color="#B22222">/* --------------------  Evaluate Jacobian F(x) --------------------- */</font>
+<a name="line458">458: </a><strong><font color="#4169E1"><a name="FormJacobian"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormJacobian(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *J,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *B,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *flg,void *ptr)</font></strong>
+<a name="line459">459: </a>{
+<a name="line460">460: </a>  AppCtx         *user = (AppCtx*)ptr;
+<a name="line462">462: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,k,mx,my,mz,xs,ys,zs,xm,ym,zm;
+<a name="line463">463: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    one = 1.0;
+<a name="line464">464: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    hx,hy,hz,hxhydhz,hyhzdhx,hzhxdhy;
+<a name="line465">465: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    t0,tn,ts,te,tw,an,as,ae,aw,dn,ds,de,dw;
+<a name="line466">466: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    tleft,tright,beta,td,ad,dd,tu,au,du,v[7],bm1,coef;
+<a name="line467">467: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    ***x,bn,bs,be,bw,bu,bd,gn,gs,ge,gw,gu,gd;
+<a name="line468">468: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            localX;
+<a name="line469">469: </a>  <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A>     c[7],row;
+<a name="line470">470: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            jac = *B;
+<a name="line471">471: </a>  DM             da;
+
+<a name="line474">474: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;da);
+<a name="line475">475: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(da,&amp;localX);
+<a name="line476">476: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;mx,&amp;my,&amp;mz,0,0,0,0,0,0,0,0,0);
+<a name="line477">477: </a>  hx    = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mx-1);  hy    = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(my-1);  hz = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mz-1);
+<a name="line478">478: </a>  hxhydhz = hx*hy/hz;   hyhzdhx = hy*hz/hx;   hzhxdhy = hz*hx/hy;
+<a name="line479">479: </a>  tleft = user-&gt;tleft;         tright = user-&gt;tright;
+<a name="line480">480: </a>  beta  = user-&gt;beta;               bm1    = user-&gt;bm1;                coef = user-&gt;coef;
+
+<a name="line482">482: </a>  <font color="#B22222">/* Get ghost points */</font>
+<a name="line483">483: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localX);
+<a name="line484">484: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localX);
+<a name="line485">485: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,&amp;zs,&amp;xm,&amp;ym,&amp;zm);
+<a name="line486">486: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,localX,&amp;x);
+
+<a name="line488">488: </a>  <font color="#B22222">/* Evaluate Jacobian of function */</font>
+<a name="line489">489: </a>  <font color="#4169E1">for</font> (k=zs; k&lt;zs+zm; k++) {
+<a name="line490">490: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line491">491: </a>      <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line492">492: </a>        t0    = x[k][j][i];
+<a name="line493">493: </a>        row.k = k; row.j = j; row.i = i;
+<a name="line494">494: </a>        <font color="#4169E1">if</font> (i &gt; 0 &amp;&amp; i &lt; mx-1 &amp;&amp; j &gt; 0 &amp;&amp; j &lt; my-1 &amp;&amp; k &gt; 0 &amp;&amp; k &lt; mz-1) {
+
+<a name="line496">496: </a>          <font color="#B22222">/* general interior volume */</font>
+
+<a name="line498">498: </a>          tw = x[k][j][i-1];
+<a name="line499">499: </a>          aw = 0.5*(t0 + tw);
+<a name="line500">500: </a>          bw = pow(aw,bm1);
+<a name="line501">501: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line502">502: </a>          dw = pow(aw,beta);
+<a name="line503">503: </a>          gw = coef*bw*(t0 - tw);
+
+<a name="line505">505: </a>          te = x[k][j][i+1];
+<a name="line506">506: </a>          ae = 0.5*(t0 + te);
+<a name="line507">507: </a>          be = pow(ae,bm1);
+<a name="line508">508: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line509">509: </a>          de = pow(ae,beta);
+<a name="line510">510: </a>          ge = coef*be*(te - t0);
+
+<a name="line512">512: </a>          ts = x[k][j-1][i];
+<a name="line513">513: </a>          as = 0.5*(t0 + ts);
+<a name="line514">514: </a>          bs = pow(as,bm1);
+<a name="line515">515: </a>          <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line516">516: </a>          ds = pow(as,beta);
+<a name="line517">517: </a>          gs = coef*bs*(t0 - ts);
+<a name="line518">518: </a>
+<a name="line519">519: </a>          tn = x[k][j+1][i];
+<a name="line520">520: </a>          an = 0.5*(t0 + tn);
+<a name="line521">521: </a>          bn = pow(an,bm1);
+<a name="line522">522: </a>          <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line523">523: </a>          dn = pow(an,beta);
+<a name="line524">524: </a>          gn = coef*bn*(tn - t0);
+
+<a name="line526">526: </a>          td = x[k-1][j][i];
+<a name="line527">527: </a>          ad = 0.5*(t0 + td);
+<a name="line528">528: </a>          bd = pow(ad,bm1);
+<a name="line529">529: </a>          <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line530">530: </a>          dd = pow(ad,beta);
+<a name="line531">531: </a>          gd = coef*bd*(t0 - td);
+<a name="line532">532: </a>
+<a name="line533">533: </a>          tu = x[k+1][j][i];
+<a name="line534">534: </a>          au = 0.5*(t0 + tu);
+<a name="line535">535: </a>          bu = pow(au,bm1);
+<a name="line536">536: </a>          <font color="#B22222">/* du = bu * au; */</font>
+<a name="line537">537: </a>          du = pow(au,beta);
+<a name="line538">538: </a>          gu = coef*bu*(tu - t0);
+
+<a name="line540">540: </a>          c[0].k = k-1; c[0].j = j; c[0].i = i; v[0]   = - hxhydhz*(dd - gd);
+<a name="line541">541: </a>          c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line542">542: </a>          v[1]   = - hzhxdhy*(ds - gs);
+<a name="line543">543: </a>          c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line544">544: </a>          v[2]   = - hyhzdhx*(dw - gw);
+<a name="line545">545: </a>          c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line546">546: </a>          v[3]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line547">547: </a>          c[4].k = k; c[4].j = j; c[4].i = i+1;
+<a name="line548">548: </a>          v[4]   = - hyhzdhx*(de + ge);
+<a name="line549">549: </a>          c[5].k = k; c[5].j = j+1; c[5].i = i;
+<a name="line550">550: </a>          v[5]   = - hzhxdhy*(dn + gn);
+<a name="line551">551: </a>          c[6].k = k+1; c[6].j = j; c[6].i = i;
+<a name="line552">552: </a>          v[6]   = - hxhydhz*(du + gu);
+<a name="line553">553: </a>            <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,7,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line555">555: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == 0) {
+
+<a name="line557">557: </a>          <font color="#B22222">/* left-hand plane boundary */</font>
+<a name="line558">558: </a>          tw = tleft;
+<a name="line559">559: </a>          aw = 0.5*(t0 + tw);
+<a name="line560">560: </a>          bw = pow(aw,bm1);
+<a name="line561">561: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line562">562: </a>          dw = pow(aw,beta);
+<a name="line563">563: </a>          gw = coef*bw*(t0 - tw);
+<a name="line564">564: </a>
+<a name="line565">565: </a>          te = x[k][j][i+1];
+<a name="line566">566: </a>          ae = 0.5*(t0 + te);
+<a name="line567">567: </a>          be = pow(ae,bm1);
+<a name="line568">568: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line569">569: </a>          de = pow(ae,beta);
+<a name="line570">570: </a>          ge = coef*be*(te - t0);
+<a name="line571">571: </a>
+<a name="line572">572: </a>          <font color="#B22222">/* left-hand bottom edge */</font>
+<a name="line573">573: </a>          <font color="#4169E1">if</font> (j == 0) {
+
+<a name="line575">575: </a>            tn = x[k][j+1][i];
+<a name="line576">576: </a>            an = 0.5*(t0 + tn);
+<a name="line577">577: </a>            bn = pow(an,bm1);
+<a name="line578">578: </a>            <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line579">579: </a>            dn = pow(an,beta);
+<a name="line580">580: </a>            gn = coef*bn*(tn - t0);
+<a name="line581">581: </a>
+<a name="line582">582: </a>            <font color="#B22222">/* left-hand bottom down corner */</font>
+<a name="line583">583: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line585">585: </a>              tu = x[k+1][j][i];
+<a name="line586">586: </a>              au = 0.5*(t0 + tu);
+<a name="line587">587: </a>              bu = pow(au,bm1);
+<a name="line588">588: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line589">589: </a>              du = pow(au,beta);
+<a name="line590">590: </a>              gu = coef*bu*(tu - t0);
+<a name="line591">591: </a>
+<a name="line592">592: </a>              c[0].k = k; c[0].j = j; c[0].i = i;
+<a name="line593">593: </a>              v[0]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line594">594: </a>              c[1].k = k; c[1].j = j; c[1].i = i+1;
+<a name="line595">595: </a>              v[1]   = - hyhzdhx*(de + ge);
+<a name="line596">596: </a>              c[2].k = k; c[2].j = j+1; c[2].i = i;
+<a name="line597">597: </a>              v[2]   = - hzhxdhy*(dn + gn);
+<a name="line598">598: </a>              c[3].k = k+1; c[3].j = j; c[3].i = i;
+<a name="line599">599: </a>              v[3]   = - hxhydhz*(du + gu);
+<a name="line600">600: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line602">602: </a>            <font color="#B22222">/* left-hand bottom interior edge */</font>
+<a name="line603">603: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k &lt; mz-1) {
+
+<a name="line605">605: </a>              tu = x[k+1][j][i];
+<a name="line606">606: </a>              au = 0.5*(t0 + tu);
+<a name="line607">607: </a>              bu = pow(au,bm1);
+<a name="line608">608: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line609">609: </a>              du = pow(au,beta);
+<a name="line610">610: </a>              gu = coef*bu*(tu - t0);
+<a name="line611">611: </a>
+<a name="line612">612: </a>              td = x[k-1][j][i];
+<a name="line613">613: </a>              ad = 0.5*(t0 + td);
+<a name="line614">614: </a>              bd = pow(ad,bm1);
+<a name="line615">615: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line616">616: </a>              dd = pow(ad,beta);
+<a name="line617">617: </a>              gd = coef*bd*(td - t0);
+<a name="line618">618: </a>
+<a name="line619">619: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line620">620: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line621">621: </a>              c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line622">622: </a>              v[1]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line623">623: </a>              c[2].k = k; c[2].j = j; c[2].i = i+1;
+<a name="line624">624: </a>              v[2]   = - hyhzdhx*(de + ge);
+<a name="line625">625: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line626">626: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line627">627: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line628">628: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line629">629: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line631">631: </a>            <font color="#B22222">/* left-hand bottom up corner */</font>
+<a name="line632">632: </a>            } <font color="#4169E1">else</font> {
+
+<a name="line634">634: </a>              td = x[k-1][j][i];
+<a name="line635">635: </a>              ad = 0.5*(t0 + td);
+<a name="line636">636: </a>              bd = pow(ad,bm1);
+<a name="line637">637: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line638">638: </a>              dd = pow(ad,beta);
+<a name="line639">639: </a>              gd = coef*bd*(td - t0);
+<a name="line640">640: </a>
+<a name="line641">641: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line642">642: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line643">643: </a>              c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line644">644: </a>              v[1]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line645">645: </a>              c[2].k = k; c[2].j = j; c[2].i = i+1;
+<a name="line646">646: </a>              v[2]   = - hyhzdhx*(de + ge);
+<a name="line647">647: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line648">648: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line649">649: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line650">650: </a>            }
+
+<a name="line652">652: </a>          <font color="#B22222">/* left-hand top edge */</font>
+<a name="line653">653: </a>          } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == my-1) {
+
+<a name="line655">655: </a>            ts = x[k][j-1][i];
+<a name="line656">656: </a>            as = 0.5*(t0 + ts);
+<a name="line657">657: </a>            bs = pow(as,bm1);
+<a name="line658">658: </a>            <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line659">659: </a>            ds = pow(as,beta);
+<a name="line660">660: </a>            gs = coef*bs*(ts - t0);
+<a name="line661">661: </a>
+<a name="line662">662: </a>            <font color="#B22222">/* left-hand top down corner */</font>
+<a name="line663">663: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line665">665: </a>              tu = x[k+1][j][i];
+<a name="line666">666: </a>              au = 0.5*(t0 + tu);
+<a name="line667">667: </a>              bu = pow(au,bm1);
+<a name="line668">668: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line669">669: </a>              du = pow(au,beta);
+<a name="line670">670: </a>              gu = coef*bu*(tu - t0);
+<a name="line671">671: </a>
+<a name="line672">672: </a>              c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line673">673: </a>              v[0]   = - hzhxdhy*(ds - gs);
+<a name="line674">674: </a>              c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line675">675: </a>              v[1]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line676">676: </a>              c[2].k = k; c[2].j = j; c[2].i = i+1;
+<a name="line677">677: </a>              v[2]   = - hyhzdhx*(de + ge);
+<a name="line678">678: </a>              c[3].k = k+1; c[3].j = j; c[3].i = i;
+<a name="line679">679: </a>              v[3]   = - hxhydhz*(du + gu);
+<a name="line680">680: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line682">682: </a>            <font color="#B22222">/* left-hand top interior edge */</font>
+<a name="line683">683: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k &lt; mz-1) {
+
+<a name="line685">685: </a>              tu = x[k+1][j][i];
+<a name="line686">686: </a>              au = 0.5*(t0 + tu);
+<a name="line687">687: </a>              bu = pow(au,bm1);
+<a name="line688">688: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line689">689: </a>              du = pow(au,beta);
+<a name="line690">690: </a>              gu = coef*bu*(tu - t0);
+<a name="line691">691: </a>
+<a name="line692">692: </a>              td = x[k-1][j][i];
+<a name="line693">693: </a>              ad = 0.5*(t0 + td);
+<a name="line694">694: </a>              bd = pow(ad,bm1);
+<a name="line695">695: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line696">696: </a>              dd = pow(ad,beta);
+<a name="line697">697: </a>              gd = coef*bd*(td - t0);
+<a name="line698">698: </a>
+<a name="line699">699: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line700">700: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line701">701: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line702">702: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line703">703: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line704">704: </a>              v[2]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line705">705: </a>              c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line706">706: </a>              v[3]   = - hyhzdhx*(de + ge);
+<a name="line707">707: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line708">708: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line709">709: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line711">711: </a>            <font color="#B22222">/* left-hand top up corner */</font>
+<a name="line712">712: </a>            } <font color="#4169E1">else</font> {
+
+<a name="line714">714: </a>              td = x[k-1][j][i];
+<a name="line715">715: </a>              ad = 0.5*(t0 + td);
+<a name="line716">716: </a>              bd = pow(ad,bm1);
+<a name="line717">717: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line718">718: </a>              dd = pow(ad,beta);
+<a name="line719">719: </a>              gd = coef*bd*(td - t0);
+<a name="line720">720: </a>
+<a name="line721">721: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line722">722: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line723">723: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line724">724: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line725">725: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line726">726: </a>              v[2]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line727">727: </a>              c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line728">728: </a>              v[3]   = - hyhzdhx*(de + ge);
+<a name="line729">729: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line730">730: </a>            }
+
+<a name="line732">732: </a>          } <font color="#4169E1">else</font> {
+
+<a name="line734">734: </a>            ts = x[k][j-1][i];
+<a name="line735">735: </a>            as = 0.5*(t0 + ts);
+<a name="line736">736: </a>            bs = pow(as,bm1);
+<a name="line737">737: </a>            <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line738">738: </a>            ds = pow(as,beta);
+<a name="line739">739: </a>            gs = coef*bs*(t0 - ts);
+<a name="line740">740: </a>
+<a name="line741">741: </a>            tn = x[k][j+1][i];
+<a name="line742">742: </a>            an = 0.5*(t0 + tn);
+<a name="line743">743: </a>            bn = pow(an,bm1);
+<a name="line744">744: </a>            <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line745">745: </a>            dn = pow(an,beta);
+<a name="line746">746: </a>            gn = coef*bn*(tn - t0);
+
+<a name="line748">748: </a>            <font color="#B22222">/* left-hand down interior edge */</font>
+<a name="line749">749: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line751">751: </a>              tu = x[k+1][j][i];
+<a name="line752">752: </a>              au = 0.5*(t0 + tu);
+<a name="line753">753: </a>              bu = pow(au,bm1);
+<a name="line754">754: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line755">755: </a>              du = pow(au,beta);
+<a name="line756">756: </a>              gu = coef*bu*(tu - t0);
+
+<a name="line758">758: </a>              c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line759">759: </a>              v[0]   = - hzhxdhy*(ds - gs);
+<a name="line760">760: </a>              c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line761">761: </a>              v[1]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line762">762: </a>              c[2].k = k; c[2].j = j; c[2].i = i+1;
+<a name="line763">763: </a>              v[2]   = - hyhzdhx*(de + ge);
+<a name="line764">764: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line765">765: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line766">766: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line767">767: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line768">768: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line769">769: </a>            }
+
+<a name="line771">771: </a>            <font color="#B22222">/* left-hand up interior edge */</font>
+<a name="line772">772: </a>            <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line774">774: </a>              td = x[k-1][j][i];
+<a name="line775">775: </a>              ad = 0.5*(t0 + td);
+<a name="line776">776: </a>              bd = pow(ad,bm1);
+<a name="line777">777: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line778">778: </a>              dd = pow(ad,beta);
+<a name="line779">779: </a>              gd = coef*bd*(t0 - td);
+<a name="line780">780: </a>
+<a name="line781">781: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line782">782: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line783">783: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line784">784: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line785">785: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line786">786: </a>              v[2]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line787">787: </a>              c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line788">788: </a>              v[3]   = - hyhzdhx*(de + ge);
+<a name="line789">789: </a>              c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line790">790: </a>              v[4]   = - hzhxdhy*(dn + gn);
+<a name="line791">791: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line792">792: </a>            }
+
+<a name="line794">794: </a>            <font color="#B22222">/* left-hand interior plane */</font>
+<a name="line795">795: </a>            <font color="#4169E1">else</font> {
+
+<a name="line797">797: </a>              td = x[k-1][j][i];
+<a name="line798">798: </a>              ad = 0.5*(t0 + td);
+<a name="line799">799: </a>              bd = pow(ad,bm1);
+<a name="line800">800: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line801">801: </a>              dd = pow(ad,beta);
+<a name="line802">802: </a>              gd = coef*bd*(t0 - td);
+<a name="line803">803: </a>
+<a name="line804">804: </a>              tu = x[k+1][j][i];
+<a name="line805">805: </a>              au = 0.5*(t0 + tu);
+<a name="line806">806: </a>              bu = pow(au,bm1);
+<a name="line807">807: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line808">808: </a>              du = pow(au,beta);
+<a name="line809">809: </a>              gu = coef*bu*(tu - t0);
+
+<a name="line811">811: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line812">812: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line813">813: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line814">814: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line815">815: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line816">816: </a>              v[2]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line817">817: </a>              c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line818">818: </a>              v[3]   = - hyhzdhx*(de + ge);
+<a name="line819">819: </a>              c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line820">820: </a>              v[4]   = - hzhxdhy*(dn + gn);
+<a name="line821">821: </a>              c[5].k = k+1; c[5].j = j; c[5].i = i;
+<a name="line822">822: </a>              v[5]   = - hxhydhz*(du + gu);
+<a name="line823">823: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line824">824: </a>            }
+<a name="line825">825: </a>          }
+
+<a name="line827">827: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == mx-1) {
+
+<a name="line829">829: </a>          <font color="#B22222">/* right-hand plane boundary */</font>
+<a name="line830">830: </a>          tw = x[k][j][i-1];
+<a name="line831">831: </a>          aw = 0.5*(t0 + tw);
+<a name="line832">832: </a>          bw = pow(aw,bm1);
+<a name="line833">833: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line834">834: </a>          dw = pow(aw,beta);
+<a name="line835">835: </a>          gw = coef*bw*(t0 - tw);
+<a name="line836">836: </a>
+<a name="line837">837: </a>          te = tright;
+<a name="line838">838: </a>          ae = 0.5*(t0 + te);
+<a name="line839">839: </a>          be = pow(ae,bm1);
+<a name="line840">840: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line841">841: </a>          de = pow(ae,beta);
+<a name="line842">842: </a>          ge = coef*be*(te - t0);
+<a name="line843">843: </a>
+<a name="line844">844: </a>          <font color="#B22222">/* right-hand bottom edge */</font>
+<a name="line845">845: </a>          <font color="#4169E1">if</font> (j == 0) {
+
+<a name="line847">847: </a>            tn = x[k][j+1][i];
+<a name="line848">848: </a>            an = 0.5*(t0 + tn);
+<a name="line849">849: </a>            bn = pow(an,bm1);
+<a name="line850">850: </a>            <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line851">851: </a>            dn = pow(an,beta);
+<a name="line852">852: </a>            gn = coef*bn*(tn - t0);
+<a name="line853">853: </a>
+<a name="line854">854: </a>            <font color="#B22222">/* right-hand bottom down corner */</font>
+<a name="line855">855: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line857">857: </a>              tu = x[k+1][j][i];
+<a name="line858">858: </a>              au = 0.5*(t0 + tu);
+<a name="line859">859: </a>              bu = pow(au,bm1);
+<a name="line860">860: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line861">861: </a>              du = pow(au,beta);
+<a name="line862">862: </a>              gu = coef*bu*(tu - t0);
+<a name="line863">863: </a>
+<a name="line864">864: </a>              c[0].k = k; c[0].j = j; c[0].i = i-1;
+<a name="line865">865: </a>              v[0]   = - hyhzdhx*(dw - gw);
+<a name="line866">866: </a>              c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line867">867: </a>              v[1]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line868">868: </a>              c[2].k = k; c[2].j = j+1; c[2].i = i;
+<a name="line869">869: </a>              v[2]   = - hzhxdhy*(dn + gn);
+<a name="line870">870: </a>              c[3].k = k+1; c[3].j = j; c[3].i = i;
+<a name="line871">871: </a>              v[3]   = - hxhydhz*(du + gu);
+<a name="line872">872: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line874">874: </a>            <font color="#B22222">/* right-hand bottom interior edge */</font>
+<a name="line875">875: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k &lt; mz-1) {
+
+<a name="line877">877: </a>              tu = x[k+1][j][i];
+<a name="line878">878: </a>              au = 0.5*(t0 + tu);
+<a name="line879">879: </a>              bu = pow(au,bm1);
+<a name="line880">880: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line881">881: </a>              du = pow(au,beta);
+<a name="line882">882: </a>              gu = coef*bu*(tu - t0);
+<a name="line883">883: </a>
+<a name="line884">884: </a>              td = x[k-1][j][i];
+<a name="line885">885: </a>              ad = 0.5*(t0 + td);
+<a name="line886">886: </a>              bd = pow(ad,bm1);
+<a name="line887">887: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line888">888: </a>              dd = pow(ad,beta);
+<a name="line889">889: </a>              gd = coef*bd*(td - t0);
+<a name="line890">890: </a>
+<a name="line891">891: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line892">892: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line893">893: </a>              c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line894">894: </a>              v[1]   = - hyhzdhx*(dw - gw);
+<a name="line895">895: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line896">896: </a>              v[2]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line897">897: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line898">898: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line899">899: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line900">900: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line901">901: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line903">903: </a>            <font color="#B22222">/* right-hand bottom up corner */</font>
+<a name="line904">904: </a>            } <font color="#4169E1">else</font> {
+
+<a name="line906">906: </a>              td = x[k-1][j][i];
+<a name="line907">907: </a>              ad = 0.5*(t0 + td);
+<a name="line908">908: </a>              bd = pow(ad,bm1);
+<a name="line909">909: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line910">910: </a>              dd = pow(ad,beta);
+<a name="line911">911: </a>              gd = coef*bd*(td - t0);
+<a name="line912">912: </a>
+<a name="line913">913: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line914">914: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line915">915: </a>              c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line916">916: </a>              v[1]   = - hyhzdhx*(dw - gw);
+<a name="line917">917: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line918">918: </a>              v[2]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line919">919: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line920">920: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line921">921: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line922">922: </a>            }
+
+<a name="line924">924: </a>          <font color="#B22222">/* right-hand top edge */</font>
+<a name="line925">925: </a>          } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == my-1) {
+
+<a name="line927">927: </a>            ts = x[k][j-1][i];
+<a name="line928">928: </a>            as = 0.5*(t0 + ts);
+<a name="line929">929: </a>            bs = pow(as,bm1);
+<a name="line930">930: </a>            <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line931">931: </a>            ds = pow(as,beta);
+<a name="line932">932: </a>            gs = coef*bs*(ts - t0);
+<a name="line933">933: </a>
+<a name="line934">934: </a>            <font color="#B22222">/* right-hand top down corner */</font>
+<a name="line935">935: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line937">937: </a>              tu = x[k+1][j][i];
+<a name="line938">938: </a>              au = 0.5*(t0 + tu);
+<a name="line939">939: </a>              bu = pow(au,bm1);
+<a name="line940">940: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line941">941: </a>              du = pow(au,beta);
+<a name="line942">942: </a>              gu = coef*bu*(tu - t0);
+<a name="line943">943: </a>
+<a name="line944">944: </a>              c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line945">945: </a>              v[0]   = - hzhxdhy*(ds - gs);
+<a name="line946">946: </a>              c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line947">947: </a>              v[1]   = - hyhzdhx*(dw - gw);
+<a name="line948">948: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line949">949: </a>              v[2]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line950">950: </a>              c[3].k = k+1; c[3].j = j; c[3].i = i;
+<a name="line951">951: </a>              v[3]   = - hxhydhz*(du + gu);
+<a name="line952">952: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line954">954: </a>            <font color="#B22222">/* right-hand top interior edge */</font>
+<a name="line955">955: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k &lt; mz-1) {
+
+<a name="line957">957: </a>              tu = x[k+1][j][i];
+<a name="line958">958: </a>              au = 0.5*(t0 + tu);
+<a name="line959">959: </a>              bu = pow(au,bm1);
+<a name="line960">960: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line961">961: </a>              du = pow(au,beta);
+<a name="line962">962: </a>              gu = coef*bu*(tu - t0);
+<a name="line963">963: </a>
+<a name="line964">964: </a>              td = x[k-1][j][i];
+<a name="line965">965: </a>              ad = 0.5*(t0 + td);
+<a name="line966">966: </a>              bd = pow(ad,bm1);
+<a name="line967">967: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line968">968: </a>              dd = pow(ad,beta);
+<a name="line969">969: </a>              gd = coef*bd*(td - t0);
+<a name="line970">970: </a>
+<a name="line971">971: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line972">972: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line973">973: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line974">974: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line975">975: </a>              c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line976">976: </a>              v[2]   = - hyhzdhx*(dw - gw);
+<a name="line977">977: </a>              c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line978">978: </a>              v[3]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line979">979: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line980">980: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line981">981: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line983">983: </a>            <font color="#B22222">/* right-hand top up corner */</font>
+<a name="line984">984: </a>            } <font color="#4169E1">else</font> {
+
+<a name="line986">986: </a>              td = x[k-1][j][i];
+<a name="line987">987: </a>              ad = 0.5*(t0 + td);
+<a name="line988">988: </a>              bd = pow(ad,bm1);
+<a name="line989">989: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line990">990: </a>              dd = pow(ad,beta);
+<a name="line991">991: </a>              gd = coef*bd*(td - t0);
+<a name="line992">992: </a>
+<a name="line993">993: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line994">994: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line995">995: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line996">996: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line997">997: </a>              c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line998">998: </a>              v[2]   = - hyhzdhx*(dw - gw);
+<a name="line999">999: </a>              c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1000">1000: </a>              v[3]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line1001">1001: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,4,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1002">1002: </a>            }
+
+<a name="line1004">1004: </a>          } <font color="#4169E1">else</font> {
+
+<a name="line1006">1006: </a>            ts = x[k][j-1][i];
+<a name="line1007">1007: </a>            as = 0.5*(t0 + ts);
+<a name="line1008">1008: </a>            bs = pow(as,bm1);
+<a name="line1009">1009: </a>            <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line1010">1010: </a>            ds = pow(as,beta);
+<a name="line1011">1011: </a>            gs = coef*bs*(t0 - ts);
+<a name="line1012">1012: </a>
+<a name="line1013">1013: </a>            tn = x[k][j+1][i];
+<a name="line1014">1014: </a>            an = 0.5*(t0 + tn);
+<a name="line1015">1015: </a>            bn = pow(an,bm1);
+<a name="line1016">1016: </a>            <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line1017">1017: </a>            dn = pow(an,beta);
+<a name="line1018">1018: </a>            gn = coef*bn*(tn - t0);
+
+<a name="line1020">1020: </a>            <font color="#B22222">/* right-hand down interior edge */</font>
+<a name="line1021">1021: </a>            <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line1023">1023: </a>              tu = x[k+1][j][i];
+<a name="line1024">1024: </a>              au = 0.5*(t0 + tu);
+<a name="line1025">1025: </a>              bu = pow(au,bm1);
+<a name="line1026">1026: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1027">1027: </a>              du = pow(au,beta);
+<a name="line1028">1028: </a>              gu = coef*bu*(tu - t0);
+
+<a name="line1030">1030: </a>              c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line1031">1031: </a>              v[0]   = - hzhxdhy*(ds - gs);
+<a name="line1032">1032: </a>              c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line1033">1033: </a>              v[1]   = - hyhzdhx*(dw - gw);
+<a name="line1034">1034: </a>              c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line1035">1035: </a>              v[2]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line1036">1036: </a>              c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line1037">1037: </a>              v[3]   = - hzhxdhy*(dn + gn);
+<a name="line1038">1038: </a>              c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line1039">1039: </a>              v[4]   = - hxhydhz*(du + gu);
+<a name="line1040">1040: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1041">1041: </a>            }
+
+<a name="line1043">1043: </a>            <font color="#B22222">/* right-hand up interior edge */</font>
+<a name="line1044">1044: </a>            <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line1046">1046: </a>              td = x[k-1][j][i];
+<a name="line1047">1047: </a>              ad = 0.5*(t0 + td);
+<a name="line1048">1048: </a>              bd = pow(ad,bm1);
+<a name="line1049">1049: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1050">1050: </a>              dd = pow(ad,beta);
+<a name="line1051">1051: </a>              gd = coef*bd*(t0 - td);
+<a name="line1052">1052: </a>
+<a name="line1053">1053: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1054">1054: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line1055">1055: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line1056">1056: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line1057">1057: </a>              c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line1058">1058: </a>              v[2]   = - hyhzdhx*(dw - gw);
+<a name="line1059">1059: </a>              c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1060">1060: </a>              v[3]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line1061">1061: </a>              c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line1062">1062: </a>              v[4]   = - hzhxdhy*(dn + gn);
+<a name="line1063">1063: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1064">1064: </a>            }
+
+<a name="line1066">1066: </a>            <font color="#B22222">/* right-hand interior plane */</font>
+<a name="line1067">1067: </a>            <font color="#4169E1">else</font> {
+
+<a name="line1069">1069: </a>              td = x[k-1][j][i];
+<a name="line1070">1070: </a>              ad = 0.5*(t0 + td);
+<a name="line1071">1071: </a>              bd = pow(ad,bm1);
+<a name="line1072">1072: </a>              <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1073">1073: </a>              dd = pow(ad,beta);
+<a name="line1074">1074: </a>              gd = coef*bd*(t0 - td);
+<a name="line1075">1075: </a>
+<a name="line1076">1076: </a>              tu = x[k+1][j][i];
+<a name="line1077">1077: </a>              au = 0.5*(t0 + tu);
+<a name="line1078">1078: </a>              bu = pow(au,bm1);
+<a name="line1079">1079: </a>              <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1080">1080: </a>              du = pow(au,beta);
+<a name="line1081">1081: </a>              gu = coef*bu*(tu - t0);
+
+<a name="line1083">1083: </a>              c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1084">1084: </a>              v[0]   = - hxhydhz*(dd - gd);
+<a name="line1085">1085: </a>              c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line1086">1086: </a>              v[1]   = - hzhxdhy*(ds - gs);
+<a name="line1087">1087: </a>              c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line1088">1088: </a>              v[2]   = - hyhzdhx*(dw - gw);
+<a name="line1089">1089: </a>              c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1090">1090: </a>              v[3]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line1091">1091: </a>              c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line1092">1092: </a>              v[4]   = - hzhxdhy*(dn + gn);
+<a name="line1093">1093: </a>              c[5].k = k+1; c[5].j = j; c[5].i = i;
+<a name="line1094">1094: </a>              v[5]   = - hxhydhz*(du + gu);
+<a name="line1095">1095: </a>                <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1096">1096: </a>            }
+<a name="line1097">1097: </a>          }
+
+<a name="line1099">1099: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == 0) {
+
+<a name="line1101">1101: </a>          tw = x[k][j][i-1];
+<a name="line1102">1102: </a>          aw = 0.5*(t0 + tw);
+<a name="line1103">1103: </a>          bw = pow(aw,bm1);
+<a name="line1104">1104: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line1105">1105: </a>          dw = pow(aw,beta);
+<a name="line1106">1106: </a>          gw = coef*bw*(t0 - tw);
+
+<a name="line1108">1108: </a>          te = x[k][j][i+1];
+<a name="line1109">1109: </a>          ae = 0.5*(t0 + te);
+<a name="line1110">1110: </a>          be = pow(ae,bm1);
+<a name="line1111">1111: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line1112">1112: </a>          de = pow(ae,beta);
+<a name="line1113">1113: </a>          ge = coef*be*(te - t0);
+
+<a name="line1115">1115: </a>          tn = x[k][j+1][i];
+<a name="line1116">1116: </a>          an = 0.5*(t0 + tn);
+<a name="line1117">1117: </a>          bn = pow(an,bm1);
+<a name="line1118">1118: </a>          <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line1119">1119: </a>          dn = pow(an,beta);
+<a name="line1120">1120: </a>          gn = coef*bn*(tn - t0);
+
+
+<a name="line1123">1123: </a>          <font color="#B22222">/* bottom down interior edge */</font>
+<a name="line1124">1124: </a>          <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line1126">1126: </a>            tu = x[k+1][j][i];
+<a name="line1127">1127: </a>            au = 0.5*(t0 + tu);
+<a name="line1128">1128: </a>            bu = pow(au,bm1);
+<a name="line1129">1129: </a>            <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1130">1130: </a>            du = pow(au,beta);
+<a name="line1131">1131: </a>            gu = coef*bu*(tu - t0);
+
+<a name="line1133">1133: </a>            c[0].k = k; c[0].j = j; c[0].i = i-1;
+<a name="line1134">1134: </a>            v[0]   = - hyhzdhx*(dw - gw);
+<a name="line1135">1135: </a>            c[1].k = k; c[1].j = j; c[1].i = i;
+<a name="line1136">1136: </a>            v[1]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line1137">1137: </a>            c[2].k = k; c[2].j = j; c[2].i = i+1;
+<a name="line1138">1138: </a>            v[2]   = - hyhzdhx*(de + ge);
+<a name="line1139">1139: </a>            c[3].k = k; c[3].j = j+1; c[3].i = i;
+<a name="line1140">1140: </a>            v[3]   = - hzhxdhy*(dn + gn);
+<a name="line1141">1141: </a>            c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line1142">1142: </a>            v[4]   = - hxhydhz*(du + gu);
+<a name="line1143">1143: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1144">1144: </a>          }
+
+<a name="line1146">1146: </a>          <font color="#B22222">/* bottom up interior edge */</font>
+<a name="line1147">1147: </a>          <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line1149">1149: </a>            td = x[k-1][j][i];
+<a name="line1150">1150: </a>            ad = 0.5*(t0 + td);
+<a name="line1151">1151: </a>            bd = pow(ad,bm1);
+<a name="line1152">1152: </a>            <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1153">1153: </a>            dd = pow(ad,beta);
+<a name="line1154">1154: </a>            gd = coef*bd*(td - t0);
+
+<a name="line1156">1156: </a>            c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1157">1157: </a>            v[0]   = - hxhydhz*(dd - gd);
+<a name="line1158">1158: </a>            c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line1159">1159: </a>            v[1]   = - hyhzdhx*(dw - gw);
+<a name="line1160">1160: </a>            c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line1161">1161: </a>            v[2]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line1162">1162: </a>            c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line1163">1163: </a>            v[3]   = - hyhzdhx*(de + ge);
+<a name="line1164">1164: </a>            c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line1165">1165: </a>            v[4]   = - hzhxdhy*(dn + gn);
+<a name="line1166">1166: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1167">1167: </a>          }
+
+<a name="line1169">1169: </a>          <font color="#B22222">/* bottom interior plane */</font>
+<a name="line1170">1170: </a>          <font color="#4169E1">else</font> {
+
+<a name="line1172">1172: </a>            tu = x[k+1][j][i];
+<a name="line1173">1173: </a>            au = 0.5*(t0 + tu);
+<a name="line1174">1174: </a>            bu = pow(au,bm1);
+<a name="line1175">1175: </a>            <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1176">1176: </a>            du = pow(au,beta);
+<a name="line1177">1177: </a>            gu = coef*bu*(tu - t0);
+
+<a name="line1179">1179: </a>            td = x[k-1][j][i];
+<a name="line1180">1180: </a>            ad = 0.5*(t0 + td);
+<a name="line1181">1181: </a>            bd = pow(ad,bm1);
+<a name="line1182">1182: </a>            <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1183">1183: </a>            dd = pow(ad,beta);
+<a name="line1184">1184: </a>            gd = coef*bd*(td - t0);
+
+<a name="line1186">1186: </a>            c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1187">1187: </a>            v[0]   = - hxhydhz*(dd - gd);
+<a name="line1188">1188: </a>            c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line1189">1189: </a>            v[1]   = - hyhzdhx*(dw - gw);
+<a name="line1190">1190: </a>            c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line1191">1191: </a>            v[2]   =   hzhxdhy*(dn - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line1192">1192: </a>            c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line1193">1193: </a>            v[3]   = - hyhzdhx*(de + ge);
+<a name="line1194">1194: </a>            c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line1195">1195: </a>            v[4]   = - hzhxdhy*(dn + gn);
+<a name="line1196">1196: </a>            c[5].k = k+1; c[5].j = j; c[5].i = i;
+<a name="line1197">1197: </a>            v[5]   = - hxhydhz*(du + gu);
+<a name="line1198">1198: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1199">1199: </a>          }
+
+<a name="line1201">1201: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == my-1) {
+
+<a name="line1203">1203: </a>          tw = x[k][j][i-1];
+<a name="line1204">1204: </a>          aw = 0.5*(t0 + tw);
+<a name="line1205">1205: </a>          bw = pow(aw,bm1);
+<a name="line1206">1206: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line1207">1207: </a>          dw = pow(aw,beta);
+<a name="line1208">1208: </a>          gw = coef*bw*(t0 - tw);
+
+<a name="line1210">1210: </a>          te = x[k][j][i+1];
+<a name="line1211">1211: </a>          ae = 0.5*(t0 + te);
+<a name="line1212">1212: </a>          be = pow(ae,bm1);
+<a name="line1213">1213: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line1214">1214: </a>          de = pow(ae,beta);
+<a name="line1215">1215: </a>          ge = coef*be*(te - t0);
+
+<a name="line1217">1217: </a>          ts = x[k][j-1][i];
+<a name="line1218">1218: </a>          as = 0.5*(t0 + ts);
+<a name="line1219">1219: </a>          bs = pow(as,bm1);
+<a name="line1220">1220: </a>          <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line1221">1221: </a>          ds = pow(as,beta);
+<a name="line1222">1222: </a>          gs = coef*bs*(t0 - ts);
+<a name="line1223">1223: </a>
+<a name="line1224">1224: </a>          <font color="#B22222">/* top down interior edge */</font>
+<a name="line1225">1225: </a>          <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line1227">1227: </a>            tu = x[k+1][j][i];
+<a name="line1228">1228: </a>            au = 0.5*(t0 + tu);
+<a name="line1229">1229: </a>            bu = pow(au,bm1);
+<a name="line1230">1230: </a>            <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1231">1231: </a>            du = pow(au,beta);
+<a name="line1232">1232: </a>            gu = coef*bu*(tu - t0);
+
+<a name="line1234">1234: </a>            c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line1235">1235: </a>            v[0]   = - hzhxdhy*(ds - gs);
+<a name="line1236">1236: </a>            c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line1237">1237: </a>            v[1]   = - hyhzdhx*(dw - gw);
+<a name="line1238">1238: </a>            c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line1239">1239: </a>            v[2]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line1240">1240: </a>            c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line1241">1241: </a>            v[3]   = - hyhzdhx*(de + ge);
+<a name="line1242">1242: </a>            c[4].k = k+1; c[4].j = j; c[4].i = i;
+<a name="line1243">1243: </a>            v[4]   = - hxhydhz*(du + gu);
+<a name="line1244">1244: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1245">1245: </a>          }
+
+<a name="line1247">1247: </a>          <font color="#B22222">/* top up interior edge */</font>
+<a name="line1248">1248: </a>          <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line1250">1250: </a>            td = x[k-1][j][i];
+<a name="line1251">1251: </a>            ad = 0.5*(t0 + td);
+<a name="line1252">1252: </a>            bd = pow(ad,bm1);
+<a name="line1253">1253: </a>            <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1254">1254: </a>            dd = pow(ad,beta);
+<a name="line1255">1255: </a>            gd = coef*bd*(td - t0);
+
+<a name="line1257">1257: </a>            c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1258">1258: </a>            v[0]   = - hxhydhz*(dd - gd);
+<a name="line1259">1259: </a>            c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line1260">1260: </a>            v[1]   = - hzhxdhy*(ds - gs);
+<a name="line1261">1261: </a>            c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line1262">1262: </a>            v[2]   = - hyhzdhx*(dw - gw);
+<a name="line1263">1263: </a>            c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1264">1264: </a>            v[3]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line1265">1265: </a>            c[4].k = k; c[4].j = j; c[4].i = i+1;
+<a name="line1266">1266: </a>            v[4]   = - hyhzdhx*(de + ge);
+<a name="line1267">1267: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1268">1268: </a>          }
+
+<a name="line1270">1270: </a>          <font color="#B22222">/* top interior plane */</font>
+<a name="line1271">1271: </a>          <font color="#4169E1">else</font> {
+
+<a name="line1273">1273: </a>            tu = x[k+1][j][i];
+<a name="line1274">1274: </a>            au = 0.5*(t0 + tu);
+<a name="line1275">1275: </a>            bu = pow(au,bm1);
+<a name="line1276">1276: </a>            <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1277">1277: </a>            du = pow(au,beta);
+<a name="line1278">1278: </a>            gu = coef*bu*(tu - t0);
+
+<a name="line1280">1280: </a>            td = x[k-1][j][i];
+<a name="line1281">1281: </a>            ad = 0.5*(t0 + td);
+<a name="line1282">1282: </a>            bd = pow(ad,bm1);
+<a name="line1283">1283: </a>            <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1284">1284: </a>            dd = pow(ad,beta);
+<a name="line1285">1285: </a>            gd = coef*bd*(td - t0);
+
+<a name="line1287">1287: </a>            c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1288">1288: </a>            v[0]   = - hxhydhz*(dd - gd);
+<a name="line1289">1289: </a>            c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line1290">1290: </a>            v[1]   = - hzhxdhy*(ds - gs);
+<a name="line1291">1291: </a>            c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line1292">1292: </a>            v[2]   = - hyhzdhx*(dw - gw);
+<a name="line1293">1293: </a>            c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1294">1294: </a>            v[3]   =   hzhxdhy*(ds + gs) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + du + gd - gu);
+<a name="line1295">1295: </a>            c[4].k = k; c[4].j = j; c[4].i = i+1;
+<a name="line1296">1296: </a>            v[4]   = - hyhzdhx*(de + ge);
+<a name="line1297">1297: </a>            c[5].k = k+1; c[5].j = j; c[5].i = i;
+<a name="line1298">1298: </a>            v[5]   = - hxhydhz*(du + gu);
+<a name="line1299">1299: </a>              <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1300">1300: </a>          }
+
+<a name="line1302">1302: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == 0) {
+
+<a name="line1304">1304: </a>          <font color="#B22222">/* down interior plane */</font>
+
+<a name="line1306">1306: </a>          tw = x[k][j][i-1];
+<a name="line1307">1307: </a>          aw = 0.5*(t0 + tw);
+<a name="line1308">1308: </a>          bw = pow(aw,bm1);
+<a name="line1309">1309: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line1310">1310: </a>          dw = pow(aw,beta);
+<a name="line1311">1311: </a>          gw = coef*bw*(t0 - tw);
+
+<a name="line1313">1313: </a>          te = x[k][j][i+1];
+<a name="line1314">1314: </a>          ae = 0.5*(t0 + te);
+<a name="line1315">1315: </a>          be = pow(ae,bm1);
+<a name="line1316">1316: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line1317">1317: </a>          de = pow(ae,beta);
+<a name="line1318">1318: </a>          ge = coef*be*(te - t0);
+
+<a name="line1320">1320: </a>          ts = x[k][j-1][i];
+<a name="line1321">1321: </a>          as = 0.5*(t0 + ts);
+<a name="line1322">1322: </a>          bs = pow(as,bm1);
+<a name="line1323">1323: </a>          <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line1324">1324: </a>          ds = pow(as,beta);
+<a name="line1325">1325: </a>          gs = coef*bs*(t0 - ts);
+<a name="line1326">1326: </a>
+<a name="line1327">1327: </a>          tn = x[k][j+1][i];
+<a name="line1328">1328: </a>          an = 0.5*(t0 + tn);
+<a name="line1329">1329: </a>          bn = pow(an,bm1);
+<a name="line1330">1330: </a>          <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line1331">1331: </a>          dn = pow(an,beta);
+<a name="line1332">1332: </a>          gn = coef*bn*(tn - t0);
+<a name="line1333">1333: </a>
+<a name="line1334">1334: </a>          tu = x[k+1][j][i];
+<a name="line1335">1335: </a>          au = 0.5*(t0 + tu);
+<a name="line1336">1336: </a>          bu = pow(au,bm1);
+<a name="line1337">1337: </a>          <font color="#B22222">/* du = bu * au; */</font>
+<a name="line1338">1338: </a>          du = pow(au,beta);
+<a name="line1339">1339: </a>          gu = coef*bu*(tu - t0);
+
+<a name="line1341">1341: </a>          c[0].k = k; c[0].j = j-1; c[0].i = i;
+<a name="line1342">1342: </a>          v[0]   = - hzhxdhy*(ds - gs);
+<a name="line1343">1343: </a>          c[1].k = k; c[1].j = j; c[1].i = i-1;
+<a name="line1344">1344: </a>          v[1]   = - hyhzdhx*(dw - gw);
+<a name="line1345">1345: </a>          c[2].k = k; c[2].j = j; c[2].i = i;
+<a name="line1346">1346: </a>          v[2]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(du - gu);
+<a name="line1347">1347: </a>          c[3].k = k; c[3].j = j; c[3].i = i+1;
+<a name="line1348">1348: </a>          v[3]   = - hyhzdhx*(de + ge);
+<a name="line1349">1349: </a>          c[4].k = k; c[4].j = j+1; c[4].i = i;
+<a name="line1350">1350: </a>          v[4]   = - hzhxdhy*(dn + gn);
+<a name="line1351">1351: </a>          c[5].k = k+1; c[5].j = j; c[5].i = i;
+<a name="line1352">1352: </a>          v[5]   = - hxhydhz*(du + gu);
+<a name="line1353">1353: </a>            <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1354">1354: </a>        }
+<a name="line1355">1355: </a>
+<a name="line1356">1356: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (k == mz-1) {
+
+<a name="line1358">1358: </a>          <font color="#B22222">/* up interior plane */</font>
+
+<a name="line1360">1360: </a>          tw = x[k][j][i-1];
+<a name="line1361">1361: </a>          aw = 0.5*(t0 + tw);
+<a name="line1362">1362: </a>          bw = pow(aw,bm1);
+<a name="line1363">1363: </a>          <font color="#B22222">/* dw = bw * aw */</font>
+<a name="line1364">1364: </a>          dw = pow(aw,beta);
+<a name="line1365">1365: </a>          gw = coef*bw*(t0 - tw);
+
+<a name="line1367">1367: </a>          te = x[k][j][i+1];
+<a name="line1368">1368: </a>          ae = 0.5*(t0 + te);
+<a name="line1369">1369: </a>          be = pow(ae,bm1);
+<a name="line1370">1370: </a>          <font color="#B22222">/* de = be * ae; */</font>
+<a name="line1371">1371: </a>          de = pow(ae,beta);
+<a name="line1372">1372: </a>          ge = coef*be*(te - t0);
+
+<a name="line1374">1374: </a>          ts = x[k][j-1][i];
+<a name="line1375">1375: </a>          as = 0.5*(t0 + ts);
+<a name="line1376">1376: </a>          bs = pow(as,bm1);
+<a name="line1377">1377: </a>          <font color="#B22222">/* ds = bs * as; */</font>
+<a name="line1378">1378: </a>          ds = pow(as,beta);
+<a name="line1379">1379: </a>          gs = coef*bs*(t0 - ts);
+<a name="line1380">1380: </a>
+<a name="line1381">1381: </a>          tn = x[k][j+1][i];
+<a name="line1382">1382: </a>          an = 0.5*(t0 + tn);
+<a name="line1383">1383: </a>          bn = pow(an,bm1);
+<a name="line1384">1384: </a>          <font color="#B22222">/* dn = bn * an; */</font>
+<a name="line1385">1385: </a>          dn = pow(an,beta);
+<a name="line1386">1386: </a>          gn = coef*bn*(tn - t0);
+<a name="line1387">1387: </a>
+<a name="line1388">1388: </a>          td = x[k-1][j][i];
+<a name="line1389">1389: </a>          ad = 0.5*(t0 + td);
+<a name="line1390">1390: </a>          bd = pow(ad,bm1);
+<a name="line1391">1391: </a>          <font color="#B22222">/* dd = bd * ad; */</font>
+<a name="line1392">1392: </a>          dd = pow(ad,beta);
+<a name="line1393">1393: </a>          gd = coef*bd*(t0 - td);
+<a name="line1394">1394: </a>
+<a name="line1395">1395: </a>          c[0].k = k-1; c[0].j = j; c[0].i = i;
+<a name="line1396">1396: </a>          v[0]   = - hxhydhz*(dd - gd);
+<a name="line1397">1397: </a>          c[1].k = k; c[1].j = j-1; c[1].i = i;
+<a name="line1398">1398: </a>          v[1]   = - hzhxdhy*(ds - gs);
+<a name="line1399">1399: </a>          c[2].k = k; c[2].j = j; c[2].i = i-1;
+<a name="line1400">1400: </a>          v[2]   = - hyhzdhx*(dw - gw);
+<a name="line1401">1401: </a>          c[3].k = k; c[3].j = j; c[3].i = i;
+<a name="line1402">1402: </a>          v[3]   =   hzhxdhy*(ds + dn + gs - gn) + hyhzdhx*(dw + de + gw - ge) + hxhydhz*(dd + gd);
+<a name="line1403">1403: </a>          c[4].k = k; c[4].j = j; c[4].i = i+1;
+<a name="line1404">1404: </a>          v[4]   = - hyhzdhx*(de + ge);
+<a name="line1405">1405: </a>          c[5].k = k; c[5].j = j+1; c[5].i = i;
+<a name="line1406">1406: </a>          v[5]   = - hzhxdhy*(dn + gn);
+<a name="line1407">1407: </a>            <A href="../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,6,c,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line1408">1408: </a>        }
+<a name="line1409">1409: </a>      }
+<a name="line1410">1410: </a>    }
+<a name="line1411">1411: </a>  }
+<a name="line1412">1412: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(jac,MAT_FINAL_ASSEMBLY);
+<a name="line1413">1413: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(jac,MAT_FINAL_ASSEMBLY);
+<a name="line1414">1414: </a>  <font color="#4169E1">if</font> (jac != *J) {
+<a name="line1415">1415: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*J,MAT_FINAL_ASSEMBLY);
+<a name="line1416">1416: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*J,MAT_FINAL_ASSEMBLY);
+<a name="line1417">1417: </a>  }
+<a name="line1418">1418: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,localX,&amp;x);
+<a name="line1419">1419: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(da,&amp;localX);
+
+<a name="line1421">1421: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>((41.0 + 8.0*POWFLOP)*xm*ym);
+<a name="line1422">1422: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1423">1423: </a>}
+</pre>
+</body>
+
+</html>

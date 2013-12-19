@@ -1,0 +1,728 @@
+<center><a href="ex21.c">Actual source code: ex21.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ts/examples/tutorials/ex21.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:26:10+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a>static char help[] =<font color="#666666">"Solves a time-dependent nonlinear PDE with lower and upper bounds on the interior grid points. Uses implicit\n\</font>
+<a name="line3">  3: </a><font color="#666666">timestepping.  Runtime options include:\n\</font>
+<a name="line4">  4: </a><font color="#666666">  -M &lt;xg&gt;, where &lt;xg&gt; = number of grid points\n\</font>
+<a name="line5">  5: </a><font color="#666666">  -debug : Activate debugging printouts\n\</font>
+<a name="line6">  6: </a><font color="#666666">  -nox   : Deactivate x-window graphics\n\</font>
+<a name="line7">  7: </a><font color="#666666">  -ul   : lower bound\n\</font>
+<a name="line8">  8: </a><font color="#666666">  -uh  : upper bound\n\n"</font>;
+
+<a name="line10"> 10: </a><font color="#B22222">/*</font>
+<a name="line11"> 11: </a><font color="#B22222">   Concepts: <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>^time-dependent nonlinear problems</font>
+<a name="line12"> 12: </a><font color="#B22222">             Variational inequality nonlinear solver</font>
+<a name="line13"> 13: </a><font color="#B22222">   Processors: n</font>
+<a name="line14"> 14: </a><font color="#B22222">*/</font>
+
+<a name="line16"> 16: </a><font color="#B22222">/* ------------------------------------------------------------------------</font>
+
+<a name="line18"> 18: </a><font color="#B22222">   This is a variation of ex2.c to solve the PDE</font>
+
+<a name="line20"> 20: </a><font color="#B22222">               u * u_xx </font>
+<a name="line21"> 21: </a><font color="#B22222">         u_t = ---------</font>
+<a name="line22"> 22: </a><font color="#B22222">               2*(t+1)^2 </font>
+
+<a name="line24"> 24: </a><font color="#B22222">    with box constraints on the interior grid points</font>
+<a name="line25"> 25: </a><font color="#B22222">    ul &lt;= u(t,x) &lt;= uh with x != 0,1</font>
+<a name="line26"> 26: </a><font color="#B22222">    on the domain 0 &lt;= x &lt;= 1, with boundary conditions</font>
+<a name="line27"> 27: </a><font color="#B22222">         u(t,0) = t + 1,  u(t,1) = 2*t + 2,</font>
+<a name="line28"> 28: </a><font color="#B22222">    and initial condition</font>
+<a name="line29"> 29: </a><font color="#B22222">         u(0,x) = 1 + x*x.</font>
+
+<a name="line31"> 31: </a><font color="#B22222">    The exact solution is:</font>
+<a name="line32"> 32: </a><font color="#B22222">         u(t,x) = (1 + x*x) * (1 + t)</font>
+
+<a name="line34"> 34: </a><font color="#B22222">    We use by default the backward Euler method.</font>
+
+<a name="line36"> 36: </a><font color="#B22222">  ------------------------------------------------------------------------- */</font>
+
+<a name="line38"> 38: </a><font color="#B22222">/*</font>
+<a name="line39"> 39: </a><font color="#B22222">   Include "petscts.h" to use the PETSc timestepping routines. Note that</font>
+<a name="line40"> 40: </a><font color="#B22222">   this file automatically includes "petscsys.h" and other lower-level</font>
+<a name="line41"> 41: </a><font color="#B22222">   PETSc include files.</font>
+
+<a name="line43"> 43: </a><font color="#B22222">   Include the "petscdmda.h" to allow us to use the distributed array data </font>
+<a name="line44"> 44: </a><font color="#B22222">   structures to manage the parallel grid.</font>
+<a name="line45"> 45: </a><font color="#B22222">*/</font>
+<a name="line46"> 46: </a><font color="#A020F0">#include &lt;petscts.h&gt;</font>
+<a name="line47"> 47: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+
+<a name="line49"> 49: </a><font color="#B22222">/* </font>
+<a name="line50"> 50: </a><font color="#B22222">   User-defined application context - contains data needed by the </font>
+<a name="line51"> 51: </a><font color="#B22222">   application-provided callback routines.</font>
+<a name="line52"> 52: </a><font color="#B22222">*/</font>
+<a name="line53"> 53: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line54"> 54: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>   comm;          <font color="#B22222">/* communicator */</font>
+<a name="line55"> 55: </a>  DM         da;            <font color="#B22222">/* distributed array data structure */</font>
+<a name="line56"> 56: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        localwork;     <font color="#B22222">/* local ghosted work vector */</font>
+<a name="line57"> 57: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        u_local;       <font color="#B22222">/* local ghosted approximate solution vector */</font>
+<a name="line58"> 58: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        solution;      <font color="#B22222">/* global exact solution vector */</font>
+<a name="line59"> 59: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>   m;             <font color="#B22222">/* total number of grid points */</font>
+<a name="line60"> 60: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>  h;             <font color="#B22222">/* mesh width: h = 1/(m-1) */</font>
+<a name="line61"> 61: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  debug;         <font color="#B22222">/* flag (1 indicates activation of debugging printouts) */</font>
+<a name="line62"> 62: </a>} AppCtx;
+
+<a name="line64"> 64: </a><font color="#B22222">/* </font>
+<a name="line65"> 65: </a><font color="#B22222">   User-defined routines, provided below.</font>
+<a name="line66"> 66: </a><font color="#B22222">*/</font>
+<a name="line67"> 67: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> InitialConditions(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,AppCtx*)</font></strong>;
+<a name="line68"> 68: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RHSFunction(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line69"> 69: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RHSJacobian(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>*,void*)</font></strong>;
+<a name="line70"> 70: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line71"> 71: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ExactSolution(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,AppCtx*)</font></strong>;
+<a name="line72"> 72: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetBounds(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,AppCtx*)</font></strong>;
+
+<a name="line74"> 74: </a><font color="#B22222">/*</font>
+<a name="line75"> 75: </a><font color="#B22222">   Utility routine for finite difference Jacobian approximation</font>
+<a name="line76"> 76: </a><font color="#B22222">*/</font>
+<a name="line77"> 77: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RHSJacobianFD(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>*,void*)</font></strong>;
+
+<a name="line81"> 81: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line82"> 82: </a>{
+<a name="line83"> 83: </a>  AppCtx         appctx;                 <font color="#B22222">/* user-defined application context */</font>
+<a name="line84"> 84: </a>  <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>             ts;                     <font color="#B22222">/* timestepping context */</font>
+<a name="line85"> 85: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            A;                      <font color="#B22222">/* Jacobian matrix data structure */</font>
+<a name="line86"> 86: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            u;                      <font color="#B22222">/* approximate solution vector */</font>
+<a name="line87"> 87: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            r;                      <font color="#B22222">/* residual vector */</font>
+<a name="line88"> 88: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       time_steps_max = 1000;  <font color="#B22222">/* default max timesteps */</font>
+<a name="line90"> 90: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      dt;
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      time_total_max = 100.0; <font color="#B22222">/* default max total time */</font>
+<a name="line92"> 92: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+<a name="line93"> 93: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            xl,xu; <font color="#B22222">/* Lower and upper bounds on variables */</font>
+<a name="line94"> 94: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    ul=0.0,uh = 3.0;
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      mymonitor;
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      bounds[] = {1.0, 3.3};
+
+<a name="line98"> 98: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line99"> 99: </a><font color="#B22222">     Initialize program and set problem parameters</font>
+<a name="line100">100: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line101">101: </a>
+<a name="line102">102: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,(char*)0,help);
+<a name="line103">103: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawSetBounds.html#PetscViewerDrawSetBounds">PetscViewerDrawSetBounds</A>(<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_DRAW_.html#PETSC_VIEWER_DRAW_">PETSC_VIEWER_DRAW_</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>),1,bounds);
+
+<a name="line105">105: </a>  appctx.comm = <A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>;
+<a name="line106">106: </a>  appctx.m    = 60;
+<a name="line107">107: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetInt.html#PetscOptionsGetInt">PetscOptionsGetInt</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-M"</font>,&amp;appctx.m,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line108">108: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetScalar.html#PetscOptionsGetScalar">PetscOptionsGetScalar</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-ul"</font>,&amp;ul,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line109">109: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetScalar.html#PetscOptionsGetScalar">PetscOptionsGetScalar</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-uh"</font>,&amp;uh,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line110">110: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHasName.html#PetscOptionsHasName">PetscOptionsHasName</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-debug"</font>,&amp;appctx.debug);
+<a name="line111">111: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHasName.html#PetscOptionsHasName">PetscOptionsHasName</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-mymonitor"</font>,&amp;mymonitor);
+<a name="line112">112: </a>  appctx.h    = 1.0/(appctx.m-1.0);
+
+<a name="line114">114: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line115">115: </a><font color="#B22222">     Create vector data structures</font>
+<a name="line116">116: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line118">118: </a>  <font color="#B22222">/*</font>
+<a name="line119">119: </a><font color="#B22222">     Create distributed array (DMDA) to manage parallel grid and vectors</font>
+<a name="line120">120: </a><font color="#B22222">     and to set up the ghost point communication pattern.  There are M </font>
+<a name="line121">121: </a><font color="#B22222">     total grid values spread equally among all the processors.</font>
+<a name="line122">122: </a><font color="#B22222">  */</font>
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate1d.html#DMDACreate1d">DMDACreate1d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DMDA_BOUNDARY_NONE,appctx.m,1,1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,
+<a name="line124">124: </a>                    &amp;appctx.da);
+
+<a name="line126">126: </a>  <font color="#B22222">/*</font>
+<a name="line127">127: </a><font color="#B22222">     Extract global and local vectors from DMDA; we use these to store the</font>
+<a name="line128">128: </a><font color="#B22222">     approximate solution.  Then duplicate these for remaining vectors that</font>
+<a name="line129">129: </a><font color="#B22222">     have the same types.</font>
+<a name="line130">130: </a><font color="#B22222">  */</font>
+<a name="line131">131: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(appctx.da,&amp;u);
+<a name="line132">132: </a>  <A href="../../../../docs/manualpages/DM/DMCreateLocalVector.html#DMCreateLocalVector">DMCreateLocalVector</A>(appctx.da,&amp;appctx.u_local);
+
+<a name="line134">134: </a>  <font color="#B22222">/*</font>
+<a name="line135">135: </a><font color="#B22222">     Create local work vector for use in evaluating right-hand-side function;</font>
+<a name="line136">136: </a><font color="#B22222">     create global work vector for storing exact solution.</font>
+<a name="line137">137: </a><font color="#B22222">  */</font>
+<a name="line138">138: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(appctx.u_local,&amp;appctx.localwork);
+<a name="line139">139: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(u,&amp;appctx.solution);
+
+<a name="line141">141: </a>  <font color="#B22222">/* Create residual vector */</font>
+<a name="line142">142: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(u,&amp;r);
+<a name="line143">143: </a>  <font color="#B22222">/* Create lower and upper bound vectors */</font>
+<a name="line144">144: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(u,&amp;xl);
+<a name="line145">145: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(u,&amp;xu);
+<a name="line146">146: </a>  SetBounds(xl,xu,ul,uh,&amp;appctx);
+
+<a name="line148">148: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line149">149: </a><font color="#B22222">     Create timestepping solver context; set callback routine for</font>
+<a name="line150">150: </a><font color="#B22222">     right-hand-side function evaluation.</font>
+<a name="line151">151: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;ts);
+<a name="line154">154: </a>  <A href="../../../../docs/manualpages/TS/TSSetProblemType.html#TSSetProblemType">TSSetProblemType</A>(ts,TS_NONLINEAR);
+<a name="line155">155: </a>  <A href="../../../../docs/manualpages/TS/TSSetRHSFunction.html#TSSetRHSFunction">TSSetRHSFunction</A>(ts,r,RHSFunction,&amp;appctx);
+
+<a name="line157">157: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line158">158: </a><font color="#B22222">     Set optional user-defined monitoring routine</font>
+<a name="line159">159: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line161">161: </a>  <font color="#4169E1">if</font> (mymonitor) {
+<a name="line162">162: </a>    <A href="../../../../docs/manualpages/TS/TSMonitorSet.html#TSMonitorSet">TSMonitorSet</A>(ts,Monitor,&amp;appctx,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line163">163: </a>  }
+
+<a name="line165">165: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line166">166: </a><font color="#B22222">     For nonlinear problems, the user can provide a Jacobian evaluation</font>
+<a name="line167">167: </a><font color="#B22222">     routine (or use a finite differencing approximation).</font>
+
+<a name="line169">169: </a><font color="#B22222">     Create matrix data structure; set Jacobian evaluation routine.</font>
+<a name="line170">170: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line172">172: </a>  <A href="../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;A);
+<a name="line173">173: </a>  <A href="../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(A,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,appctx.m,appctx.m);
+<a name="line174">174: </a>  <A href="../../../../docs/manualpages/Mat/MatSetFromOptions.html#MatSetFromOptions">MatSetFromOptions</A>(A);
+<a name="line175">175: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHasName.html#PetscOptionsHasName">PetscOptionsHasName</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-fdjac"</font>,&amp;flg);
+<a name="line176">176: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line177">177: </a>    <A href="../../../../docs/manualpages/TS/TSSetRHSJacobian.html#TSSetRHSJacobian">TSSetRHSJacobian</A>(ts,A,A,RHSJacobianFD,&amp;appctx);
+<a name="line178">178: </a>  } <font color="#4169E1">else</font> {
+<a name="line179">179: </a>    <A href="../../../../docs/manualpages/TS/TSSetRHSJacobian.html#TSSetRHSJacobian">TSSetRHSJacobian</A>(ts,A,A,RHSJacobian,&amp;appctx);
+<a name="line180">180: </a>  }
+
+<a name="line182">182: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line183">183: </a><font color="#B22222">     Set solution vector and initial timestep</font>
+<a name="line184">184: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line186">186: </a>  dt   = appctx.h/2.0;
+<a name="line187">187: </a>  <A href="../../../../docs/manualpages/TS/TSSetInitialTimeStep.html#TSSetInitialTimeStep">TSSetInitialTimeStep</A>(ts,0.0,dt);
+
+<a name="line189">189: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line190">190: </a><font color="#B22222">     Customize timestepping solver:  </font>
+<a name="line191">191: </a><font color="#B22222">       - Set the solution method to be the Backward Euler method.</font>
+<a name="line192">192: </a><font color="#B22222">       - Set timestepping duration info </font>
+<a name="line193">193: </a><font color="#B22222">     Then set runtime options, which can override these defaults.</font>
+<a name="line194">194: </a><font color="#B22222">     For example,</font>
+<a name="line195">195: </a><font color="#B22222">          -ts_max_steps &lt;maxsteps&gt; -ts_final_time &lt;maxtime&gt;</font>
+<a name="line196">196: </a><font color="#B22222">     to override the defaults set by <A href="../../../../docs/manualpages/TS/TSSetDuration.html#TSSetDuration">TSSetDuration</A>().</font>
+<a name="line197">197: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line199">199: </a>  <A href="../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>(ts,<A href="../../../../docs/manualpages/TS/TSBEULER.html#TSBEULER">TSBEULER</A>);
+<a name="line200">200: </a>  <A href="../../../../docs/manualpages/TS/TSSetDuration.html#TSSetDuration">TSSetDuration</A>(ts,time_steps_max,time_total_max);
+<a name="line201">201: </a>  <font color="#B22222">/* Set lower and upper bound on the solution vector for each time step */</font>
+<a name="line202">202: </a>  <A href="../../../../docs/manualpages/TS/TSVISetVariableBounds.html#TSVISetVariableBounds">TSVISetVariableBounds</A>(ts,xl,xu);
+<a name="line203">203: </a>  <A href="../../../../docs/manualpages/TS/TSSetFromOptions.html#TSSetFromOptions">TSSetFromOptions</A>(ts);
+
+<a name="line205">205: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line206">206: </a><font color="#B22222">     Solve the problem</font>
+<a name="line207">207: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line209">209: </a>  <font color="#B22222">/*</font>
+<a name="line210">210: </a><font color="#B22222">     Evaluate initial conditions</font>
+<a name="line211">211: </a><font color="#B22222">  */</font>
+<a name="line212">212: </a>  InitialConditions(u,&amp;appctx);
+
+<a name="line214">214: </a>  <font color="#B22222">/*</font>
+<a name="line215">215: </a><font color="#B22222">     Run the timestepping solver</font>
+<a name="line216">216: </a><font color="#B22222">  */</font>
+<a name="line217">217: </a>  <A href="../../../../docs/manualpages/TS/TSSolve.html#TSSolve">TSSolve</A>(ts,u,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line219">219: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line220">220: </a><font color="#B22222">     Free work space.  All PETSc objects should be destroyed when they</font>
+<a name="line221">221: </a><font color="#B22222">     are no longer needed.</font>
+<a name="line222">222: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line224">224: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;r);
+<a name="line225">225: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;xl);
+<a name="line226">226: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;xu);
+<a name="line227">227: </a>  <A href="../../../../docs/manualpages/TS/TSDestroy.html#TSDestroy">TSDestroy</A>(&amp;ts);
+<a name="line228">228: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;u);
+<a name="line229">229: </a>  <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;A);
+<a name="line230">230: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;appctx.da);
+<a name="line231">231: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;appctx.localwork);
+<a name="line232">232: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;appctx.solution);
+<a name="line233">233: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;appctx.u_local);
+
+<a name="line235">235: </a>  <font color="#B22222">/*</font>
+<a name="line236">236: </a><font color="#B22222">     Always call <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>() before exiting a program.  This routine</font>
+<a name="line237">237: </a><font color="#B22222">       - finalizes the PETSc libraries as well as MPI</font>
+<a name="line238">238: </a><font color="#B22222">       - provides summary and diagnostic information if certain runtime</font>
+<a name="line239">239: </a><font color="#B22222">         options are chosen (e.g., -log_summary). </font>
+<a name="line240">240: </a><font color="#B22222">  */</font>
+<a name="line241">241: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line242">242: </a>  <font color="#4169E1">return</font> 0;
+<a name="line243">243: </a>}
+<a name="line244">244: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line247">247: </a><font color="#B22222">/*</font>
+<a name="line248">248: </a><font color="#B22222">   InitialConditions - Computes the solution at the initial time. </font>
+
+<a name="line250">250: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line251">251: </a><font color="#B22222">   u - uninitialized solution vector (global)</font>
+<a name="line252">252: </a><font color="#B22222">   appctx - user-defined application context</font>
+
+<a name="line254">254: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line255">255: </a><font color="#B22222">   u - vector with solution at initial time (global)</font>
+<a name="line256">256: </a><font color="#B22222">*/</font>
+<a name="line257">257: </a><strong><font color="#4169E1"><a name="InitialConditions"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> InitialConditions(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> u,AppCtx *appctx)</font></strong>
+<a name="line258">258: </a>{
+<a name="line259">259: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *u_localptr,h = appctx-&gt;h,x;
+<a name="line260">260: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,mybase,myend;
+
+<a name="line263">263: </a>  <font color="#B22222">/* </font>
+<a name="line264">264: </a><font color="#B22222">     Determine starting point of each processor's range of</font>
+<a name="line265">265: </a><font color="#B22222">     grid values.</font>
+<a name="line266">266: </a><font color="#B22222">  */</font>
+<a name="line267">267: </a>  <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRange.html#VecGetOwnershipRange">VecGetOwnershipRange</A>(u,&amp;mybase,&amp;myend);
+
+<a name="line269">269: </a>  <font color="#B22222">/* </font>
+<a name="line270">270: </a><font color="#B22222">    Get a pointer to vector data.</font>
+<a name="line271">271: </a><font color="#B22222">    - For default PETSc vectors, <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>() returns a pointer to</font>
+<a name="line272">272: </a><font color="#B22222">      the data array.  Otherwise, the routine is implementation dependent.</font>
+<a name="line273">273: </a><font color="#B22222">    - You MUST call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>() when you no longer need access to</font>
+<a name="line274">274: </a><font color="#B22222">      the array.</font>
+<a name="line275">275: </a><font color="#B22222">    - Note that the Fortran interface to <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>() differs from the</font>
+<a name="line276">276: </a><font color="#B22222">      C version.  See the users manual for details.</font>
+<a name="line277">277: </a><font color="#B22222">  */</font>
+<a name="line278">278: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(u,&amp;u_localptr);
+
+<a name="line280">280: </a>  <font color="#B22222">/* </font>
+<a name="line281">281: </a><font color="#B22222">     We initialize the solution array by simply writing the solution</font>
+<a name="line282">282: </a><font color="#B22222">     directly into the array locations.  Alternatively, we could use</font>
+<a name="line283">283: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>() or <A href="../../../../docs/manualpages/Vec/VecSetValuesLocal.html#VecSetValuesLocal">VecSetValuesLocal</A>().</font>
+<a name="line284">284: </a><font color="#B22222">  */</font>
+<a name="line285">285: </a>  <font color="#4169E1">for</font> (i=mybase; i&lt;myend; i++) {
+<a name="line286">286: </a>    x = h*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)i; <font color="#B22222">/* current location in global grid */</font>
+<a name="line287">287: </a>    u_localptr[i-mybase] = 1.0 + x*x;
+<a name="line288">288: </a>  }
+
+<a name="line290">290: </a>  <font color="#B22222">/* </font>
+<a name="line291">291: </a><font color="#B22222">     Restore vector</font>
+<a name="line292">292: </a><font color="#B22222">  */</font>
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(u,&amp;u_localptr);
+
+<a name="line295">295: </a>  <font color="#B22222">/* </font>
+<a name="line296">296: </a><font color="#B22222">     Print debugging information if desired</font>
+<a name="line297">297: </a><font color="#B22222">  */</font>
+<a name="line298">298: </a>  <font color="#4169E1">if</font> (appctx-&gt;debug) {
+<a name="line299">299: </a>     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,<font color="#666666">"initial guess vector\n"</font>);
+<a name="line300">300: </a>     <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html#PETSC_VIEWER_STDOUT_WORLD">PETSC_VIEWER_STDOUT_WORLD</A>);
+<a name="line301">301: </a>  }
+
+<a name="line303">303: </a>  <font color="#4169E1">return</font> 0;
+<a name="line304">304: </a>}
+
+<a name="line306">306: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line309">309: </a><font color="#B22222">/*</font>
+<a name="line310">310: </a><font color="#B22222">  SetBounds - Sets the lower and uper bounds on the interior points</font>
+
+<a name="line312">312: </a><font color="#B22222">  Input parameters:</font>
+<a name="line313">313: </a><font color="#B22222">  xl - vector of lower bounds</font>
+<a name="line314">314: </a><font color="#B22222">  xu - vector of upper bounds</font>
+<a name="line315">315: </a><font color="#B22222">  ul - constant lower bound for all variables</font>
+<a name="line316">316: </a><font color="#B22222">  uh - constant upper bound for all variables</font>
+<a name="line317">317: </a><font color="#B22222">  appctx - Application context</font>
+<a name="line318">318: </a><font color="#B22222"> */</font>
+<a name="line319">319: </a><strong><font color="#4169E1"><a name="SetBounds"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetBounds(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xl, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xu, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> ul, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> uh,AppCtx* appctx)</font></strong>
+<a name="line320">320: </a>{
+<a name="line322">322: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *l,*u;
+<a name="line323">323: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank,size;
+<a name="line324">324: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       localsize;
+
+
+<a name="line328">328: </a>  <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(xl,ul);
+<a name="line329">329: </a>  <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(xu,uh);
+<a name="line330">330: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(xl,&amp;localsize);
+<a name="line331">331: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(xl,&amp;l);
+<a name="line332">332: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(xu,&amp;u);
+
+
+<a name="line335">335: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(appctx-&gt;comm,&amp;rank);
+<a name="line336">336: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(appctx-&gt;comm,&amp;size);
+<a name="line337">337: </a>  <font color="#4169E1">if</font> (!rank) {
+<a name="line338">338: </a>    l[0] = -SNES_VI_INF;
+<a name="line339">339: </a>    u[0] =  SNES_VI_INF;
+<a name="line340">340: </a>  }
+<a name="line341">341: </a>  <font color="#4169E1">if</font> (rank == size-1) {
+<a name="line342">342: </a>    l[localsize-1] = -SNES_VI_INF;
+<a name="line343">343: </a>    u[localsize-1] = SNES_VI_INF;
+<a name="line344">344: </a>  }
+<a name="line345">345: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(xl,&amp;l);
+<a name="line346">346: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(xu,&amp;u);
+
+<a name="line348">348: </a>  <font color="#4169E1">return</font>(0);
+<a name="line349">349: </a>}
+
+<a name="line351">351: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line354">354: </a><font color="#B22222">/*</font>
+<a name="line355">355: </a><font color="#B22222">   ExactSolution - Computes the exact solution at a given time.</font>
+
+<a name="line357">357: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line358">358: </a><font color="#B22222">   t - current time</font>
+<a name="line359">359: </a><font color="#B22222">   solution - vector in which exact solution will be computed</font>
+<a name="line360">360: </a><font color="#B22222">   appctx - user-defined application context</font>
+
+<a name="line362">362: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line363">363: </a><font color="#B22222">   solution - vector with the newly computed exact solution</font>
+<a name="line364">364: </a><font color="#B22222">*/</font>
+<a name="line365">365: </a><strong><font color="#4169E1"><a name="ExactSolution"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ExactSolution(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> solution,AppCtx *appctx)</font></strong>
+<a name="line366">366: </a>{
+<a name="line367">367: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *s_localptr,h = appctx-&gt;h,x;
+<a name="line368">368: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,mybase,myend;
+
+<a name="line371">371: </a>  <font color="#B22222">/* </font>
+<a name="line372">372: </a><font color="#B22222">     Determine starting and ending points of each processor's </font>
+<a name="line373">373: </a><font color="#B22222">     range of grid values</font>
+<a name="line374">374: </a><font color="#B22222">  */</font>
+<a name="line375">375: </a>  <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRange.html#VecGetOwnershipRange">VecGetOwnershipRange</A>(solution,&amp;mybase,&amp;myend);
+
+<a name="line377">377: </a>  <font color="#B22222">/*</font>
+<a name="line378">378: </a><font color="#B22222">     Get a pointer to vector data.</font>
+<a name="line379">379: </a><font color="#B22222">  */</font>
+<a name="line380">380: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(solution,&amp;s_localptr);
+
+<a name="line382">382: </a>  <font color="#B22222">/* </font>
+<a name="line383">383: </a><font color="#B22222">     Simply write the solution directly into the array locations.</font>
+<a name="line384">384: </a><font color="#B22222">     Alternatively, we could use <A href="../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>() or <A href="../../../../docs/manualpages/Vec/VecSetValuesLocal.html#VecSetValuesLocal">VecSetValuesLocal</A>().</font>
+<a name="line385">385: </a><font color="#B22222">  */</font>
+<a name="line386">386: </a>  <font color="#4169E1">for</font> (i=mybase; i&lt;myend; i++) {
+<a name="line387">387: </a>    x = h*(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)i;
+<a name="line388">388: </a>    s_localptr[i-mybase] = (t + 1.0)*(1.0 + x*x);
+<a name="line389">389: </a>  }
+
+<a name="line391">391: </a>  <font color="#B22222">/* </font>
+<a name="line392">392: </a><font color="#B22222">     Restore vector</font>
+<a name="line393">393: </a><font color="#B22222">  */</font>
+<a name="line394">394: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(solution,&amp;s_localptr);
+<a name="line395">395: </a>  <font color="#4169E1">return</font> 0;
+<a name="line396">396: </a>}
+<a name="line397">397: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line400">400: </a><font color="#B22222">/*</font>
+<a name="line401">401: </a><font color="#B22222">   Monitor - User-provided routine to monitor the solution computed at </font>
+<a name="line402">402: </a><font color="#B22222">   each timestep.  This example plots the solution and computes the</font>
+<a name="line403">403: </a><font color="#B22222">   error in two different norms.</font>
+
+<a name="line405">405: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line406">406: </a><font color="#B22222">   ts     - the timestep context</font>
+<a name="line407">407: </a><font color="#B22222">   step   - the count of the current step (with 0 meaning the</font>
+<a name="line408">408: </a><font color="#B22222">            initial condition)</font>
+<a name="line409">409: </a><font color="#B22222">   time   - the current time</font>
+<a name="line410">410: </a><font color="#B22222">   u      - the solution at this timestep</font>
+<a name="line411">411: </a><font color="#B22222">   ctx    - the user-provided context for this monitoring routine.</font>
+<a name="line412">412: </a><font color="#B22222">            In this case we use the application context which contains </font>
+<a name="line413">413: </a><font color="#B22222">            information about the problem size, workspace and the exact </font>
+<a name="line414">414: </a><font color="#B22222">            solution.</font>
+<a name="line415">415: </a><font color="#B22222">*/</font>
+<a name="line416">416: </a><strong><font color="#4169E1"><a name="Monitor"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> step,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> time,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> u,void *ctx)</font></strong>
+<a name="line417">417: </a>{
+<a name="line418">418: </a>  AppCtx         *appctx = (AppCtx*) ctx;   <font color="#B22222">/* user-defined application context */</font>
+<a name="line420">420: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      en2,en2s,enmax;
+<a name="line421">421: </a>  <A href="../../../../docs/manualpages/Draw/PetscDraw.html#PetscDraw">PetscDraw</A>      draw;
+
+<a name="line423">423: </a>  <font color="#B22222">/*</font>
+<a name="line424">424: </a><font color="#B22222">     We use the default X windows viewer</font>
+<a name="line425">425: </a><font color="#B22222">             <A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_DRAW_.html#PETSC_VIEWER_DRAW_">PETSC_VIEWER_DRAW_</A>(appctx-&gt;comm)</font>
+<a name="line426">426: </a><font color="#B22222">     that is associated with the current communicator. This saves</font>
+<a name="line427">427: </a><font color="#B22222">     the effort of calling <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawOpen.html#PetscViewerDrawOpen">PetscViewerDrawOpen</A>() to create the window.</font>
+<a name="line428">428: </a><font color="#B22222">     Note that if we wished to plot several items in separate windows we</font>
+<a name="line429">429: </a><font color="#B22222">     would create each viewer with <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawOpen.html#PetscViewerDrawOpen">PetscViewerDrawOpen</A>() and store them in</font>
+<a name="line430">430: </a><font color="#B22222">     the application context, appctx.</font>
+
+<a name="line432">432: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> buffering makes graphics look better.</font>
+<a name="line433">433: </a><font color="#B22222">  */</font>
+<a name="line434">434: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawGetDraw.html#PetscViewerDrawGetDraw">PetscViewerDrawGetDraw</A>(<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_DRAW_.html#PETSC_VIEWER_DRAW_">PETSC_VIEWER_DRAW_</A>(appctx-&gt;comm),0,&amp;draw);
+<a name="line435">435: </a>  <A href="../../../../docs/manualpages/Draw/PetscDrawSetDoubleBuffer.html#PetscDrawSetDoubleBuffer">PetscDrawSetDoubleBuffer</A>(draw);
+<a name="line436">436: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_DRAW_.html#PETSC_VIEWER_DRAW_">PETSC_VIEWER_DRAW_</A>(appctx-&gt;comm));
+
+<a name="line438">438: </a>  <font color="#B22222">/*</font>
+<a name="line439">439: </a><font color="#B22222">     Compute the exact solution at this timestep</font>
+<a name="line440">440: </a><font color="#B22222">  */</font>
+<a name="line441">441: </a>  ExactSolution(time,appctx-&gt;solution,appctx);
+
+<a name="line443">443: </a>  <font color="#B22222">/*</font>
+<a name="line444">444: </a><font color="#B22222">     Print debugging information if desired</font>
+<a name="line445">445: </a><font color="#B22222">  */</font>
+<a name="line446">446: </a>  <font color="#4169E1">if</font> (appctx-&gt;debug) {
+<a name="line447">447: </a>     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,<font color="#666666">"Computed solution vector\n"</font>);
+<a name="line448">448: </a>     <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html#PETSC_VIEWER_STDOUT_WORLD">PETSC_VIEWER_STDOUT_WORLD</A>);
+<a name="line449">449: </a>     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,<font color="#666666">"Exact solution vector\n"</font>);
+<a name="line450">450: </a>     <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(appctx-&gt;solution,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html#PETSC_VIEWER_STDOUT_WORLD">PETSC_VIEWER_STDOUT_WORLD</A>);
+<a name="line451">451: </a>  }
+
+<a name="line453">453: </a>  <font color="#B22222">/*</font>
+<a name="line454">454: </a><font color="#B22222">     Compute the 2-norm and max-norm of the error</font>
+<a name="line455">455: </a><font color="#B22222">  */</font>
+<a name="line456">456: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(appctx-&gt;solution,-1.0,u);
+<a name="line457">457: </a>  <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(appctx-&gt;solution,<A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;en2);
+<a name="line458">458: </a>  en2s  = PetscSqrtReal(appctx-&gt;h)*en2; <font color="#B22222">/* scale the 2-norm by the grid spacing */</font>
+<a name="line459">459: </a>  <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(appctx-&gt;solution,<A href="../../../../docs/manualpages/Vec/NORM_MAX.html#NORM_MAX">NORM_MAX</A>,&amp;enmax);
+
+<a name="line461">461: </a>  <font color="#B22222">/*</font>
+<a name="line462">462: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>() causes only the first processor in this </font>
+<a name="line463">463: </a><font color="#B22222">     communicator to print the timestep information.</font>
+<a name="line464">464: </a><font color="#B22222">  */</font>
+<a name="line465">465: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,<font color="#666666">"Timestep %D: time = %G,2-norm error = %G, max norm error = %G\n"</font>,
+<a name="line466">466: </a>              step,time,en2s,enmax);
+
+<a name="line468">468: </a>  <font color="#B22222">/*</font>
+<a name="line469">469: </a><font color="#B22222">     Print debugging information if desired</font>
+<a name="line470">470: </a><font color="#B22222">   */</font>
+<a name="line471">471: </a>  <font color="#B22222">/*  if (appctx-&gt;debug) {</font>
+<a name="line472">472: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,"Error vector\n");</font>
+<a name="line473">473: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(appctx-&gt;solution,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html#PETSC_VIEWER_STDOUT_WORLD">PETSC_VIEWER_STDOUT_WORLD</A>);</font>
+<a name="line474">474: </a><font color="#B22222">   } */</font>
+<a name="line475">475: </a>  <font color="#4169E1">return</font> 0;
+<a name="line476">476: </a>}
+<a name="line477">477: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line480">480: </a><font color="#B22222">/*</font>
+<a name="line481">481: </a><font color="#B22222">   RHSFunction - User-provided routine that evalues the right-hand-side</font>
+<a name="line482">482: </a><font color="#B22222">   function of the ODE.  This routine is set in the main program by </font>
+<a name="line483">483: </a><font color="#B22222">   calling <A href="../../../../docs/manualpages/TS/TSSetRHSFunction.html#TSSetRHSFunction">TSSetRHSFunction</A>().  We compute:</font>
+<a name="line484">484: </a><font color="#B22222">          global_out = F(global_in)</font>
+
+<a name="line486">486: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line487">487: </a><font color="#B22222">   ts         - timesteping context</font>
+<a name="line488">488: </a><font color="#B22222">   t          - current time</font>
+<a name="line489">489: </a><font color="#B22222">   global_in  - vector containing the current iterate</font>
+<a name="line490">490: </a><font color="#B22222">   ctx        - (optional) user-provided context for function evaluation.</font>
+<a name="line491">491: </a><font color="#B22222">                In this case we use the appctx defined above.</font>
+
+<a name="line493">493: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line494">494: </a><font color="#B22222">   global_out - vector containing the newly evaluated function</font>
+<a name="line495">495: </a><font color="#B22222">*/</font>
+<a name="line496">496: </a><strong><font color="#4169E1"><a name="RHSFunction"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RHSFunction(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> global_in,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> global_out,void *ctx)</font></strong>
+<a name="line497">497: </a>{
+<a name="line498">498: </a>  AppCtx         *appctx = (AppCtx*) ctx;       <font color="#B22222">/* user-defined application context */</font>
+<a name="line499">499: </a>  DM             da = appctx-&gt;da;               <font color="#B22222">/* distributed array */</font>
+<a name="line500">500: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            local_in = appctx-&gt;u_local;    <font color="#B22222">/* local ghosted input vector */</font>
+<a name="line501">501: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            localwork = appctx-&gt;localwork; <font color="#B22222">/* local ghosted work vector */</font>
+<a name="line503">503: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,localsize;
+<a name="line504">504: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank,size;
+<a name="line505">505: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *copyptr,*localptr,sc;
+
+<a name="line507">507: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line508">508: </a><font color="#B22222">     Get ready for local function computations</font>
+<a name="line509">509: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line510">510: </a>  <font color="#B22222">/*</font>
+<a name="line511">511: </a><font color="#B22222">     Scatter ghost points to local vector, using the 2-step process</font>
+<a name="line512">512: </a><font color="#B22222">        <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(), <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>().</font>
+<a name="line513">513: </a><font color="#B22222">     By placing code between these two statements, computations can be</font>
+<a name="line514">514: </a><font color="#B22222">     done while messages are in transition.</font>
+<a name="line515">515: </a><font color="#B22222">  */</font>
+<a name="line516">516: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(da,global_in,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,local_in);
+<a name="line517">517: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(da,global_in,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,local_in);
+
+<a name="line519">519: </a>  <font color="#B22222">/*</font>
+<a name="line520">520: </a><font color="#B22222">      Access directly the values in our local INPUT work array</font>
+<a name="line521">521: </a><font color="#B22222">  */</font>
+<a name="line522">522: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(local_in,&amp;localptr);
+
+<a name="line524">524: </a>  <font color="#B22222">/*</font>
+<a name="line525">525: </a><font color="#B22222">      Access directly the values in our local OUTPUT work array</font>
+<a name="line526">526: </a><font color="#B22222">  */</font>
+<a name="line527">527: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(localwork,&amp;copyptr);
+
+<a name="line529">529: </a>  sc = 1.0/(appctx-&gt;h*appctx-&gt;h*2.0*(1.0+t)*(1.0+t));
+
+<a name="line531">531: </a>  <font color="#B22222">/*</font>
+<a name="line532">532: </a><font color="#B22222">      Evaluate our function on the nodes owned by this processor</font>
+<a name="line533">533: </a><font color="#B22222">  */</font>
+<a name="line534">534: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(local_in,&amp;localsize);
+
+<a name="line536">536: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line537">537: </a><font color="#B22222">     Compute entries for the locally owned part </font>
+<a name="line538">538: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line540">540: </a>  <font color="#B22222">/*</font>
+<a name="line541">541: </a><font color="#B22222">     Handle boundary conditions: This is done by using the boundary condition </font>
+<a name="line542">542: </a><font color="#B22222">        u(t,boundary) = g(t,boundary) </font>
+<a name="line543">543: </a><font color="#B22222">     for some function g. Now take the derivative with respect to t to obtain</font>
+<a name="line544">544: </a><font color="#B22222">        u_{t}(t,boundary) = g_{t}(t,boundary)</font>
+
+<a name="line546">546: </a><font color="#B22222">     In our case, u(t,0) = t + 1, so that u_{t}(t,0) = 1 </font>
+<a name="line547">547: </a><font color="#B22222">             and  u(t,1) = 2t+ 2, so that u_{t}(t,1) = 2</font>
+<a name="line548">548: </a><font color="#B22222">  */</font>
+<a name="line549">549: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(appctx-&gt;comm,&amp;rank);
+<a name="line550">550: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(appctx-&gt;comm,&amp;size);
+<a name="line551">551: </a>  <font color="#4169E1">if</font> (!rank)          copyptr[0]           = 1.0;
+<a name="line552">552: </a>  <font color="#4169E1">if</font> (rank == size-1) copyptr[localsize-1] = (t &lt; .5) ? 2.0 : 0.0;
+
+<a name="line554">554: </a>  <font color="#B22222">/*</font>
+<a name="line555">555: </a><font color="#B22222">     Handle the interior nodes where the PDE is replace by finite </font>
+<a name="line556">556: </a><font color="#B22222">     difference operators.</font>
+<a name="line557">557: </a><font color="#B22222">  */</font>
+<a name="line558">558: </a>  <font color="#4169E1">for</font> (i=1; i&lt;localsize-1; i++) {
+<a name="line559">559: </a>    copyptr[i] =  localptr[i] * sc * (localptr[i+1] + localptr[i-1] - 2.0*localptr[i]);
+<a name="line560">560: </a>  }
+
+<a name="line562">562: </a>  <font color="#B22222">/* </font>
+<a name="line563">563: </a><font color="#B22222">     Restore vectors</font>
+<a name="line564">564: </a><font color="#B22222">  */</font>
+<a name="line565">565: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(local_in,&amp;localptr);
+<a name="line566">566: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(localwork,&amp;copyptr);
+
+<a name="line568">568: </a>  <font color="#B22222">/*</font>
+<a name="line569">569: </a><font color="#B22222">     Insert values from the local OUTPUT vector into the global </font>
+<a name="line570">570: </a><font color="#B22222">     output vector</font>
+<a name="line571">571: </a><font color="#B22222">  */</font>
+<a name="line572">572: </a>  <A href="../../../../docs/manualpages/DM/DMLocalToGlobalBegin.html#DMLocalToGlobalBegin">DMLocalToGlobalBegin</A>(da,localwork,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,global_out);
+<a name="line573">573: </a>  <A href="../../../../docs/manualpages/DM/DMLocalToGlobalEnd.html#DMLocalToGlobalEnd">DMLocalToGlobalEnd</A>(da,localwork,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,global_out);
+
+<a name="line575">575: </a>  <font color="#B22222">/* Print debugging information if desired */</font>
+<a name="line576">576: </a>  <font color="#B22222">/*  if (appctx-&gt;debug) {</font>
+<a name="line577">577: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(appctx-&gt;comm,"RHS function vector\n");</font>
+<a name="line578">578: </a><font color="#B22222">     <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(global_out,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html#PETSC_VIEWER_STDOUT_WORLD">PETSC_VIEWER_STDOUT_WORLD</A>);</font>
+<a name="line579">579: </a><font color="#B22222">   } */</font>
+
+<a name="line581">581: </a>  <font color="#4169E1">return</font> 0;
+<a name="line582">582: </a>}
+<a name="line583">583: </a><font color="#B22222">/* --------------------------------------------------------------------- */</font>
+<a name="line586">586: </a><font color="#B22222">/*</font>
+<a name="line587">587: </a><font color="#B22222">   RHSJacobian - User-provided routine to compute the Jacobian of</font>
+<a name="line588">588: </a><font color="#B22222">   the nonlinear right-hand-side function of the ODE.</font>
+
+<a name="line590">590: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line591">591: </a><font color="#B22222">   ts - the <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> context</font>
+<a name="line592">592: </a><font color="#B22222">   t - current time</font>
+<a name="line593">593: </a><font color="#B22222">   global_in - global input vector</font>
+<a name="line594">594: </a><font color="#B22222">   dummy - optional user-defined context, as set by TSetRHSJacobian()</font>
+
+<a name="line596">596: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line597">597: </a><font color="#B22222">   AA - Jacobian matrix</font>
+<a name="line598">598: </a><font color="#B22222">   BB - optionally different preconditioning matrix</font>
+<a name="line599">599: </a><font color="#B22222">   str - flag indicating matrix structure</font>
+
+<a name="line601">601: </a><font color="#B22222">  Notes:</font>
+<a name="line602">602: </a><font color="#B22222">  RHSJacobian computes entries for the locally owned part of the Jacobian.</font>
+<a name="line603">603: </a><font color="#B22222">   - Currently, all PETSc parallel matrix formats are partitioned by</font>
+<a name="line604">604: </a><font color="#B22222">     contiguous chunks of rows across the processors. </font>
+<a name="line605">605: </a><font color="#B22222">   - Each processor needs to insert only elements that it owns</font>
+<a name="line606">606: </a><font color="#B22222">     locally (but any non-local elements will be sent to the</font>
+<a name="line607">607: </a><font color="#B22222">     appropriate processor during matrix assembly). </font>
+<a name="line608">608: </a><font color="#B22222">   - Always specify global row and columns of matrix entries when</font>
+<a name="line609">609: </a><font color="#B22222">     using <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>().</font>
+<a name="line610">610: </a><font color="#B22222">   - Here, we set all entries for a particular row at once.</font>
+<a name="line611">611: </a><font color="#B22222">   - Note that <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>() uses 0-based row and column numbers</font>
+<a name="line612">612: </a><font color="#B22222">     in Fortran as well as in C.</font>
+<a name="line613">613: </a><font color="#B22222">*/</font>
+<a name="line614">614: </a><strong><font color="#4169E1"><a name="RHSJacobian"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RHSJacobian(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> global_in,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *AA,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *BB,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *str,void *ctx)</font></strong>
+<a name="line615">615: </a>{
+<a name="line616">616: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            B = *BB;                      <font color="#B22222">/* Jacobian matrix */</font>
+<a name="line617">617: </a>  AppCtx         *appctx = (AppCtx*)ctx;     <font color="#B22222">/* user-defined application context */</font>
+<a name="line618">618: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            local_in = appctx-&gt;u_local;   <font color="#B22222">/* local ghosted input vector */</font>
+<a name="line619">619: </a>  DM             da = appctx-&gt;da;              <font color="#B22222">/* distributed array */</font>
+<a name="line620">620: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    v[3],*localptr,sc;
+<a name="line622">622: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,mstart,mend,mstarts,mends,idx[3],is;
+
+<a name="line624">624: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line625">625: </a><font color="#B22222">     Get ready for local Jacobian computations</font>
+<a name="line626">626: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line627">627: </a>  <font color="#B22222">/*</font>
+<a name="line628">628: </a><font color="#B22222">     Scatter ghost points to local vector, using the 2-step process</font>
+<a name="line629">629: </a><font color="#B22222">        <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(), <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>().</font>
+<a name="line630">630: </a><font color="#B22222">     By placing code between these two statements, computations can be</font>
+<a name="line631">631: </a><font color="#B22222">     done while messages are in transition.</font>
+<a name="line632">632: </a><font color="#B22222">  */</font>
+<a name="line633">633: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(da,global_in,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,local_in);
+<a name="line634">634: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(da,global_in,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,local_in);
+
+<a name="line636">636: </a>  <font color="#B22222">/*</font>
+<a name="line637">637: </a><font color="#B22222">     Get pointer to vector data</font>
+<a name="line638">638: </a><font color="#B22222">  */</font>
+<a name="line639">639: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(local_in,&amp;localptr);
+
+<a name="line641">641: </a>  <font color="#B22222">/* </font>
+<a name="line642">642: </a><font color="#B22222">     Get starting and ending locally owned rows of the matrix</font>
+<a name="line643">643: </a><font color="#B22222">  */</font>
+<a name="line644">644: </a>  <A href="../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>(B,&amp;mstarts,&amp;mends);
+<a name="line645">645: </a>  mstart = mstarts; mend = mends;
+
+<a name="line647">647: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line648">648: </a><font color="#B22222">     Compute entries for the locally owned part of the Jacobian.</font>
+<a name="line649">649: </a><font color="#B22222">      - Currently, all PETSc parallel matrix formats are partitioned by</font>
+<a name="line650">650: </a><font color="#B22222">        contiguous chunks of rows across the processors. </font>
+<a name="line651">651: </a><font color="#B22222">      - Each processor needs to insert only elements that it owns</font>
+<a name="line652">652: </a><font color="#B22222">        locally (but any non-local elements will be sent to the</font>
+<a name="line653">653: </a><font color="#B22222">        appropriate processor during matrix assembly). </font>
+<a name="line654">654: </a><font color="#B22222">      - Here, we set all entries for a particular row at once.</font>
+<a name="line655">655: </a><font color="#B22222">      - We can set matrix entries either using either</font>
+<a name="line656">656: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>() or <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>().</font>
+<a name="line657">657: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line659">659: </a>  <font color="#B22222">/* </font>
+<a name="line660">660: </a><font color="#B22222">     Set matrix rows corresponding to boundary data</font>
+<a name="line661">661: </a><font color="#B22222">  */</font>
+<a name="line662">662: </a>  <font color="#4169E1">if</font> (mstart == 0) {
+<a name="line663">663: </a>    v[0] = 0.0;
+<a name="line664">664: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(B,1,&amp;mstart,1,&amp;mstart,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line665">665: </a>    mstart++;
+<a name="line666">666: </a>  }
+<a name="line667">667: </a>  <font color="#4169E1">if</font> (mend == appctx-&gt;m) {
+<a name="line668">668: </a>    mend--;
+<a name="line669">669: </a>    v[0] = 0.0;
+<a name="line670">670: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(B,1,&amp;mend,1,&amp;mend,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line671">671: </a>  }
+
+<a name="line673">673: </a>  <font color="#B22222">/*</font>
+<a name="line674">674: </a><font color="#B22222">     Set matrix rows corresponding to interior data.  We construct the </font>
+<a name="line675">675: </a><font color="#B22222">     matrix one row at a time.</font>
+<a name="line676">676: </a><font color="#B22222">  */</font>
+<a name="line677">677: </a>  sc = 1.0/(appctx-&gt;h*appctx-&gt;h*2.0*(1.0+t)*(1.0+t));
+<a name="line678">678: </a>  <font color="#4169E1">for</font> (i=mstart; i&lt;mend; i++) {
+<a name="line679">679: </a>    idx[0] = i-1; idx[1] = i; idx[2] = i+1;
+<a name="line680">680: </a>    is     = i - mstart + 1;
+<a name="line681">681: </a>    v[0]   = sc*localptr[is];
+<a name="line682">682: </a>    v[1]   = sc*(localptr[is+1] + localptr[is-1] - 4.0*localptr[is]);
+<a name="line683">683: </a>    v[2]   = sc*localptr[is];
+<a name="line684">684: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(B,1,&amp;i,3,idx,v,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line685">685: </a>  }
+
+<a name="line687">687: </a>  <font color="#B22222">/* </font>
+<a name="line688">688: </a><font color="#B22222">     Restore vector</font>
+<a name="line689">689: </a><font color="#B22222">  */</font>
+<a name="line690">690: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(local_in,&amp;localptr);
+
+<a name="line692">692: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line693">693: </a><font color="#B22222">     Complete the matrix assembly process and set some options</font>
+<a name="line694">694: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line695">695: </a>  <font color="#B22222">/*</font>
+<a name="line696">696: </a><font color="#B22222">     Assemble matrix, using the 2-step process:</font>
+<a name="line697">697: </a><font color="#B22222">       <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(), <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>()</font>
+<a name="line698">698: </a><font color="#B22222">     Computations can be done while messages are in transition</font>
+<a name="line699">699: </a><font color="#B22222">     by placing code between these two statements.</font>
+<a name="line700">700: </a><font color="#B22222">  */</font>
+<a name="line701">701: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(B,MAT_FINAL_ASSEMBLY);
+<a name="line702">702: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(B,MAT_FINAL_ASSEMBLY);
+
+<a name="line704">704: </a>  <font color="#B22222">/*</font>
+<a name="line705">705: </a><font color="#B22222">     Set flag to indicate that the Jacobian matrix retains an identical</font>
+<a name="line706">706: </a><font color="#B22222">     nonzero structure throughout all timestepping iterations (although the</font>
+<a name="line707">707: </a><font color="#B22222">     values of the entries change). Thus, we can save some work in setting</font>
+<a name="line708">708: </a><font color="#B22222">     up the preconditioner (e.g., no need to redo symbolic factorization for</font>
+<a name="line709">709: </a><font color="#B22222">     ILU/ICC preconditioners).</font>
+<a name="line710">710: </a><font color="#B22222">      - If the nonzero structure of the matrix is different during</font>
+<a name="line711">711: </a><font color="#B22222">        successive linear solves, then the flag DIFFERENT_NONZERO_PATTERN</font>
+<a name="line712">712: </a><font color="#B22222">        must be used instead.  If you are unsure whether the matrix</font>
+<a name="line713">713: </a><font color="#B22222">        structure has changed or not, use the flag DIFFERENT_NONZERO_PATTERN.</font>
+<a name="line714">714: </a><font color="#B22222">      - Caution:  If you specify SAME_NONZERO_PATTERN, PETSc</font>
+<a name="line715">715: </a><font color="#B22222">        believes your assertion and does not check the structure</font>
+<a name="line716">716: </a><font color="#B22222">        of the matrix.  If you erroneously claim that the structure</font>
+<a name="line717">717: </a><font color="#B22222">        is the same when it actually is not, the new preconditioner</font>
+<a name="line718">718: </a><font color="#B22222">        will not function correctly.  Thus, use this optimization</font>
+<a name="line719">719: </a><font color="#B22222">        feature with caution!</font>
+<a name="line720">720: </a><font color="#B22222">  */</font>
+<a name="line721">721: </a>  *str = SAME_NONZERO_PATTERN;
+
+<a name="line723">723: </a>  <font color="#B22222">/*</font>
+<a name="line724">724: </a><font color="#B22222">     Set and option to indicate that we will never add a new nonzero location </font>
+<a name="line725">725: </a><font color="#B22222">     to the matrix. If we do, it will generate an error.</font>
+<a name="line726">726: </a><font color="#B22222">  */</font>
+<a name="line727">727: </a>  <A href="../../../../docs/manualpages/Mat/MatSetOption.html#MatSetOption">MatSetOption</A>(B,MAT_NEW_NONZERO_LOCATION_ERR,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+
+<a name="line729">729: </a>  <font color="#4169E1">return</font> 0;
+<a name="line730">730: </a>}
+
+
+
+
+
+</pre>
+</body>
+
+</html>

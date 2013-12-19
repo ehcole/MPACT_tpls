@@ -1,0 +1,656 @@
+<center><a href="csrperm.c">Actual source code: csrperm.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T18:49:56+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCMAT_DLL</font></strong>
+
+<a name="line3">  3: </a><font color="#B22222">/*</font>
+<a name="line4">  4: </a><font color="#B22222">  Defines basic operations for the MATSEQCSRPERM matrix class.</font>
+<a name="line5">  5: </a><font color="#B22222">  This class is derived from the <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A> class and retains the </font>
+<a name="line6">  6: </a><font color="#B22222">  compressed row storage (aka Yale sparse matrix format) but augments </font>
+<a name="line7">  7: </a><font color="#B22222">  it with some permutation information that enables some operations </font>
+<a name="line8">  8: </a><font color="#B22222">  to be more vectorizable.  A physically rearranged copy of the matrix </font>
+<a name="line9">  9: </a><font color="#B22222">  may be stored if the user desires.</font>
+
+<a name="line11"> 11: </a><font color="#B22222">  Eventually a variety of permutations may be supported.</font>
+<a name="line12"> 12: </a><font color="#B22222">*/</font>
+
+<a name="line14"> 14: </a> #include <A href="../../../../../../include/../src/mat/impls/aij/seq/aij.h.html">../src/mat/impls/aij/seq/aij.h</A>
+
+<a name="line16"> 16: </a><strong><font color="#228B22">#define NDIM 512</font></strong>
+<a name="line17"> 17: </a>    <font color="#B22222">/* NDIM specifies how many rows at a time we should work with when </font>
+<a name="line18"> 18: </a><font color="#B22222">     * performing the vectorized mat-vec.  This depends on various factors </font>
+<a name="line19"> 19: </a><font color="#B22222">     * such as vector register length, etc., and I really need to add a </font>
+<a name="line20"> 20: </a><font color="#B22222">     * way for the user (or the library) to tune this.  I'm setting it to  </font>
+<a name="line21"> 21: </a><font color="#B22222">     * 512 for now since that is what Ed D'Azevedo was using in his Fortran </font>
+<a name="line22"> 22: </a><font color="#B22222">     * routines. */</font>
+
+<a name="line24"> 24: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line25"> 25: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  ngroup;
+<a name="line26"> 26: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *xgroup;
+<a name="line27"> 27: </a>    <font color="#B22222">/* Denotes where groups of rows with same number of nonzeros </font>
+<a name="line28"> 28: </a><font color="#B22222">     * begin and end, i.e., xgroup[i] gives us the position in iperm[] </font>
+<a name="line29"> 29: </a><font color="#B22222">     * where the ith group begins. */</font>
+<a name="line30"> 30: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *nzgroup; <font color="#B22222">/*  how many nonzeros each row that is a member of group i has. */</font>
+<a name="line31"> 31: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *iperm;  <font color="#B22222">/* The permutation vector. */</font>
+
+<a name="line33"> 33: </a>  <font color="#B22222">/* Flag that indicates whether we need to clean up permutation </font>
+<a name="line34"> 34: </a><font color="#B22222">   * information during the <A href="../../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>. */</font>
+<a name="line35"> 35: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A> CleanUpCSRPERM;
+
+<a name="line37"> 37: </a>  <font color="#B22222">/* Some of this stuff is for Ed's recursive triangular solve.</font>
+<a name="line38"> 38: </a><font color="#B22222">   * I'm not sure what I need yet. */</font>
+<a name="line39"> 39: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> blocksize;
+<a name="line40"> 40: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nstep;
+<a name="line41"> 41: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *jstart_list;
+<a name="line42"> 42: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *jend_list;
+<a name="line43"> 43: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *action_list;
+<a name="line44"> 44: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *ngroup_list;
+<a name="line45"> 45: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> **ipointer_list;
+<a name="line46"> 46: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> **xgroup_list;
+<a name="line47"> 47: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> **nzgroup_list;
+<a name="line48"> 48: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> **iperm_list;
+<a name="line49"> 49: </a>} Mat_SeqCSRPERM;
+
+
+<a name="line56"> 56: </a><strong><font color="#4169E1"><a name="MatConvert_SeqCSRPERM_SeqAIJ"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  MatConvert_SeqCSRPERM_SeqAIJ(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> type,<A href="../../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> reuse,<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *newmat)</font></strong>
+<a name="line57"> 57: </a>{
+<a name="line58"> 58: </a>  <font color="#B22222">/* This routine is only called to convert a <A href="../../../../../../docs/manualpages/Mat/MATCSRPERM.html#MATCSRPERM">MATCSRPERM</A> to its base PETSc type, */</font>
+<a name="line59"> 59: </a>  <font color="#B22222">/* so we will ignore '<A href="../../../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> type'. */</font>
+<a name="line61"> 61: </a>  <A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            B = *newmat;
+<a name="line62"> 62: </a>  Mat_SeqCSRPERM *csrperm=(Mat_SeqCSRPERM*)A-&gt;spptr;
+
+<a name="line65"> 65: </a>  <font color="#4169E1">if</font> (reuse == MAT_INITIAL_MATRIX) {
+<a name="line66"> 66: </a>    <A href="../../../../../../docs/manualpages/Mat/MatDuplicate.html#MatDuplicate">MatDuplicate</A>(A,MAT_COPY_VALUES,&amp;B);
+<a name="line67"> 67: </a>  }
+
+<a name="line69"> 69: </a>  <font color="#B22222">/* Reset the original function pointers. */</font>
+<a name="line70"> 70: </a>  B-&gt;ops-&gt;assemblyend = MatAssemblyEnd_SeqAIJ;
+<a name="line71"> 71: </a>  B-&gt;ops-&gt;destroy     = MatDestroy_SeqAIJ;
+<a name="line72"> 72: </a>  B-&gt;ops-&gt;duplicate   = MatDuplicate_SeqAIJ;
+
+<a name="line74"> 74: </a>  <font color="#B22222">/* Free everything in the Mat_SeqCSRPERM data structure. </font>
+<a name="line75"> 75: </a><font color="#B22222">   * We don't free the Mat_SeqCSRPERM struct itself, as this will </font>
+<a name="line76"> 76: </a><font color="#B22222">   * cause problems later when <A href="../../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>() tries to free it. */</font>
+<a name="line77"> 77: </a>  <font color="#4169E1">if</font>(csrperm-&gt;CleanUpCSRPERM) {
+<a name="line78"> 78: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;xgroup);
+<a name="line79"> 79: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;nzgroup);
+<a name="line80"> 80: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;iperm);
+<a name="line81"> 81: </a>  }
+
+<a name="line83"> 83: </a>  <font color="#B22222">/* Change the type of B to <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>. */</font>
+<a name="line84"> 84: </a>  PetscObjectChangeTypeName( (<A href="../../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B, <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>);
+<a name="line85"> 85: </a>
+<a name="line86"> 86: </a>  *newmat = B;
+<a name="line87"> 87: </a>  <font color="#4169E1">return</font>(0);
+<a name="line88"> 88: </a>}
+
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="MatDestroy_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line94"> 94: </a>{
+<a name="line96"> 96: </a>  Mat_SeqCSRPERM *csrperm = (Mat_SeqCSRPERM *) A-&gt;spptr;
+
+<a name="line99"> 99: </a>  <font color="#B22222">/* Free everything in the Mat_SeqCSRPERM data structure. </font>
+<a name="line100">100: </a><font color="#B22222">   * Note that we don't need to free the Mat_SeqCSRPERM struct </font>
+<a name="line101">101: </a><font color="#B22222">   * itself, as <A href="../../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>() will do so. */</font>
+<a name="line102">102: </a>  <font color="#4169E1">if</font>(csrperm-&gt;CleanUpCSRPERM) {
+<a name="line103">103: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;xgroup);
+<a name="line104">104: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;nzgroup);
+<a name="line105">105: </a>    <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(csrperm-&gt;iperm);
+<a name="line106">106: </a>  }
+
+<a name="line108">108: </a>  <font color="#B22222">/* Change the type of A back to SEQAIJ and use MatDestroy_SeqAIJ() </font>
+<a name="line109">109: </a><font color="#B22222">   * to destroy everything that remains. */</font>
+<a name="line110">110: </a>  PetscObjectChangeTypeName( (<A href="../../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A, <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>);
+<a name="line111">111: </a>  <font color="#B22222">/* Note that I don't call <A href="../../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>().  I believe this is because that </font>
+<a name="line112">112: </a><font color="#B22222">   * is only to be called when *building* a matrix.  I could be wrong, but </font>
+<a name="line113">113: </a><font color="#B22222">   * that is how things work for the SuperLU matrix class. */</font>
+<a name="line114">114: </a>  MatDestroy_SeqAIJ(A);
+<a name="line115">115: </a>  <font color="#4169E1">return</font>(0);
+<a name="line116">116: </a>}
+
+<a name="line118">118: </a><strong><font color="#4169E1"><a name="MatDuplicate_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDuplicate_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A, <A href="../../../../../../docs/manualpages/Mat/MatDuplicateOption.html#MatDuplicateOption">MatDuplicateOption</A> op, <A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *M)</font></strong>
+<a name="line119">119: </a>{
+<a name="line121">121: </a>  Mat_SeqCSRPERM *csrperm = (Mat_SeqCSRPERM *) A-&gt;spptr;
+<a name="line122">122: </a>  Mat_SeqCSRPERM *csrperm_dest = (Mat_SeqCSRPERM *) (*M)-&gt;spptr;
+
+<a name="line125">125: </a>  MatDuplicate_SeqAIJ(A,op,M);
+<a name="line126">126: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>((*M)-&gt;spptr,csrperm,<font color="#4169E1">sizeof</font>(Mat_SeqCSRPERM));
+<a name="line127">127: </a>  <font color="#B22222">/* Allocate space for, and copy the grouping and permutation info. </font>
+<a name="line128">128: </a><font color="#B22222">   * I note that when the groups are initially determined in </font>
+<a name="line129">129: </a><font color="#B22222">   * SeqCSRPERM_create_perm, xgroup and nzgroup may be sized larger than </font>
+<a name="line130">130: </a><font color="#B22222">   * necessary.  But at this point, we know how large they need to be, and </font>
+<a name="line131">131: </a><font color="#B22222">   * allocate only the necessary amount of memory.  So the duplicated matrix </font>
+<a name="line132">132: </a><font color="#B22222">   * may actually use slightly less storage than the original! */</font>
+<a name="line133">133: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(A-&gt;rmap-&gt;n*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), csrperm_dest-&gt;iperm);
+<a name="line134">134: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((csrperm-&gt;ngroup+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), csrperm_dest-&gt;xgroup);
+<a name="line135">135: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((csrperm-&gt;ngroup)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), csrperm_dest-&gt;nzgroup);
+<a name="line136">136: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(csrperm_dest-&gt;iperm,csrperm-&gt;iperm,<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)*A-&gt;rmap-&gt;n);
+<a name="line137">137: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(csrperm_dest-&gt;xgroup,csrperm-&gt;xgroup,<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)*(csrperm-&gt;ngroup+1));
+<a name="line138">138: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(csrperm_dest-&gt;nzgroup,csrperm-&gt;nzgroup,<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)*csrperm-&gt;ngroup);
+<a name="line139">139: </a>  <font color="#4169E1">return</font>(0);
+<a name="line140">140: </a>}
+
+<a name="line144">144: </a><strong><font color="#4169E1"><a name="SeqCSRPERM_create_perm"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SeqCSRPERM_create_perm(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line145">145: </a>{
+<a name="line146">146: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        m;  <font color="#B22222">/* Number of rows in the matrix. */</font>
+<a name="line147">147: </a>  Mat_SeqAIJ      *a = (Mat_SeqAIJ *)(A)-&gt;data;
+<a name="line148">148: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *ia;  <font color="#B22222">/* From the CSR representation; points to the beginning  of each row. */</font>
+<a name="line149">149: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        maxnz; <font color="#B22222">/* Maximum number of nonzeros in any row. */</font>
+<a name="line150">150: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *rows_in_bucket;
+<a name="line151">151: </a>    <font color="#B22222">/* To construct the permutation, we sort each row into one of maxnz </font>
+<a name="line152">152: </a><font color="#B22222">     * buckets based on how many nonzeros are in the row. */</font>
+<a name="line153">153: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        nz;
+<a name="line154">154: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *nz_in_row;  <font color="#B22222">/* the number of nonzero elements in row k. */</font>
+<a name="line155">155: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *ipnz;
+<a name="line156">156: </a>    <font color="#B22222">/* When constructing the iperm permutation vector, </font>
+<a name="line157">157: </a><font color="#B22222">     * ipnz[nz] is used to point to the next place in the permutation vector </font>
+<a name="line158">158: </a><font color="#B22222">     * that a row with nz nonzero elements should be placed.*/</font>
+<a name="line159">159: </a>  Mat_SeqCSRPERM *csrperm = (Mat_SeqCSRPERM*) A-&gt;spptr;
+<a name="line160">160: </a>    <font color="#B22222">/* Points to the MATSEQCSRPERM-specific data in the matrix B. */</font>
+<a name="line162">162: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i, ngroup, istart, ipos;
+
+<a name="line164">164: </a>  <font color="#B22222">/* I really ought to put something in here to check if B is of </font>
+<a name="line165">165: </a><font color="#B22222">   * type MATSEQCSRPERM and return an error code if it is not.</font>
+<a name="line166">166: </a><font color="#B22222">   * Come back and do this! */</font>
+<a name="line168">168: </a>  m  = A-&gt;rmap-&gt;n;
+<a name="line169">169: </a>  ia = a-&gt;i;
+<a name="line170">170: </a>
+<a name="line171">171: </a>  <font color="#B22222">/* Allocate the arrays that will hold the permutation vector. */</font>
+<a name="line172">172: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(m*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;csrperm-&gt;iperm);
+
+<a name="line174">174: </a>  <font color="#B22222">/* Allocate some temporary work arrays that will be used in </font>
+<a name="line175">175: </a><font color="#B22222">   * calculating the permuation vector and groupings. */</font>
+<a name="line176">176: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((m+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;rows_in_bucket);
+<a name="line177">177: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((m+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;ipnz);
+<a name="line178">178: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(m*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;nz_in_row);
+
+<a name="line180">180: </a>  <font color="#B22222">/* Now actually figure out the permutation and grouping. */</font>
+
+<a name="line182">182: </a>  <font color="#B22222">/* First pass: Determine number of nonzeros in each row, maximum </font>
+<a name="line183">183: </a><font color="#B22222">   * number of nonzeros in any row, and how many rows fall into each  </font>
+<a name="line184">184: </a><font color="#B22222">   * "bucket" of rows with same number of nonzeros. */</font>
+<a name="line185">185: </a>  maxnz = 0;
+<a name="line186">186: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line187">187: </a>    nz_in_row[i] = ia[i+1]-ia[i];
+<a name="line188">188: </a>    <font color="#4169E1">if</font> (nz_in_row[i] &gt; maxnz) maxnz = nz_in_row[i];
+<a name="line189">189: </a>  }
+
+<a name="line191">191: </a>  <font color="#4169E1">for</font> (i=0; i&lt;=maxnz; i++) {
+<a name="line192">192: </a>    rows_in_bucket[i] = 0;
+<a name="line193">193: </a>  }
+<a name="line194">194: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line195">195: </a>    nz = nz_in_row[i];
+<a name="line196">196: </a>    rows_in_bucket[nz]++;
+<a name="line197">197: </a>  }
+
+<a name="line199">199: </a>  <font color="#B22222">/* Allocate space for the grouping info.  There will be at most (maxnz + 1) </font>
+<a name="line200">200: </a><font color="#B22222">   * groups.  (It is maxnz + 1 instead of simply maxnz because there may be </font>
+<a name="line201">201: </a><font color="#B22222">   * rows with no nonzero elements.)  If there are (maxnz + 1) groups, </font>
+<a name="line202">202: </a><font color="#B22222">   * then xgroup[] must consist of (maxnz + 2) elements, since the last </font>
+<a name="line203">203: </a><font color="#B22222">   * element of xgroup will tell us where the (maxnz + 1)th group ends.</font>
+<a name="line204">204: </a><font color="#B22222">   * We allocate space for the maximum number of groups; </font>
+<a name="line205">205: </a><font color="#B22222">   * that is potentially a little wasteful, but not too much so.  </font>
+<a name="line206">206: </a><font color="#B22222">   * Perhaps I should fix it later. */</font>
+<a name="line207">207: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((maxnz+2)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;csrperm-&gt;xgroup);
+<a name="line208">208: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((maxnz+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;csrperm-&gt;nzgroup);
+
+<a name="line210">210: </a>  <font color="#B22222">/* Second pass.  Look at what is in the buckets and create the groupings.</font>
+<a name="line211">211: </a><font color="#B22222">   * Note that it is OK to have a group of rows with no non-zero values. */</font>
+<a name="line212">212: </a>  ngroup = 0;
+<a name="line213">213: </a>  istart = 0;
+<a name="line214">214: </a>  <font color="#4169E1">for</font> (i=0; i&lt;=maxnz; i++) {
+<a name="line215">215: </a>    <font color="#4169E1">if</font> (rows_in_bucket[i] &gt; 0) {
+<a name="line216">216: </a>      csrperm-&gt;nzgroup[ngroup] = i;
+<a name="line217">217: </a>      csrperm-&gt;xgroup[ngroup] = istart;
+<a name="line218">218: </a>      ngroup++;
+<a name="line219">219: </a>      istart += rows_in_bucket[i];
+<a name="line220">220: </a>    }
+<a name="line221">221: </a>  }
+
+<a name="line223">223: </a>  csrperm-&gt;xgroup[ngroup] = istart;
+<a name="line224">224: </a>  csrperm-&gt;ngroup = ngroup;
+
+<a name="line226">226: </a>  <font color="#B22222">/* Now fill in the permutation vector iperm. */</font>
+<a name="line227">227: </a>  ipnz[0] = 0;
+<a name="line228">228: </a>  <font color="#4169E1">for</font> (i=0; i&lt;maxnz; i++) {
+<a name="line229">229: </a>    ipnz[i+1] = ipnz[i] + rows_in_bucket[i];
+<a name="line230">230: </a>  }
+
+<a name="line232">232: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line233">233: </a>    nz = nz_in_row[i];
+<a name="line234">234: </a>    ipos = ipnz[nz];
+<a name="line235">235: </a>    csrperm-&gt;iperm[ipos] = i;
+<a name="line236">236: </a>    ipnz[nz]++;
+<a name="line237">237: </a>  }
+
+<a name="line239">239: </a>  <font color="#B22222">/* Clean up temporary work arrays. */</font>
+<a name="line240">240: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(rows_in_bucket);
+<a name="line241">241: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ipnz);
+<a name="line242">242: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nz_in_row);
+
+<a name="line244">244: </a>  <font color="#B22222">/* Since we've allocated some memory to hold permutation info, </font>
+<a name="line245">245: </a><font color="#B22222">   * flip the CleanUpCSRPERM flag to true. */</font>
+<a name="line246">246: </a>  csrperm-&gt;CleanUpCSRPERM = <A href="../../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line247">247: </a>  <font color="#4169E1">return</font>(0);
+<a name="line248">248: </a>}
+
+
+<a name="line253">253: </a><strong><font color="#4169E1"><a name="MatAssemblyEnd_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatAssemblyEnd_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A, <A href="../../../../../../docs/manualpages/Mat/MatAssemblyType.html#MatAssemblyType">MatAssemblyType</A> mode)</font></strong>
+<a name="line254">254: </a>{
+<a name="line256">256: </a>  Mat_SeqAIJ     *a = (Mat_SeqAIJ*)A-&gt;data;
+
+<a name="line259">259: </a>  <font color="#4169E1">if</font> (mode == MAT_FLUSH_ASSEMBLY) <font color="#4169E1">return</font>(0);
+<a name="line260">260: </a>
+<a name="line261">261: </a>  <font color="#B22222">/* Since a MATSEQCSRPERM matrix is really just a <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A> with some </font>
+<a name="line262">262: </a><font color="#B22222">   * extra information, call the AssemblyEnd routine for a <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>. </font>
+<a name="line263">263: </a><font color="#B22222">   * I'm not sure if this is the best way to do this, but it avoids </font>
+<a name="line264">264: </a><font color="#B22222">   * a lot of code duplication.</font>
+<a name="line265">265: </a><font color="#B22222">   * I also note that currently MATSEQCSRPERM doesn't know anything about </font>
+<a name="line266">266: </a><font color="#B22222">   * the Mat_CompressedRow data structure that SeqAIJ now uses when there </font>
+<a name="line267">267: </a><font color="#B22222">   * are many zero rows.  If the SeqAIJ assembly end routine decides to use </font>
+<a name="line268">268: </a><font color="#B22222">   * this, this may break things.  (Don't know... haven't looked at it.) */</font>
+<a name="line269">269: </a>  a-&gt;inode.use = <A href="../../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line270">270: </a>  MatAssemblyEnd_SeqAIJ(A, mode);
+
+<a name="line272">272: </a>  <font color="#B22222">/* Now calculate the permutation and grouping information. */</font>
+<a name="line273">273: </a>  SeqCSRPERM_create_perm(A);
+<a name="line274">274: </a>  <font color="#4169E1">return</font>(0);
+<a name="line275">275: </a>}
+
+<a name="line279">279: </a><strong><font color="#4169E1"><a name="MatMult_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMult_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xx,<A href="../../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> yy)</font></strong>
+<a name="line280">280: </a>{
+<a name="line281">281: </a>  Mat_SeqAIJ      *a = (Mat_SeqAIJ*)A-&gt;data;
+<a name="line282">282: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>     *x,*y;
+<a name="line283">283: </a>  const MatScalar *aa;
+<a name="line284">284: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line285">285: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *aj,*ai;
+<a name="line286">286: </a><font color="#A020F0">#if !(defined(PETSC_USE_FORTRAN_KERNEL_MULTCSRPERM) &amp;&amp; defined(notworking))</font>
+<a name="line287">287: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        i,j;
+<a name="line288">288: </a><font color="#A020F0">#endif</font>
+
+<a name="line290">290: </a>  <font color="#B22222">/* Variables that don't appear in MatMult_SeqAIJ. */</font>
+<a name="line291">291: </a>  Mat_SeqCSRPERM *csrperm = (Mat_SeqCSRPERM *) A-&gt;spptr;
+<a name="line292">292: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *iperm;  <font color="#B22222">/* Points to the permutation vector. */</font>
+<a name="line293">293: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *xgroup;
+<a name="line294">294: </a>    <font color="#B22222">/* Denotes where groups of rows with same number of nonzeros </font>
+<a name="line295">295: </a><font color="#B22222">     * begin and end in iperm. */</font>
+<a name="line296">296: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *nzgroup;
+<a name="line297">297: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ngroup;
+<a name="line298">298: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       igroup;
+<a name="line299">299: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       jstart,jend;
+<a name="line300">300: </a>    <font color="#B22222">/* jstart is used in loops to denote the position in iperm where a </font>
+<a name="line301">301: </a><font color="#B22222">     * group starts; jend denotes the position where it ends.</font>
+<a name="line302">302: </a><font color="#B22222">     * (jend + 1 is where the next group starts.) */</font>
+<a name="line303">303: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       iold,nz;
+<a name="line304">304: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       istart,iend,isize;
+<a name="line305">305: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ipos;
+<a name="line306">306: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    yp[NDIM];
+<a name="line307">307: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ip[NDIM]; <font color="#B22222">/* yp[] and ip[] are treated as vector "registers" for performing the mat-vec. */</font>
+
+<a name="line309">309: </a><font color="#A020F0">#if defined(PETSC_HAVE_PRAGMA_DISJOINT)</font>
+<a name="line310">310: </a><font color="#A020F0">#pragma disjoint(*x,*y,*aa)</font>
+<a name="line311">311: </a><font color="#A020F0">#endif</font>
+
+<a name="line314">314: </a>  <A href="../../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(xx,&amp;x);
+<a name="line315">315: </a>  <A href="../../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(yy,&amp;y);
+<a name="line316">316: </a>  aj  = a-&gt;j;    <font color="#B22222">/* aj[k] gives column index for element aa[k]. */</font>
+<a name="line317">317: </a>  aa  = a-&gt;a;  <font color="#B22222">/* Nonzero elements stored row-by-row. */</font>
+<a name="line318">318: </a>  ai  = a-&gt;i;   <font color="#B22222">/* ai[k] is the position in aa and aj where row k starts. */</font>
+
+<a name="line320">320: </a>  <font color="#B22222">/* Get the info we need about the permutations and groupings. */</font>
+<a name="line321">321: </a>  iperm  = csrperm-&gt;iperm;
+<a name="line322">322: </a>  ngroup = csrperm-&gt;ngroup;
+<a name="line323">323: </a>  xgroup = csrperm-&gt;xgroup;
+<a name="line324">324: </a>  nzgroup = csrperm-&gt;nzgroup;
+<a name="line325">325: </a>
+<a name="line326">326: </a><font color="#A020F0">#if defined(PETSC_USE_FORTRAN_KERNEL_MULTCSRPERM) &amp;&amp; defined(notworking)</font>
+<a name="line327">327: </a>  fortranmultcsrperm_(&amp;m,x,ii,aj,aa,y);
+<a name="line328">328: </a><font color="#A020F0">#else</font>
+
+<a name="line330">330: </a>  <font color="#4169E1">for</font> (igroup=0; igroup&lt;ngroup; igroup++) {
+<a name="line331">331: </a>    jstart = xgroup[igroup];
+<a name="line332">332: </a>    jend   = xgroup[igroup+1] - 1;
+<a name="line333">333: </a>    nz     = nzgroup[igroup];
+
+<a name="line335">335: </a>    <font color="#B22222">/* Handle the special cases where the number of nonzeros per row </font>
+<a name="line336">336: </a><font color="#B22222">     * in the group is either 0 or 1. */</font>
+<a name="line337">337: </a>    <font color="#4169E1">if</font> (nz == 0) {
+<a name="line338">338: </a>      <font color="#4169E1">for</font> (i=jstart; i&lt;=jend; i++) {
+<a name="line339">339: </a>        y[iperm[i]] = 0.0;
+<a name="line340">340: </a>      }
+<a name="line341">341: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nz == 1) {
+<a name="line342">342: </a>      <font color="#4169E1">for</font> (i=jstart; i&lt;=jend; i++) {
+<a name="line343">343: </a>        iold = iperm[i];
+<a name="line344">344: </a>        ipos = ai[iold];
+<a name="line345">345: </a>        y[iold] = aa[ipos] * x[aj[ipos]];
+<a name="line346">346: </a>      }
+<a name="line347">347: </a>    } <font color="#4169E1">else</font> {
+<a name="line348">348: </a>
+<a name="line349">349: </a>      <font color="#B22222">/* We work our way through the current group in chunks of NDIM rows </font>
+<a name="line350">350: </a><font color="#B22222">       * at a time. */</font>
+
+<a name="line352">352: </a>      <font color="#4169E1">for</font> (istart=jstart; istart&lt;=jend; istart+=NDIM) {
+<a name="line353">353: </a>        <font color="#B22222">/* Figure out where the chunk of 'isize' rows ends in iperm.</font>
+<a name="line354">354: </a><font color="#B22222">         * 'isize may of course be less than NDIM for the last chunk. */</font>
+<a name="line355">355: </a>        iend = istart + (NDIM - 1);
+<a name="line356">356: </a>        <font color="#4169E1">if</font> (iend &gt; jend) { iend = jend; }
+<a name="line357">357: </a>        isize = iend - istart + 1;
+
+<a name="line359">359: </a>        <font color="#B22222">/* Initialize the yp[] array that will be used to hold part of </font>
+<a name="line360">360: </a><font color="#B22222">         * the permuted results vector, and figure out where in aa each </font>
+<a name="line361">361: </a><font color="#B22222">         * row of the chunk will begin. */</font>
+<a name="line362">362: </a>        <font color="#4169E1">for</font> (i=0; i&lt;isize; i++) {
+<a name="line363">363: </a>          iold = iperm[istart + i];
+<a name="line364">364: </a>            <font color="#B22222">/* iold is a row number from the matrix A *before* reordering. */</font>
+<a name="line365">365: </a>          ip[i] = ai[iold];
+<a name="line366">366: </a>            <font color="#B22222">/* ip[i] tells us where the ith row of the chunk begins in aa. */</font>
+<a name="line367">367: </a>          yp[i] = (<A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>) 0.0;
+<a name="line368">368: </a>        }
+
+<a name="line370">370: </a>        <font color="#B22222">/* If the number of zeros per row exceeds the number of rows in </font>
+<a name="line371">371: </a><font color="#B22222">         * the chunk, we should vectorize along nz, that is, perform the </font>
+<a name="line372">372: </a><font color="#B22222">         * mat-vec one row at a time as in the usual CSR case. */</font>
+<a name="line373">373: </a>        <font color="#4169E1">if</font> (nz &gt; isize) {
+<a name="line374">374: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line375">375: </a><font color="#A020F0">#pragma _CRI preferstream</font>
+<a name="line376">376: </a><font color="#A020F0">#endif</font>
+<a name="line377">377: </a>          <font color="#4169E1">for</font> (i=0; i&lt;isize; i++) {
+<a name="line378">378: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line379">379: </a><font color="#A020F0">#pragma _CRI prefervector</font>
+<a name="line380">380: </a><font color="#A020F0">#endif</font>
+<a name="line381">381: </a>            <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line382">382: </a>              ipos = ip[i] + j;
+<a name="line383">383: </a>              yp[i] += aa[ipos] * x[aj[ipos]];
+<a name="line384">384: </a>            }
+<a name="line385">385: </a>          }
+<a name="line386">386: </a>        } <font color="#4169E1">else</font> {
+<a name="line387">387: </a>        <font color="#B22222">/* Otherwise, there are enough rows in the chunk to make it </font>
+<a name="line388">388: </a><font color="#B22222">         * worthwhile to vectorize across the rows, that is, to do the </font>
+<a name="line389">389: </a><font color="#B22222">         * matvec by operating with "columns" of the chunk. */</font>
+<a name="line390">390: </a>          <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line391">391: </a>            <font color="#4169E1">for</font>(i=0; i&lt;isize; i++) {
+<a name="line392">392: </a>              ipos = ip[i] + j;
+<a name="line393">393: </a>              yp[i] += aa[ipos] * x[aj[ipos]];
+<a name="line394">394: </a>            }
+<a name="line395">395: </a>          }
+<a name="line396">396: </a>        }
+
+<a name="line398">398: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line399">399: </a><font color="#A020F0">#pragma _CRI ivdep</font>
+<a name="line400">400: </a><font color="#A020F0">#endif</font>
+<a name="line401">401: </a>        <font color="#B22222">/* Put results from yp[] into non-permuted result vector y. */</font>
+<a name="line402">402: </a>        <font color="#4169E1">for</font> (i=0; i&lt;isize; i++) {
+<a name="line403">403: </a>          y[iperm[istart+i]] = yp[i];
+<a name="line404">404: </a>        }
+<a name="line405">405: </a>      } <font color="#B22222">/* End processing chunk of isize rows of a group. */</font>
+<a name="line406">406: </a>    } <font color="#B22222">/* End handling matvec for chunk with nz &gt; 1. */</font>
+<a name="line407">407: </a>  } <font color="#B22222">/* End loop over igroup. */</font>
+<a name="line408">408: </a><font color="#A020F0">#endif</font>
+<a name="line409">409: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(2.0*a-&gt;nz - A-&gt;rmap-&gt;n);
+<a name="line410">410: </a>  <A href="../../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(xx,&amp;x);
+<a name="line411">411: </a>  <A href="../../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(yy,&amp;y);
+<a name="line412">412: </a>  <font color="#4169E1">return</font>(0);
+<a name="line413">413: </a>}
+
+
+<a name="line416">416: </a><font color="#B22222">/* MatMultAdd_SeqCSRPERM() calculates yy = ww + A * xx.</font>
+<a name="line417">417: </a><font color="#B22222"> * Note that the names I used to designate the vectors differs from that </font>
+<a name="line418">418: </a><font color="#B22222"> * used in MatMultAdd_SeqAIJ().  I did this to keep my notation consistent </font>
+<a name="line419">419: </a><font color="#B22222"> * with the MatMult_SeqCSRPERM() routine, which is very similar to this one. */</font>
+<a name="line420">420: </a><font color="#B22222">/*</font>
+<a name="line421">421: </a><font color="#B22222">    I hate having virtually identical code for the mult and the multadd!!!</font>
+<a name="line422">422: </a><font color="#B22222">*/</font>
+<a name="line425">425: </a><strong><font color="#4169E1"><a name="MatMultAdd_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultAdd_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xx,<A href="../../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> ww,<A href="../../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> yy)</font></strong>
+<a name="line426">426: </a>{
+<a name="line427">427: </a>  Mat_SeqAIJ      *a = (Mat_SeqAIJ*)A-&gt;data;
+<a name="line428">428: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>     *x,*y,*w;
+<a name="line429">429: </a>  const MatScalar *aa;
+<a name="line430">430: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line431">431: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *aj,*ai;
+<a name="line432">432: </a><font color="#A020F0">#if !defined(PETSC_USE_FORTRAN_KERNEL_MULTADDCSRPERM)</font>
+<a name="line433">433: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        i,j;
+<a name="line434">434: </a><font color="#A020F0">#endif</font>
+
+<a name="line436">436: </a>  <font color="#B22222">/* Variables that don't appear in MatMultAdd_SeqAIJ. */</font>
+<a name="line437">437: </a>  Mat_SeqCSRPERM *csrperm;
+<a name="line438">438: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *iperm;  <font color="#B22222">/* Points to the permutation vector. */</font>
+<a name="line439">439: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *xgroup;
+<a name="line440">440: </a>    <font color="#B22222">/* Denotes where groups of rows with same number of nonzeros </font>
+<a name="line441">441: </a><font color="#B22222">     * begin and end in iperm. */</font>
+<a name="line442">442: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *nzgroup;
+<a name="line443">443: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ngroup;
+<a name="line444">444: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       igroup;
+<a name="line445">445: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       jstart,jend;
+<a name="line446">446: </a>    <font color="#B22222">/* jstart is used in loops to denote the position in iperm where a </font>
+<a name="line447">447: </a><font color="#B22222">     * group starts; jend denotes the position where it ends.</font>
+<a name="line448">448: </a><font color="#B22222">     * (jend + 1 is where the next group starts.) */</font>
+<a name="line449">449: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       iold,nz;
+<a name="line450">450: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       istart,iend,isize;
+<a name="line451">451: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ipos;
+<a name="line452">452: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    yp[NDIM];
+<a name="line453">453: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       ip[NDIM];
+<a name="line454">454: </a>    <font color="#B22222">/* yp[] and ip[] are treated as vector "registers" for performing </font>
+<a name="line455">455: </a><font color="#B22222">     * the mat-vec. */</font>
+
+<a name="line457">457: </a><font color="#A020F0">#if defined(PETSC_HAVE_PRAGMA_DISJOINT)</font>
+<a name="line458">458: </a><font color="#A020F0">#pragma disjoint(*x,*y,*aa)</font>
+<a name="line459">459: </a><font color="#A020F0">#endif</font>
+
+<a name="line462">462: </a>  <A href="../../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(xx,&amp;x);
+<a name="line463">463: </a>  <A href="../../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(yy,&amp;y);
+<a name="line464">464: </a>  <font color="#4169E1">if</font> (yy != ww) {
+<a name="line465">465: </a>    <A href="../../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(ww,&amp;w);
+<a name="line466">466: </a>  } <font color="#4169E1">else</font> {
+<a name="line467">467: </a>    w = y;
+<a name="line468">468: </a>  }
+
+<a name="line470">470: </a>  aj  = a-&gt;j;  <font color="#B22222">/* aj[k] gives column index for element aa[k]. */</font>
+<a name="line471">471: </a>  aa  = a-&gt;a;  <font color="#B22222">/* Nonzero elements stored row-by-row. */</font>
+<a name="line472">472: </a>  ai  = a-&gt;i;  <font color="#B22222">/* ai[k] is the position in aa and aj where row k starts. */</font>
+
+<a name="line474">474: </a>  <font color="#B22222">/* Get the info we need about the permutations and groupings. */</font>
+<a name="line475">475: </a>  csrperm = (Mat_SeqCSRPERM *) A-&gt;spptr;
+<a name="line476">476: </a>  iperm = csrperm-&gt;iperm;
+<a name="line477">477: </a>  ngroup = csrperm-&gt;ngroup;
+<a name="line478">478: </a>  xgroup = csrperm-&gt;xgroup;
+<a name="line479">479: </a>  nzgroup = csrperm-&gt;nzgroup;
+<a name="line480">480: </a>
+<a name="line481">481: </a><font color="#A020F0">#if defined(PETSC_USE_FORTRAN_KERNEL_MULTADDCSRPERM)</font>
+<a name="line482">482: </a>  fortranmultaddcsrperm_(&amp;m,x,ii,aj,aa,y,w);
+<a name="line483">483: </a><font color="#A020F0">#else</font>
+
+<a name="line485">485: </a>  <font color="#4169E1">for</font>(igroup=0; igroup&lt;ngroup; igroup++) {
+<a name="line486">486: </a>    jstart = xgroup[igroup];
+<a name="line487">487: </a>    jend = xgroup[igroup+1] - 1;
+
+<a name="line489">489: </a>    nz = nzgroup[igroup];
+
+<a name="line491">491: </a>    <font color="#B22222">/* Handle the special cases where the number of nonzeros per row </font>
+<a name="line492">492: </a><font color="#B22222">     * in the group is either 0 or 1. */</font>
+<a name="line493">493: </a>    <font color="#4169E1">if</font>(nz == 0) {
+<a name="line494">494: </a>      <font color="#4169E1">for</font>(i=jstart; i&lt;=jend; i++) {
+<a name="line495">495: </a>        iold = iperm[i];
+<a name="line496">496: </a>        y[iold] = w[iold];
+<a name="line497">497: </a>      }
+<a name="line498">498: </a>    }
+<a name="line499">499: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font>(nz == 1) {
+<a name="line500">500: </a>      <font color="#4169E1">for</font>(i=jstart; i&lt;=jend; i++) {
+<a name="line501">501: </a>        iold = iperm[i];
+<a name="line502">502: </a>        ipos = ai[iold];
+<a name="line503">503: </a>        y[iold] = w[iold] + aa[ipos] * x[aj[ipos]];
+<a name="line504">504: </a>      }
+<a name="line505">505: </a>    }
+<a name="line506">506: </a>    <font color="#B22222">/* For the general case: */</font>
+<a name="line507">507: </a>    <font color="#4169E1">else</font> {
+<a name="line508">508: </a>
+<a name="line509">509: </a>      <font color="#B22222">/* We work our way through the current group in chunks of NDIM rows </font>
+<a name="line510">510: </a><font color="#B22222">       * at a time. */</font>
+
+<a name="line512">512: </a>      <font color="#4169E1">for</font>(istart=jstart; istart&lt;=jend; istart+=NDIM) {
+<a name="line513">513: </a>        <font color="#B22222">/* Figure out where the chunk of 'isize' rows ends in iperm.</font>
+<a name="line514">514: </a><font color="#B22222">         * 'isize may of course be less than NDIM for the last chunk. */</font>
+<a name="line515">515: </a>        iend = istart + (NDIM - 1);
+<a name="line516">516: </a>        <font color="#4169E1">if</font>(iend &gt; jend) { iend = jend; }
+<a name="line517">517: </a>        isize = iend - istart + 1;
+
+<a name="line519">519: </a>        <font color="#B22222">/* Initialize the yp[] array that will be used to hold part of </font>
+<a name="line520">520: </a><font color="#B22222">         * the permuted results vector, and figure out where in aa each </font>
+<a name="line521">521: </a><font color="#B22222">         * row of the chunk will begin. */</font>
+<a name="line522">522: </a>        <font color="#4169E1">for</font>(i=0; i&lt;isize; i++) {
+<a name="line523">523: </a>          iold = iperm[istart + i];
+<a name="line524">524: </a>            <font color="#B22222">/* iold is a row number from the matrix A *before* reordering. */</font>
+<a name="line525">525: </a>          ip[i] = ai[iold];
+<a name="line526">526: </a>            <font color="#B22222">/* ip[i] tells us where the ith row of the chunk begins in aa. */</font>
+<a name="line527">527: </a>          yp[i] = w[iold];
+<a name="line528">528: </a>        }
+
+<a name="line530">530: </a>        <font color="#B22222">/* If the number of zeros per row exceeds the number of rows in </font>
+<a name="line531">531: </a><font color="#B22222">         * the chunk, we should vectorize along nz, that is, perform the </font>
+<a name="line532">532: </a><font color="#B22222">         * mat-vec one row at a time as in the usual CSR case. */</font>
+<a name="line533">533: </a>        <font color="#4169E1">if</font>(nz &gt; isize) {
+<a name="line534">534: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line535">535: </a><font color="#A020F0">#pragma _CRI preferstream</font>
+<a name="line536">536: </a><font color="#A020F0">#endif</font>
+<a name="line537">537: </a>          <font color="#4169E1">for</font>(i=0; i&lt;isize; i++) {
+<a name="line538">538: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line539">539: </a><font color="#A020F0">#pragma _CRI prefervector</font>
+<a name="line540">540: </a><font color="#A020F0">#endif</font>
+<a name="line541">541: </a>            <font color="#4169E1">for</font>(j=0; j&lt;nz; j++) {
+<a name="line542">542: </a>              ipos = ip[i] + j;
+<a name="line543">543: </a>              yp[i] += aa[ipos] * x[aj[ipos]];
+<a name="line544">544: </a>            }
+<a name="line545">545: </a>          }
+<a name="line546">546: </a>        }
+<a name="line547">547: </a>        <font color="#B22222">/* Otherwise, there are enough rows in the chunk to make it </font>
+<a name="line548">548: </a><font color="#B22222">         * worthwhile to vectorize across the rows, that is, to do the </font>
+<a name="line549">549: </a><font color="#B22222">         * matvec by operating with "columns" of the chunk. */</font>
+<a name="line550">550: </a>        <font color="#4169E1">else</font> {
+<a name="line551">551: </a>          <font color="#4169E1">for</font>(j=0; j&lt;nz; j++) {
+<a name="line552">552: </a>            <font color="#4169E1">for</font>(i=0; i&lt;isize; i++) {
+<a name="line553">553: </a>              ipos = ip[i] + j;
+<a name="line554">554: </a>              yp[i] += aa[ipos] * x[aj[ipos]];
+<a name="line555">555: </a>            }
+<a name="line556">556: </a>          }
+<a name="line557">557: </a>        }
+
+<a name="line559">559: </a><font color="#A020F0">#if defined(PETSC_HAVE_CRAYC)</font>
+<a name="line560">560: </a><font color="#A020F0">#pragma _CRI ivdep</font>
+<a name="line561">561: </a><font color="#A020F0">#endif</font>
+<a name="line562">562: </a>        <font color="#B22222">/* Put results from yp[] into non-permuted result vector y. */</font>
+<a name="line563">563: </a>        <font color="#4169E1">for</font>(i=0; i&lt;isize; i++) {
+<a name="line564">564: </a>          y[iperm[istart+i]] = yp[i];
+<a name="line565">565: </a>        }
+<a name="line566">566: </a>      } <font color="#B22222">/* End processing chunk of isize rows of a group. */</font>
+<a name="line567">567: </a>
+<a name="line568">568: </a>    } <font color="#B22222">/* End handling matvec for chunk with nz &gt; 1. */</font>
+<a name="line569">569: </a>  } <font color="#B22222">/* End loop over igroup. */</font>
+
+<a name="line571">571: </a><font color="#A020F0">#endif</font>
+<a name="line572">572: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(2.0*a-&gt;nz);
+<a name="line573">573: </a>  <A href="../../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(xx,&amp;x);
+<a name="line574">574: </a>  <A href="../../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(yy,&amp;y);
+<a name="line575">575: </a>  <font color="#4169E1">if</font> (yy != ww) {
+<a name="line576">576: </a>    <A href="../../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(ww,&amp;w);
+<a name="line577">577: </a>  }
+<a name="line578">578: </a>  <font color="#4169E1">return</font>(0);
+<a name="line579">579: </a>}
+
+
+<a name="line582">582: </a><font color="#B22222">/* MatConvert_SeqAIJ_SeqCSRPERM converts a SeqAIJ matrix into a </font>
+<a name="line583">583: </a><font color="#B22222"> * SeqCSRPERM matrix.  This routine is called by the MatCreate_SeqCSRPERM() </font>
+<a name="line584">584: </a><font color="#B22222"> * routine, but can also be used to convert an assembled SeqAIJ matrix </font>
+<a name="line585">585: </a><font color="#B22222"> * into a SeqCSRPERM one. */</font>
+<a name="line589">589: </a><strong><font color="#4169E1"><a name="MatConvert_SeqAIJ_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  MatConvert_SeqAIJ_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,const <A href="../../../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> type,<A href="../../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> reuse,<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *newmat)</font></strong>
+<a name="line590">590: </a>{
+<a name="line592">592: </a>  <A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            B = *newmat;
+<a name="line593">593: </a>  Mat_SeqCSRPERM *csrperm;
+
+<a name="line596">596: </a>  <font color="#4169E1">if</font> (reuse == MAT_INITIAL_MATRIX) {
+<a name="line597">597: </a>    <A href="../../../../../../docs/manualpages/Mat/MatDuplicate.html#MatDuplicate">MatDuplicate</A>(A,MAT_COPY_VALUES,&amp;B);
+<a name="line598">598: </a>  }
+
+<a name="line600">600: </a>  PetscNewLog(B,Mat_SeqCSRPERM,&amp;csrperm);
+<a name="line601">601: </a>  B-&gt;spptr = (void *) csrperm;
+
+<a name="line603">603: </a>  <font color="#B22222">/* Set function pointers for methods that we inherit from AIJ but override. */</font>
+<a name="line604">604: </a>  B-&gt;ops-&gt;duplicate   = MatDuplicate_SeqCSRPERM;
+<a name="line605">605: </a>  B-&gt;ops-&gt;assemblyend = MatAssemblyEnd_SeqCSRPERM;
+<a name="line606">606: </a>  B-&gt;ops-&gt;destroy     = MatDestroy_SeqCSRPERM;
+<a name="line607">607: </a>  B-&gt;ops-&gt;mult        = MatMult_SeqCSRPERM;
+<a name="line608">608: </a>  B-&gt;ops-&gt;multadd     = MatMultAdd_SeqCSRPERM;
+
+<a name="line610">610: </a>  <font color="#B22222">/* If A has already been assembled, compute the permutation. */</font>
+<a name="line611">611: </a>  <font color="#4169E1">if</font> (A-&gt;assembled) {
+<a name="line612">612: </a>    SeqCSRPERM_create_perm(B);
+<a name="line613">613: </a>  }
+<a name="line614">614: </a>
+<a name="line615">615: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B,<font color="#666666">"MatConvert_seqcsrperm_seqaij_C"</font>,
+<a name="line616">616: </a>                                           <font color="#666666">"MatConvert_SeqCSRPERM_SeqAIJ"</font>,MatConvert_SeqCSRPERM_SeqAIJ);
+
+<a name="line618">618: </a>  PetscObjectChangeTypeName((<A href="../../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B,MATSEQCSRPERM);
+<a name="line619">619: </a>  *newmat = B;
+<a name="line620">620: </a>  <font color="#4169E1">return</font>(0);
+<a name="line621">621: </a>}
+
+
+<a name="line627">627: </a><font color="#B22222">/*@C</font>
+<a name="line628">628: </a><font color="#B22222">   <A href="../../../../../../docs/manualpages/Mat/MatCreateSeqCSRPERM.html#MatCreateSeqCSRPERM">MatCreateSeqCSRPERM</A> - Creates a sparse matrix of type SEQCSRPERM.</font>
+<a name="line629">629: </a><font color="#B22222">   This type inherits from AIJ, but calculates some additional permutation </font>
+<a name="line630">630: </a><font color="#B22222">   information that is used to allow better vectorization of some </font>
+<a name="line631">631: </a><font color="#B22222">   operations.  At the cost of increased storage, the AIJ formatted </font>
+<a name="line632">632: </a><font color="#B22222">   matrix can be copied to a format in which pieces of the matrix are </font>
+<a name="line633">633: </a><font color="#B22222">   stored in ELLPACK format, allowing the vectorized matrix multiply </font>
+<a name="line634">634: </a><font color="#B22222">   routine to use stride-1 memory accesses.  As with the AIJ type, it is </font>
+<a name="line635">635: </a><font color="#B22222">   important to preallocate matrix storage in order to get good assembly </font>
+<a name="line636">636: </a><font color="#B22222">   performance.</font>
+<a name="line637">637: </a><font color="#B22222">   </font>
+<a name="line638">638: </a><font color="#B22222">   Collective on <A href="../../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A></font>
+
+<a name="line640">640: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line641">641: </a><font color="#B22222">+  comm - MPI communicator, set to <A href="../../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A></font>
+<a name="line642">642: </a><font color="#B22222">.  m - number of rows</font>
+<a name="line643">643: </a><font color="#B22222">.  n - number of columns</font>
+<a name="line644">644: </a><font color="#B22222">.  nz - number of nonzeros per row (same for all rows)</font>
+<a name="line645">645: </a><font color="#B22222">-  nnz - array containing the number of nonzeros in the various rows </font>
+<a name="line646">646: </a><font color="#B22222">         (possibly different for each row) or <A href="../../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A></font>
+
+<a name="line648">648: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line649">649: </a><font color="#B22222">.  A - the matrix </font>
+
+<a name="line651">651: </a><font color="#B22222">   Notes:</font>
+<a name="line652">652: </a><font color="#B22222">   If nnz is given then nz is ignored</font>
+
+<a name="line654">654: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line656">656: </a><font color="#B22222">.keywords: matrix, cray, sparse, parallel</font>
+
+<a name="line658">658: </a><font color="#B22222">.seealso: <A href="../../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(), <A href="../../../../../../docs/manualpages/Mat/MatCreateMPICSRPERM.html#MatCreateMPICSRPERM">MatCreateMPICSRPERM</A>(), <A href="../../../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>()</font>
+<a name="line659">659: </a><font color="#B22222">@*/</font>
+<a name="line660">660: </a><strong><font color="#4169E1"><a name="MatCreateSeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../../docs/manualpages/Mat/MatCreateSeqCSRPERM.html#MatCreateSeqCSRPERM">MatCreateSeqCSRPERM</A>(<A href="../../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> m,<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n,<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nz,const <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nnz[],<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A)</font></strong>
+<a name="line661">661: </a>{
+
+<a name="line665">665: </a>  <A href="../../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(comm,A);
+<a name="line666">666: </a>  <A href="../../../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(*A,m,n,m,n);
+<a name="line667">667: </a>  <A href="../../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(*A,MATSEQCSRPERM);
+<a name="line668">668: </a>  MatSeqAIJSetPreallocation_SeqAIJ(*A,nz,(<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>*)nnz);
+<a name="line669">669: </a>  <font color="#4169E1">return</font>(0);
+<a name="line670">670: </a>}
+
+<a name="line675">675: </a><strong><font color="#4169E1"><a name="MatCreate_SeqCSRPERM"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  MatCreate_SeqCSRPERM(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line676">676: </a>{
+
+<a name="line680">680: </a>  <A href="../../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(A,<A href="../../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>);
+<a name="line681">681: </a>  MatConvert_SeqAIJ_SeqCSRPERM(A,MATSEQCSRPERM,MAT_REUSE_MATRIX,&amp;A);
+<a name="line682">682: </a>  <font color="#4169E1">return</font>(0);
+<a name="line683">683: </a>}
+
+</pre>
+</body>
+
+</html>

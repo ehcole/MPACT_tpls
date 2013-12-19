@@ -1,0 +1,461 @@
+<center><a href="cn.c">Actual source code: cn.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T19:09:58+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCTS_DLL</font></strong>
+
+<a name="line3">  3: </a><font color="#B22222">/*</font>
+<a name="line4">  4: </a><font color="#B22222">       Code for Timestepping with implicit Crank-Nicholson method.</font>
+<a name="line5">  5: </a><font color="#B22222">*/</font>
+<a name="line6"> 6: </a> #include <A href="../../../../../include/private/tsimpl.h.html">private/tsimpl.h</A>
+
+<a name="line8">  8: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line9">  9: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>  update;         <font color="#B22222">/* work vector where new solution is formed */</font>
+<a name="line10"> 10: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>  func;           <font color="#B22222">/* work vector where F(t[i],u[i]) is stored */</font>
+<a name="line11"> 11: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>  rhsfunc, rhsfunc_old; <font color="#B22222">/* work vectors to hold rhs function provided by user */</font>
+<a name="line12"> 12: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>  rhs;            <font color="#B22222">/* work vector for RHS; vec_sol/dt */</font>
+<a name="line13"> 13: </a>  <A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>   ts;             <font color="#B22222">/* used by ShellMult_private() */</font>
+<a name="line14"> 14: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mdt;     <font color="#B22222">/* 1/dt, used by ShellMult_private() */</font>
+<a name="line15"> 15: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rhsfunc_time,rhsfunc_old_time; <font color="#B22222">/* time at which rhsfunc holds the value */</font>
+<a name="line16"> 16: </a>} TS_CN;
+
+<a name="line18"> 18: </a><font color="#B22222">/*------------------------------------------------------------------------------*/</font>
+<a name="line19"> 19: </a><font color="#B22222">/* </font>
+<a name="line20"> 20: </a><font color="#B22222">   Scale ts-&gt;Alhs = 1/dt*Alhs, ts-&gt;Arhs = 0.5*Arhs</font>
+<a name="line21"> 21: </a><font color="#B22222">   Set   ts-&gt;A    = Alhs - Arhs, used in <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>()</font>
+<a name="line22"> 22: </a><font color="#B22222">*/</font>
+<a name="line25"> 25: </a><strong><font color="#4169E1"><a name="TSSetKSPOperators_CN_Matrix"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetKSPOperators_CN_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line26"> 26: </a>{
+<a name="line28"> 28: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step;
+
+<a name="line31"> 31: </a>  <font color="#B22222">/* scale Arhs = 0.5*Arhs, Alhs = 1/dt*Alhs - assume dt is constant! */</font>
+<a name="line32"> 32: </a>  <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;Arhs,0.5);
+<a name="line33"> 33: </a>  <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line34"> 34: </a>    <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;Alhs,mdt);
+<a name="line35"> 35: </a>  }
+<a name="line36"> 36: </a>  <font color="#4169E1">if</font> (ts-&gt;A){
+<a name="line37"> 37: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(ts-&gt;A);
+<a name="line38"> 38: </a>  }
+<a name="line39"> 39: </a>  <A href="../../../../../docs/manualpages/Mat/MatDuplicate.html#MatDuplicate">MatDuplicate</A>(ts-&gt;Arhs,MAT_COPY_VALUES,&amp;ts-&gt;A);
+<a name="line40"> 40: </a>
+<a name="line41"> 41: </a>  <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line42"> 42: </a>    <font color="#B22222">/* ts-&gt;A = - Arhs + Alhs */</font>
+<a name="line43"> 43: </a>    <A href="../../../../../docs/manualpages/Mat/MatAYPX.html#MatAYPX">MatAYPX</A>(ts-&gt;A,-1.0,ts-&gt;Alhs,ts-&gt;matflg);
+<a name="line44"> 44: </a>  } <font color="#4169E1">else</font> {
+<a name="line45"> 45: </a>    <font color="#B22222">/* ts-&gt;A = 1/dt - Arhs */</font>
+<a name="line46"> 46: </a>    <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;A,-1.0);
+<a name="line47"> 47: </a>    <A href="../../../../../docs/manualpages/Mat/MatShift.html#MatShift">MatShift</A>(ts-&gt;A,mdt);
+<a name="line48"> 48: </a>  }
+<a name="line49"> 49: </a>  <font color="#4169E1">return</font>(0);
+<a name="line50"> 50: </a>}
+
+<a name="line52"> 52: </a><font color="#B22222">/* </font>
+<a name="line53"> 53: </a><font color="#B22222">   Scale ts-&gt;Alhs = 1/dt*Alhs, ts-&gt;Arhs = 0.5*Arhs</font>
+<a name="line54"> 54: </a><font color="#B22222">   Set   ts-&gt;A    = Alhs - Arhs, used in <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>()</font>
+<a name="line55"> 55: </a><font color="#B22222">*/</font>
+<a name="line58"> 58: </a><strong><font color="#4169E1"><a name="ShellMult_private"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ShellMult_private(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line59"> 59: </a>{
+<a name="line60"> 60: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line61"> 61: </a>  void            *ctx;
+<a name="line62"> 62: </a>  TS_CN           *cn;
+
+<a name="line65"> 65: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(mat,(void **)&amp;ctx);
+<a name="line66"> 66: </a>  cn   = (TS_CN*)ctx;
+<a name="line67"> 67: </a>  <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(cn-&gt;ts-&gt;Arhs,x,y); <font color="#B22222">/* y = 0.5*Arhs*x */</font>
+<a name="line68"> 68: </a>  <A href="../../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(y,-1.0);          <font color="#B22222">/* y = -0.5*Arhs*x */</font>
+<a name="line69"> 69: </a>  <font color="#4169E1">if</font> (cn-&gt;ts-&gt;Alhs){
+<a name="line70"> 70: </a>    <A href="../../../../../docs/manualpages/Mat/MatMultAdd.html#MatMultAdd">MatMultAdd</A>(cn-&gt;ts-&gt;Alhs,x,y,y); <font color="#B22222">/* y = 1/dt*Alhs*x + y */</font>
+<a name="line71"> 71: </a>  } <font color="#4169E1">else</font> {
+<a name="line72"> 72: </a>    <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(y,cn-&gt;mdt,x); <font color="#B22222">/* y = 1/dt*x + y */</font>
+<a name="line73"> 73: </a>  }
+<a name="line74"> 74: </a>  <font color="#4169E1">return</font>(0);
+<a name="line75"> 75: </a>}
+<a name="line78"> 78: </a><strong><font color="#4169E1"><a name="TSSetKSPOperators_CN_No_Matrix"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetKSPOperators_CN_No_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line79"> 79: </a>{
+<a name="line81"> 81: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step;
+<a name="line82"> 82: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            Arhs = ts-&gt;Arhs;
+<a name="line83"> 83: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>       comm;
+<a name="line84"> 84: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m,n,M,N;
+<a name="line85"> 85: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+
+<a name="line88"> 88: </a>  <font color="#B22222">/* scale Arhs = 0.5*Arhs, Alhs = 1/dt*Alhs - assume dt is constant! */</font>
+<a name="line89"> 89: </a>  <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;Arhs,0.5);
+<a name="line90"> 90: </a>  <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line91"> 91: </a>    <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;Alhs,mdt);
+<a name="line92"> 92: </a>  }
+<a name="line93"> 93: </a>
+<a name="line94"> 94: </a>  cn-&gt;ts  = ts;
+<a name="line95"> 95: </a>  cn-&gt;mdt = mdt;
+<a name="line96"> 96: </a>  <font color="#4169E1">if</font> (ts-&gt;A) {
+<a name="line97"> 97: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(ts-&gt;A);
+<a name="line98"> 98: </a>  }
+<a name="line99"> 99: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(Arhs,&amp;M,&amp;N);
+<a name="line100">100: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>(Arhs,&amp;m,&amp;n);
+<a name="line101">101: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)Arhs,&amp;comm);
+<a name="line102">102: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(comm,m,n,M,N,cn,&amp;ts-&gt;A);
+<a name="line103">103: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(ts-&gt;A,MATOP_MULT,(void(*)(void))ShellMult_private);
+<a name="line104">104: </a>  <font color="#4169E1">return</font>(0);
+<a name="line105">105: </a>}
+
+<a name="line107">107: </a><font color="#B22222">/*</font>
+<a name="line108">108: </a><font color="#B22222">    Version for linear PDE where RHS does not depend on time. Has built a</font>
+<a name="line109">109: </a><font color="#B22222">  single matrix that is to be used for all timesteps.</font>
+<a name="line110">110: </a><font color="#B22222">*/</font>
+<a name="line113">113: </a><strong><font color="#4169E1"><a name="TSStep_CN_Linear_Constant_Matrix"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStep_CN_Linear_Constant_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *steps,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *ptime)</font></strong>
+<a name="line114">114: </a>{
+<a name="line115">115: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+<a name="line116">116: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            sol = ts-&gt;vec_sol,update = cn-&gt;update,rhs = cn-&gt;rhs;
+<a name="line118">118: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,max_steps = ts-&gt;max_steps,its;
+<a name="line119">119: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step;
+
+<a name="line122">122: </a>  *steps = -ts-&gt;steps;
+<a name="line123">123: </a>  TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+
+<a name="line125">125: </a>  <font color="#B22222">/* set initial guess to be previous solution */</font>
+<a name="line126">126: </a>  <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(sol,update);
+
+<a name="line128">128: </a>  <font color="#4169E1">for</font> (i=0; i&lt;max_steps; i++) {
+<a name="line129">129: </a>    <font color="#4169E1">if</font> (ts-&gt;ptime + ts-&gt;time_step &gt; ts-&gt;max_time) <font color="#4169E1">break</font>;
+<a name="line130">130: </a>    <A href="../../../../../docs/manualpages/TS/TSPreStep.html#TSPreStep">TSPreStep</A>(ts);
+<a name="line131">131: </a>    <font color="#B22222">/* set rhs = (1/dt*Alhs + 0.5*Arhs)*sol */</font>
+<a name="line132">132: </a>    <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(ts-&gt;Arhs,sol,rhs); <font color="#B22222">/* rhs = 0.5*Arhs*sol */</font>
+<a name="line133">133: </a>    <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line134">134: </a>      <A href="../../../../../docs/manualpages/Mat/MatMultAdd.html#MatMultAdd">MatMultAdd</A>(ts-&gt;Alhs,sol,rhs,rhs);      <font color="#B22222">/* rhs = rhs + 1/dt*Alhs*sol */</font>
+<a name="line135">135: </a>    } <font color="#4169E1">else</font> {
+<a name="line136">136: </a>      <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(rhs,mdt,sol);    <font color="#B22222">/* rhs = rhs + 1/dt*sol */</font>
+<a name="line137">137: </a>    }
+
+<a name="line139">139: </a>    ts-&gt;ptime += ts-&gt;time_step;
+
+<a name="line141">141: </a>    <font color="#B22222">/* solve (1/dt*Alhs - 0.5*Arhs)*update = rhs */</font>
+<a name="line142">142: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(ts-&gt;ksp,rhs,update);
+<a name="line143">143: </a>    <A href="../../../../../docs/manualpages/KSP/KSPGetIterationNumber.html#KSPGetIterationNumber">KSPGetIterationNumber</A>(ts-&gt;ksp,&amp;its);
+<a name="line144">144: </a>    ts-&gt;linear_its += PetscAbsInt(its);
+<a name="line145">145: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(update,sol);
+<a name="line146">146: </a>    ts-&gt;steps++;
+<a name="line147">147: </a>    <A href="../../../../../docs/manualpages/TS/TSPostStep.html#TSPostStep">TSPostStep</A>(ts);
+<a name="line148">148: </a>    TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+<a name="line149">149: </a>  }
+<a name="line150">150: </a>  *steps += ts-&gt;steps;
+<a name="line151">151: </a>  *ptime  = ts-&gt;ptime;
+<a name="line152">152: </a>  <font color="#4169E1">return</font>(0);
+<a name="line153">153: </a>}
+<a name="line154">154: </a><font color="#B22222">/*</font>
+<a name="line155">155: </a><font color="#B22222">      Version where matrix depends on time </font>
+<a name="line156">156: </a><font color="#B22222">*/</font>
+<a name="line159">159: </a><strong><font color="#4169E1"><a name="TSStep_CN_Linear_Variable_Matrix"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStep_CN_Linear_Variable_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *steps,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *ptime)</font></strong>
+<a name="line160">160: </a>{
+<a name="line161">161: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+<a name="line162">162: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            sol = ts-&gt;vec_sol,update = cn-&gt;update,rhs = cn-&gt;rhs;
+<a name="line164">164: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,max_steps = ts-&gt;max_steps,its;
+<a name="line165">165: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step;
+<a name="line166">166: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      t_mid;
+<a name="line167">167: </a>  <A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>   str;
+
+<a name="line170">170: </a>  *steps = -ts-&gt;steps;
+<a name="line171">171: </a>  TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+
+<a name="line173">173: </a>  <font color="#B22222">/* set initial guess to be previous solution */</font>
+<a name="line174">174: </a>  <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(sol,update);
+
+<a name="line176">176: </a>  <font color="#4169E1">for</font> (i=0; i&lt;max_steps; i++) {
+<a name="line177">177: </a>    <font color="#4169E1">if</font> (ts-&gt;ptime + ts-&gt;time_step &gt; ts-&gt;max_time) <font color="#4169E1">break</font>;
+<a name="line178">178: </a>    <A href="../../../../../docs/manualpages/TS/TSPreStep.html#TSPreStep">TSPreStep</A>(ts);
+
+<a name="line180">180: </a>    <font color="#B22222">/* set rhs = (1/dt*Alhs(t_mid) + 0.5*Arhs(t_n)) * sol */</font>
+<a name="line181">181: </a>    <font color="#4169E1">if</font> (i==0){
+<a name="line182">182: </a>      <font color="#B22222">/* evaluate 0.5*Arhs(t_0) */</font>
+<a name="line183">183: </a>      (*ts-&gt;ops-&gt;rhsmatrix)(ts,ts-&gt;ptime,&amp;ts-&gt;Arhs,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;str,ts-&gt;jacP);
+<a name="line184">184: </a>      <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(ts-&gt;Arhs,0.5);
+<a name="line185">185: </a>    }
+<a name="line186">186: </a>    <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line187">187: </a>      <font color="#B22222">/* evaluate Alhs(t_mid) */</font>
+<a name="line188">188: </a>      t_mid = ts-&gt;ptime+ts-&gt;time_step/2.0;
+<a name="line189">189: </a>      (*ts-&gt;ops-&gt;lhsmatrix)(ts,t_mid,&amp;ts-&gt;Alhs,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;str,ts-&gt;jacPlhs);
+<a name="line190">190: </a>      <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(ts-&gt;Alhs,sol,rhs); <font color="#B22222">/* rhs = Alhs_mid*sol */</font>
+<a name="line191">191: </a>      <A href="../../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(rhs,mdt);         <font color="#B22222">/* rhs = 1/dt*Alhs_mid*sol */</font>
+<a name="line192">192: </a>      <A href="../../../../../docs/manualpages/Mat/MatMultAdd.html#MatMultAdd">MatMultAdd</A>(ts-&gt;Arhs,sol,rhs,rhs);        <font color="#B22222">/* rhs = rhs + 0.5*Arhs_mid*sol */</font>
+<a name="line193">193: </a>    } <font color="#4169E1">else</font> {
+<a name="line194">194: </a>      <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(ts-&gt;Arhs,sol,rhs); <font color="#B22222">/* rhs = 0.5*Arhs_n*sol */</font>
+<a name="line195">195: </a>      <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(rhs,mdt,sol);      <font color="#B22222">/* rhs = rhs + 1/dt*sol */</font>
+<a name="line196">196: </a>    }
+
+<a name="line198">198: </a>    ts-&gt;ptime += ts-&gt;time_step;
+
+<a name="line200">200: </a>    <font color="#B22222">/* evaluate Arhs at current ptime t_{n+1} */</font>
+<a name="line201">201: </a>    (*ts-&gt;ops-&gt;rhsmatrix)(ts,ts-&gt;ptime,&amp;ts-&gt;Arhs,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;str,ts-&gt;jacP);
+<a name="line202">202: </a>    TSSetKSPOperators_CN_Matrix(ts);
+
+<a name="line204">204: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(ts-&gt;ksp,ts-&gt;A,ts-&gt;A,SAME_NONZERO_PATTERN);
+<a name="line205">205: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(ts-&gt;ksp,rhs,update);
+<a name="line206">206: </a>    <A href="../../../../../docs/manualpages/KSP/KSPGetIterationNumber.html#KSPGetIterationNumber">KSPGetIterationNumber</A>(ts-&gt;ksp,&amp;its);
+<a name="line207">207: </a>    ts-&gt;linear_its += PetscAbsInt(its);
+<a name="line208">208: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(update,sol);
+<a name="line209">209: </a>    ts-&gt;steps++;
+<a name="line210">210: </a>    <A href="../../../../../docs/manualpages/TS/TSPostStep.html#TSPostStep">TSPostStep</A>(ts);
+<a name="line211">211: </a>    TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+<a name="line212">212: </a>  }
+
+<a name="line214">214: </a>  *steps += ts-&gt;steps;
+<a name="line215">215: </a>  *ptime  = ts-&gt;ptime;
+<a name="line216">216: </a>  <font color="#4169E1">return</font>(0);
+<a name="line217">217: </a>}
+<a name="line218">218: </a><font color="#B22222">/*</font>
+<a name="line219">219: </a><font color="#B22222">    Version for nonlinear PDE.</font>
+<a name="line220">220: </a><font color="#B22222">*/</font>
+<a name="line223">223: </a><strong><font color="#4169E1"><a name="TSStep_CN_Nonlinear"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStep_CN_Nonlinear(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *steps,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *ptime)</font></strong>
+<a name="line224">224: </a>{
+<a name="line225">225: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            sol = ts-&gt;vec_sol;
+<a name="line227">227: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,max_steps = ts-&gt;max_steps,its,lits;
+<a name="line228">228: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+<a name="line229">229: </a>
+<a name="line231">231: </a>  *steps = -ts-&gt;steps;
+<a name="line232">232: </a>  TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+
+<a name="line234">234: </a>  <font color="#4169E1">for</font> (i=0; i&lt;max_steps; i++) {
+<a name="line235">235: </a>    <font color="#4169E1">if</font> (ts-&gt;ptime + ts-&gt;time_step &gt; ts-&gt;max_time) <font color="#4169E1">break</font>;
+<a name="line236">236: </a>    <A href="../../../../../docs/manualpages/TS/TSPreStep.html#TSPreStep">TSPreStep</A>(ts);
+<a name="line237">237: </a>    ts-&gt;ptime += ts-&gt;time_step;
+<a name="line238">238: </a>
+<a name="line239">239: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(sol,cn-&gt;update);
+<a name="line240">240: </a>    <A href="../../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(ts-&gt;snes,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,cn-&gt;update);
+<a name="line241">241: </a>    <A href="../../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(ts-&gt;snes,&amp;its);
+<a name="line242">242: </a>    <A href="../../../../../docs/manualpages/SNES/SNESGetLinearSolveIterations.html#SNESGetLinearSolveIterations">SNESGetLinearSolveIterations</A>(ts-&gt;snes,&amp;lits);
+<a name="line243">243: </a>    ts-&gt;nonlinear_its += its; ts-&gt;linear_its += lits;
+<a name="line244">244: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(cn-&gt;update,sol);
+<a name="line245">245: </a>    ts-&gt;steps++;
+<a name="line246">246: </a>    <A href="../../../../../docs/manualpages/TS/TSPostStep.html#TSPostStep">TSPostStep</A>(ts);
+<a name="line247">247: </a>    TSMonitor(ts,ts-&gt;steps,ts-&gt;ptime,sol);
+<a name="line248">248: </a>  }
+
+<a name="line250">250: </a>  *steps += ts-&gt;steps;
+<a name="line251">251: </a>  *ptime  = ts-&gt;ptime;
+<a name="line252">252: </a>  <font color="#4169E1">return</font>(0);
+<a name="line253">253: </a>}
+
+<a name="line255">255: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+<a name="line258">258: </a><strong><font color="#4169E1"><a name="TSDestroy_CN"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSDestroy_CN(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line259">259: </a>{
+<a name="line260">260: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+
+<a name="line264">264: </a>  <font color="#4169E1">if</font> (cn-&gt;update) {<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(cn-&gt;update);}
+<a name="line265">265: </a>  <font color="#4169E1">if</font> (cn-&gt;func) {<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(cn-&gt;func);}
+<a name="line266">266: </a>  <font color="#4169E1">if</font> (cn-&gt;rhsfunc) {<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(cn-&gt;rhsfunc);}
+<a name="line267">267: </a>  <font color="#4169E1">if</font> (cn-&gt;rhsfunc_old) {<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(cn-&gt;rhsfunc_old);}
+<a name="line268">268: </a>  <font color="#4169E1">if</font> (cn-&gt;rhs) {<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(cn-&gt;rhs);}
+<a name="line269">269: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(cn);
+<a name="line270">270: </a>  <font color="#4169E1">return</font>(0);
+<a name="line271">271: </a>}
+
+<a name="line273">273: </a><font color="#B22222">/* </font>
+<a name="line274">274: </a><font color="#B22222">    This defines the nonlinear equation that is to be solved with <A href="../../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+<a name="line275">275: </a><font color="#B22222">       1/dt*Alhs*(U^{n+1} - U^{n}) - 0.5*(F(U^{n+1}) + F(U^{n}))</font>
+<a name="line276">276: </a><font color="#B22222">*/</font>
+<a name="line279">279: </a><strong><font color="#4169E1"><a name="TSCnFunction"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSCnFunction(<A href="../../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,void *ctx)</font></strong>
+<a name="line280">280: </a>{
+<a name="line281">281: </a>  <A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>             ts = (<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>) ctx;
+<a name="line282">282: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step,*unp1,*un,*Funp1,*Fun,*yarray;
+<a name="line284">284: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,n;
+<a name="line285">285: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+
+<a name="line288">288: </a>  <font color="#B22222">/* apply user provided function */</font>
+<a name="line289">289: </a>  <font color="#4169E1">if</font> (cn-&gt;rhsfunc_time == (ts-&gt;ptime - ts-&gt;time_step)){
+<a name="line290">290: </a>    <font color="#B22222">/* printf("   copy rhsfunc to rhsfunc_old, then eval rhsfunc\n"); */</font>
+<a name="line291">291: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(cn-&gt;rhsfunc,cn-&gt;rhsfunc_old);
+<a name="line292">292: </a>    cn-&gt;rhsfunc_old_time = cn-&gt;rhsfunc_time;
+<a name="line293">293: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (cn-&gt;rhsfunc_time != ts-&gt;ptime &amp;&amp; cn-&gt;rhsfunc_old_time != ts-&gt;ptime-ts-&gt;time_step){
+<a name="line294">294: </a>    <font color="#B22222">/* printf("   eval both rhsfunc_old and rhsfunc\n"); */</font>
+<a name="line295">295: </a>    <A href="../../../../../docs/manualpages/TS/TSComputeRHSFunction.html#TSComputeRHSFunction">TSComputeRHSFunction</A>(ts,ts-&gt;ptime-ts-&gt;time_step,ts-&gt;vec_sol,cn-&gt;rhsfunc_old); <font color="#B22222">/* rhsfunc_old=F(U^{n}) */</font>
+<a name="line296">296: </a>    cn-&gt;rhsfunc_old_time = ts-&gt;ptime - ts-&gt;time_step;
+<a name="line297">297: </a>  }
+<a name="line298">298: </a>
+<a name="line299">299: </a>  <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line300">300: </a>    <font color="#B22222">/* compute y=Alhs*(U^{n+1} - U^{n}) with cn-&gt;rhsfunc as workspce */</font>
+<a name="line301">301: </a>    <A href="../../../../../docs/manualpages/Vec/VecWAXPY.html#VecWAXPY">VecWAXPY</A>(cn-&gt;rhsfunc,-1.0,ts-&gt;vec_sol,x);
+<a name="line302">302: </a>    <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(ts-&gt;Alhs,cn-&gt;rhsfunc,y);
+<a name="line303">303: </a>  }
+
+<a name="line305">305: </a>  <A href="../../../../../docs/manualpages/TS/TSComputeRHSFunction.html#TSComputeRHSFunction">TSComputeRHSFunction</A>(ts,ts-&gt;ptime,x,cn-&gt;rhsfunc); <font color="#B22222">/* rhsfunc = F(U^{n+1}) */</font>
+<a name="line306">306: </a>  cn-&gt;rhsfunc_time = ts-&gt;ptime;
+<a name="line307">307: </a>
+<a name="line308">308: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(ts-&gt;vec_sol,&amp;un); <font color="#B22222">/* U^{n} */</font>
+<a name="line309">309: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x,&amp;unp1);         <font color="#B22222">/* U^{n+1} */</font>
+<a name="line310">310: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cn-&gt;rhsfunc,&amp;Funp1);
+<a name="line311">311: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cn-&gt;rhsfunc_old,&amp;Fun);
+<a name="line312">312: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(y,&amp;yarray);
+<a name="line313">313: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(x,&amp;n);
+<a name="line314">314: </a>  <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line315">315: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line316">316: </a>      yarray[i] = mdt*yarray[i] - 0.5*(Funp1[i] + Fun[i]);
+<a name="line317">317: </a>    }
+<a name="line318">318: </a>  } <font color="#4169E1">else</font> {
+<a name="line319">319: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line320">320: </a>      yarray[i] = mdt*(unp1[i] - un[i]) - 0.5*(Funp1[i] + Fun[i]);
+<a name="line321">321: </a>    }
+<a name="line322">322: </a>  }
+<a name="line323">323: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(ts-&gt;vec_sol,&amp;un);
+<a name="line324">324: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x,&amp;unp1);
+<a name="line325">325: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cn-&gt;rhsfunc,&amp;Funp1);
+<a name="line326">326: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cn-&gt;rhsfunc_old,&amp;Fun);
+<a name="line327">327: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(y,&amp;yarray);
+<a name="line328">328: </a>  <font color="#4169E1">return</font>(0);
+<a name="line329">329: </a>}
+
+<a name="line331">331: </a><font color="#B22222">/* Set B = 1/dt*Alh - 0.5*B */</font>
+<a name="line334">334: </a><strong><font color="#4169E1"><a name="TSScaleShiftMatrices_CN"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSScaleShiftMatrices_CN(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,<A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> str)</font></strong>
+<a name="line335">335: </a>{
+<a name="line336">336: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     flg;
+<a name="line338">338: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    mdt = 1.0/ts-&gt;time_step;
+
+<a name="line341">341: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B,<A href="../../../../../docs/manualpages/Mat/MATMFFD.html#MATMFFD">MATMFFD</A>,&amp;flg);
+<a name="line342">342: </a>  <font color="#4169E1">if</font> (!flg) {
+<a name="line343">343: </a>    <A href="../../../../../docs/manualpages/Mat/MatScale.html#MatScale">MatScale</A>(B,-0.5);
+<a name="line344">344: </a>    <font color="#4169E1">if</font> (ts-&gt;Alhs){
+<a name="line345">345: </a>      <A href="../../../../../docs/manualpages/Mat/MatAXPY.html#MatAXPY">MatAXPY</A>(B,mdt,ts-&gt;Alhs,DIFFERENT_NONZERO_PATTERN); <font color="#B22222">/* DIFFERENT_NONZERO_PATTERN? */</font>
+<a name="line346">346: </a>    } <font color="#4169E1">else</font> {
+<a name="line347">347: </a>      <A href="../../../../../docs/manualpages/Mat/MatShift.html#MatShift">MatShift</A>(B,mdt);
+<a name="line348">348: </a>    }
+<a name="line349">349: </a>  } <font color="#4169E1">else</font> {
+<a name="line350">350: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Matrix type <A href="../../../../../docs/manualpages/Mat/MATMFFD.html#MATMFFD">MATMFFD</A> is not supported yet"</font>); <font color="#B22222">/* ref TSScaleShiftMatrices() */</font>
+<a name="line351">351: </a>  }
+<a name="line352">352: </a>  <font color="#4169E1">return</font>(0);
+<a name="line353">353: </a>}
+
+<a name="line355">355: </a><font color="#B22222">/*</font>
+<a name="line356">356: </a><font color="#B22222">   This constructs the Jacobian needed for <A href="../../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> </font>
+<a name="line357">357: </a><font color="#B22222">     J = I/dt - 0.5*J_{F}   where J_{F} is the given Jacobian of F.</font>
+<a name="line358">358: </a><font color="#B22222">     x  - input vector</font>
+<a name="line359">359: </a><font color="#B22222">     AA - Jacobian matrix </font>
+<a name="line360">360: </a><font color="#B22222">     BB - preconditioner matrix, usually the same as AA</font>
+<a name="line361">361: </a><font color="#B22222">*/</font>
+<a name="line364">364: </a><strong><font color="#4169E1"><a name="TSCnJacobian"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSCnJacobian(<A href="../../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *AA,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *BB,<A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *str,void *ctx)</font></strong>
+<a name="line365">365: </a>{
+<a name="line366">366: </a>  <A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>             ts = (<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>) ctx;
+
+<a name="line370">370: </a>  <font color="#B22222">/* construct user's Jacobian */</font>
+<a name="line371">371: </a>  <A href="../../../../../docs/manualpages/TS/TSComputeRHSJacobian.html#TSComputeRHSJacobian">TSComputeRHSJacobian</A>(ts,ts-&gt;ptime,x,AA,BB,str); <font color="#B22222">/* BB = J_{F} */</font>
+
+<a name="line373">373: </a>  <font color="#B22222">/* shift and scale Jacobian */</font>
+<a name="line374">374: </a>  TSScaleShiftMatrices_CN(ts,*AA,*BB,*str); <font color="#B22222">/* Set BB = 1/dt*Alhs - 0.5*BB */</font>
+<a name="line375">375: </a>  <font color="#4169E1">return</font>(0);
+<a name="line376">376: </a>}
+
+<a name="line378">378: </a><font color="#B22222">/* ------------------------------------------------------------*/</font>
+<a name="line381">381: </a><strong><font color="#4169E1"><a name="TSSetUp_CN_Linear_Constant_Matrix"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetUp_CN_Linear_Constant_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line382">382: </a>{
+<a name="line383">383: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+<a name="line385">385: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A> shelltype;
+
+<a name="line388">388: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;update);
+<a name="line389">389: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;rhs);
+<a name="line390">390: </a>
+<a name="line391">391: </a>  <font color="#B22222">/* build linear system to be solved */</font>
+<a name="line392">392: </a>  <font color="#B22222">/* scale ts-&gt;Alhs = 1/dt*Alhs, ts-&gt;Arhs = 0.5*Arhs; set ts-&gt;A = Alhs - Arhs */</font>
+<a name="line393">393: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts-&gt;Arhs,<A href="../../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>,&amp;shelltype);
+<a name="line394">394: </a>  <font color="#4169E1">if</font> (shelltype){
+<a name="line395">395: </a>    TSSetKSPOperators_CN_No_Matrix(ts);
+<a name="line396">396: </a>  } <font color="#4169E1">else</font> {
+<a name="line397">397: </a>    TSSetKSPOperators_CN_Matrix(ts);
+<a name="line398">398: </a>  }
+<a name="line399">399: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(ts-&gt;ksp,ts-&gt;A,ts-&gt;A,SAME_NONZERO_PATTERN);
+<a name="line400">400: </a>  <font color="#4169E1">return</font>(0);
+<a name="line401">401: </a>}
+
+<a name="line405">405: </a><strong><font color="#4169E1"><a name="TSSetUp_CN_Linear_Variable_Matrix"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetUp_CN_Linear_Variable_Matrix(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line406">406: </a>{
+<a name="line407">407: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+
+<a name="line411">411: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;update);
+<a name="line412">412: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;rhs);
+<a name="line413">413: </a>  <font color="#4169E1">return</font>(0);
+<a name="line414">414: </a>}
+
+<a name="line418">418: </a><strong><font color="#4169E1"><a name="TSSetUp_CN_Nonlinear"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetUp_CN_Nonlinear(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line419">419: </a>{
+<a name="line420">420: </a>  TS_CN          *cn = (TS_CN*)ts-&gt;data;
+
+<a name="line424">424: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;update);
+<a name="line425">425: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;func);
+<a name="line426">426: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;rhsfunc);
+<a name="line427">427: </a>  <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;cn-&gt;rhsfunc_old);
+<a name="line428">428: </a>  <A href="../../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(ts-&gt;snes,cn-&gt;func,TSCnFunction,ts);
+<a name="line429">429: </a>  <A href="../../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(ts-&gt;snes,ts-&gt;A,ts-&gt;B,TSCnJacobian,ts);
+<a name="line430">430: </a>  cn-&gt;rhsfunc_time     = -100.0; <font color="#B22222">/* cn-&gt;rhsfunc is not evaluated yet */</font>
+<a name="line431">431: </a>  cn-&gt;rhsfunc_old_time = -100.0;
+<a name="line432">432: </a>  <font color="#4169E1">return</font>(0);
+<a name="line433">433: </a>}
+<a name="line434">434: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line438">438: </a><strong><font color="#4169E1"><a name="TSSetFromOptions_CN_Linear"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetFromOptions_CN_Linear(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line439">439: </a>{
+<a name="line441">441: </a>  <font color="#4169E1">return</font>(0);
+<a name="line442">442: </a>}
+
+<a name="line446">446: </a><strong><font color="#4169E1"><a name="TSSetFromOptions_CN_Nonlinear"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetFromOptions_CN_Nonlinear(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line447">447: </a>{
+<a name="line449">449: </a>  <font color="#4169E1">return</font>(0);
+<a name="line450">450: </a>}
+
+<a name="line454">454: </a><strong><font color="#4169E1"><a name="TSView_CN"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSView_CN(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line455">455: </a>{
+<a name="line457">457: </a>  <font color="#4169E1">return</font>(0);
+<a name="line458">458: </a>}
+
+<a name="line460">460: </a><font color="#B22222">/* ------------------------------------------------------------ */</font>
+<a name="line461">461: </a><font color="#B22222">/*MC</font>
+<a name="line462">462: </a><font color="#B22222">      <A href="../../../../../docs/manualpages/TS/TSCN.html#TSCN">TSCN</A> - ODE solver using the implicit Crank-Nicholson method</font>
+
+<a name="line464">464: </a><font color="#B22222">  Level: beginner</font>
+
+<a name="line466">466: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(), <A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A>, <A href="../../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>()</font>
+
+<a name="line468">468: </a><font color="#B22222">M*/</font>
+<a name="line472">472: </a><strong><font color="#4169E1"><a name="TSCreate_CN"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSCreate_CN(<A href="../../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line473">473: </a>{
+<a name="line474">474: </a>  TS_CN          *cn;
+
+<a name="line478">478: </a>  ts-&gt;ops-&gt;destroy = TSDestroy_CN;
+<a name="line479">479: </a>  ts-&gt;ops-&gt;view    = TSView_CN;
+
+<a name="line481">481: </a>  <font color="#4169E1">if</font> (ts-&gt;problem_type == TS_LINEAR) {
+<a name="line482">482: </a>    <font color="#4169E1">if</font> (!ts-&gt;Arhs) {
+<a name="line483">483: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Must set rhs matrix for linear problem"</font>);
+<a name="line484">484: </a>    }
+<a name="line485">485: </a>    <font color="#4169E1">if</font> (!ts-&gt;ops-&gt;rhsmatrix) {
+<a name="line486">486: </a>      ts-&gt;ops-&gt;setup = TSSetUp_CN_Linear_Constant_Matrix;
+<a name="line487">487: </a>      ts-&gt;ops-&gt;step  = TSStep_CN_Linear_Constant_Matrix;
+<a name="line488">488: </a>    } <font color="#4169E1">else</font> {
+<a name="line489">489: </a>      ts-&gt;ops-&gt;setup = TSSetUp_CN_Linear_Variable_Matrix;
+<a name="line490">490: </a>      ts-&gt;ops-&gt;step  = TSStep_CN_Linear_Variable_Matrix;
+<a name="line491">491: </a>    }
+<a name="line492">492: </a>    ts-&gt;ops-&gt;setfromoptions = TSSetFromOptions_CN_Linear;
+<a name="line493">493: </a>    <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,&amp;ts-&gt;ksp);
+<a name="line494">494: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectIncrementTabLevel.html#PetscObjectIncrementTabLevel">PetscObjectIncrementTabLevel</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts-&gt;ksp,(<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,1);
+<a name="line495">495: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetInitialGuessNonzero.html#KSPSetInitialGuessNonzero">KSPSetInitialGuessNonzero</A>(ts-&gt;ksp,<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+<a name="line496">496: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ts-&gt;problem_type == TS_NONLINEAR) {
+<a name="line497">497: </a>    ts-&gt;ops-&gt;setup          = TSSetUp_CN_Nonlinear;
+<a name="line498">498: </a>    ts-&gt;ops-&gt;step           = TSStep_CN_Nonlinear;
+<a name="line499">499: </a>    ts-&gt;ops-&gt;setfromoptions = TSSetFromOptions_CN_Nonlinear;
+<a name="line500">500: </a>    <A href="../../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,&amp;ts-&gt;snes);
+<a name="line501">501: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectIncrementTabLevel.html#PetscObjectIncrementTabLevel">PetscObjectIncrementTabLevel</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts-&gt;snes,(<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,1);
+<a name="line502">502: </a>  } <font color="#4169E1">else</font> <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"No such problem"</font>);
+
+<a name="line504">504: </a>  PetscNewLog(ts,TS_CN,&amp;cn);
+<a name="line505">505: </a>  ts-&gt;data = (void*)cn;
+<a name="line506">506: </a>  <font color="#4169E1">return</font>(0);
+<a name="line507">507: </a>}
+
+
+
+
+
+</pre>
+</body>
+
+</html>

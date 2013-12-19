@@ -1,0 +1,341 @@
+<center><a href="ainvcusp.cu">Actual source code: ainvcusp.cu</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/pc/impls/ainvcusp/ainvcusp.cu.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:16:22+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#B22222">/*  -------------------------------------------------------------------- */</font>
+
+<a name="line4">  4: </a><font color="#B22222">/*</font>
+<a name="line5">  5: </a><font color="#B22222">   Include files needed for the CUSP AINV preconditioner:</font>
+<a name="line6">  6: </a><font color="#B22222">     pcimpl.h - private include file intended for use by all preconditioners</font>
+<a name="line7">  7: </a><font color="#B22222">*/</font>
+
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;petsc-private/pcimpl.h&gt;   </font><font color="#B22222">/*I "petscpc.h" I*/</font><font color="#A020F0"></font>
+<a name="line10"> 10: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/seq/aij.h&gt;</font>
+<a name="line11"> 11: </a><font color="#A020F0">#include &lt;cusp/monitor.h&gt;</font>
+<a name="line12"> 12: </a><strong><font color="#228B22">#undef <A href="../../../../../docs/manualpages/Vec/VecType.html#VecType">VecType</A></font></strong>
+<a name="line13"> 13: </a><font color="#A020F0">#include &lt;cusp/precond/ainv.h&gt;</font>
+<a name="line14"> 14: </a><strong><font color="#228B22">#define <A href="../../../../../docs/manualpages/Vec/VecType.html#VecType">VecType</A> char*</font></strong>
+<a name="line15"> 15: </a><font color="#A020F0">#include &lt;../src/vec/vec/impls/dvecimpl.h&gt;</font>
+<a name="line16"> 16: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/seq/seqcusp/cuspmatimpl.h&gt;</font>
+
+<a name="line18"> 18: </a><strong><font color="#228B22">#define cuspainvprecondscaled cusp::precond::scaled_bridson_ainv&lt;<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,cusp::device_memory&gt;</font></strong>
+<a name="line19"> 19: </a><strong><font color="#228B22">#define cuspainvprecond cusp::precond::bridson_ainv&lt;<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,cusp::device_memory&gt;</font></strong>
+
+<a name="line21"> 21: </a><font color="#B22222">/*</font>
+<a name="line22"> 22: </a><font color="#B22222">   Private context (data structure) for the CUSP AINV preconditioner.  Note that this only works on CUSP SPD matrices.</font>
+<a name="line23"> 23: </a><font color="#B22222"> */</font>
+<a name="line24"> 24: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line25"> 25: </a>  void* AINVCUSP;
+<a name="line26"> 26: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> scaled; <font color="#B22222">/* Whether to use the scaled version of the Bridson AINV or not */</font>
+
+<a name="line28"> 28: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  nonzeros; <font color="#B22222">/* can only use one of nonzeros, droptolerance, linparam at once */</font>
+<a name="line29"> 29: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> droptolerance;
+<a name="line30"> 30: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> linparam;
+<a name="line31"> 31: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> uselin;
+<a name="line32"> 32: </a>} PC_AINVCUSP;
+
+<a name="line34"> 34: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line35"> 35: </a><font color="#B22222">/*</font>
+<a name="line36"> 36: </a><font color="#B22222">   PCSetUp_AINVCUSP - Prepares for the use of the CUSP AINV preconditioner</font>
+<a name="line37"> 37: </a><font color="#B22222">                    by setting data structures and options.</font>
+
+<a name="line39"> 39: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line40"> 40: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line42"> 42: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>()</font>
+
+<a name="line44"> 44: </a><font color="#B22222">   Notes:</font>
+<a name="line45"> 45: </a><font color="#B22222">   The interface routine <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>() is not usually called directly by</font>
+<a name="line46"> 46: </a><font color="#B22222">   the user, but instead is called by <A href="../../../../../docs/manualpages/PC/PCApply.html#PCApply">PCApply</A>() if necessary.</font>
+<a name="line47"> 47: </a><font color="#B22222">*/</font>
+<a name="line50"> 50: </a><strong><font color="#4169E1"><a name="PCSetUp_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line51"> 51: </a>{
+<a name="line52"> 52: </a>  PC_AINVCUSP     *ainv = (PC_AINVCUSP*)pc-&gt;data;
+<a name="line53"> 53: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       flg = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line54"> 54: </a>  Mat_SeqAIJCUSP  *gpustruct;
+<a name="line55"> 55: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line58"> 58: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc-&gt;pmat,MATSEQAIJCUSP,&amp;flg);
+<a name="line59"> 59: </a>  <font color="#4169E1">if</font> (!flg) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,PETSC_ERR_SUP,<font color="#666666">"Currently only handles CUSP matrices"</font>);
+<a name="line60"> 60: </a>  <font color="#4169E1">if</font> (pc-&gt;setupcalled != 0){
+<a name="line61"> 61: </a>    try {
+<a name="line62"> 62: </a>      <font color="#4169E1">if</font> (ainv-&gt;scaled) {
+<a name="line63"> 63: </a>        delete (cuspainvprecondscaled*)ainv-&gt;AINVCUSP;
+<a name="line64"> 64: </a>      } <font color="#4169E1">else</font>{
+<a name="line65"> 65: </a>        delete (cuspainvprecond*)ainv-&gt;AINVCUSP;
+<a name="line66"> 66: </a>      }
+<a name="line67"> 67: </a>    } catch(char* ex) {
+<a name="line68"> 68: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"CUSP error: %s"</font>, ex);
+<a name="line69"> 69: </a>    }
+<a name="line70"> 70: </a>  }
+<a name="line71"> 71: </a>  try {
+<a name="line72"> 72: </a>    MatCUSPCopyToGPU(pc-&gt;pmat);
+<a name="line73"> 73: </a>    gpustruct = (Mat_SeqAIJCUSP *)(pc-&gt;pmat-&gt;spptr);
+<a name="line74"> 74: </a>    <font color="#4169E1">if</font> (ainv-&gt;scaled) {
+<a name="line75"> 75: </a>      ainv-&gt;AINVCUSP =  new cuspainvprecondscaled(*(CUSPMATRIX*)gpustruct-&gt;mat, ainv-&gt;droptolerance,ainv-&gt;nonzeros,ainv-&gt;uselin,ainv-&gt;linparam);
+<a name="line76"> 76: </a>    } <font color="#4169E1">else</font> {
+<a name="line77"> 77: </a>      ainv-&gt;AINVCUSP =  new cuspainvprecond(*(CUSPMATRIX*)gpustruct-&gt;mat, ainv-&gt;droptolerance,ainv-&gt;nonzeros,ainv-&gt;uselin,ainv-&gt;linparam);
+<a name="line78"> 78: </a>    }
+<a name="line79"> 79: </a>  } catch(char* ex) {
+<a name="line80"> 80: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"CUSP error: %s"</font>,ex);
+<a name="line81"> 81: </a>  }
+<a name="line82"> 82: </a>  <font color="#4169E1">return</font>(0);
+<a name="line83"> 83: </a>}
+
+<a name="line85"> 85: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line86"> 86: </a><font color="#B22222">/*</font>
+<a name="line87"> 87: </a><font color="#B22222">   PCApply_AINVCUSP - Applies the CUSP AINV preconditioner to a vector.</font>
+
+<a name="line89"> 89: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line90"> 90: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line91"> 91: </a><font color="#B22222">.  x - input vector</font>
+
+<a name="line93"> 93: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line94"> 94: </a><font color="#B22222">.  y - output vector</font>
+
+<a name="line96"> 96: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCApply.html#PCApply">PCApply</A>()</font>
+<a name="line97"> 97: </a><font color="#B22222"> */</font>
+<a name="line100">100: </a><strong><font color="#4169E1"><a name="PCApply_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCApply_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line101">101: </a>{
+<a name="line102">102: </a>  PC_AINVCUSP     *ainv = (PC_AINVCUSP*)pc-&gt;data;
+<a name="line103">103: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line104">104: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       flg1,flg2;
+<a name="line105">105: </a>  CUSPARRAY       *xarray,*yarray;
+
+<a name="line108">108: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)x,<A href="../../../../../docs/manualpages/Vec/VECSEQCUSP.html#VECSEQCUSP">VECSEQCUSP</A>,&amp;flg1);
+<a name="line109">109: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)y,<A href="../../../../../docs/manualpages/Vec/VECSEQCUSP.html#VECSEQCUSP">VECSEQCUSP</A>,&amp;flg2);
+<a name="line110">110: </a>  <font color="#4169E1">if</font> (!(flg1 &amp;&amp; flg2)) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,PETSC_ERR_SUP, <font color="#666666">"Currently only handles CUSP vectors"</font>);
+<a name="line111">111: </a>  <font color="#4169E1">if</font> (!ainv-&gt;AINVCUSP) {
+<a name="line112">112: </a>    PCSetUp_AINVCUSP(pc);
+<a name="line113">113: </a>  }
+<a name="line114">114: </a>  <A href="../../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(y,0.0);
+<a name="line115">115: </a>  VecCUSPGetArrayRead(x,&amp;xarray);
+<a name="line116">116: </a>  VecCUSPGetArrayWrite(y,&amp;yarray);
+<a name="line117">117: </a>  try {
+<a name="line118">118: </a>    <font color="#4169E1">if</font> (ainv-&gt;scaled) {
+<a name="line119">119: </a><strong><font color="#FF0000">      cusp:</font></strong>:multiply(*(cuspainvprecondscaled *)ainv-&gt;AINVCUSP,*xarray,*yarray);
+<a name="line120">120: </a>    } <font color="#4169E1">else</font> {
+<a name="line121">121: </a><strong><font color="#FF0000">      cusp:</font></strong>:multiply(*(cuspainvprecond *)ainv-&gt;AINVCUSP,*xarray,*yarray);
+<a name="line122">122: </a>    }
+<a name="line123">123: </a>  } catch(char* ex) {
+<a name="line124">124: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"CUSP error: %s"</font>, ex);
+<a name="line125">125: </a>  }
+<a name="line126">126: </a>  VecCUSPRestoreArrayRead(x,&amp;xarray);
+<a name="line127">127: </a>  VecCUSPRestoreArrayWrite(y,&amp;yarray);
+<a name="line128">128: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectStateIncrease.html#PetscObjectStateIncrease">PetscObjectStateIncrease</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)y);
+<a name="line129">129: </a>  <font color="#4169E1">return</font>(0);
+<a name="line130">130: </a>}
+<a name="line131">131: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+
+<a name="line135">135: </a><strong><font color="#4169E1"><a name="PCReset_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCReset_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line136">136: </a>{
+<a name="line137">137: </a>  PC_AINVCUSP    *ainv  = (PC_AINVCUSP*)pc-&gt;data;
+
+<a name="line140">140: </a>  <font color="#4169E1">if</font> (ainv-&gt;AINVCUSP) {
+<a name="line141">141: </a>    try {
+<a name="line142">142: </a>      <font color="#4169E1">if</font> (ainv-&gt;scaled) {
+<a name="line143">143: </a>        delete (cuspainvprecondscaled *)ainv-&gt;AINVCUSP;
+<a name="line144">144: </a>      } <font color="#4169E1">else</font> {
+<a name="line145">145: </a>        delete (cuspainvprecond *)ainv-&gt;AINVCUSP;
+<a name="line146">146: </a>      }
+<a name="line147">147: </a>    } catch(char* ex) {
+<a name="line148">148: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"CUSP error: %s"</font>, ex);
+<a name="line149">149: </a>    }
+<a name="line150">150: </a>    ainv-&gt;AINVCUSP = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line151">151: </a>  }
+<a name="line152">152: </a>  <font color="#4169E1">return</font>(0);
+<a name="line153">153: </a>}
+
+<a name="line155">155: </a><font color="#B22222">/*</font>
+<a name="line156">156: </a><font color="#B22222">   PCDestroy_AINVCUSP - Destroys the private context for the AINVCUSP preconditioner</font>
+<a name="line157">157: </a><font color="#B22222">   that was created with PCCreate_AINVCUSP().</font>
+
+<a name="line159">159: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line160">160: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line162">162: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCDestroy.html#PCDestroy">PCDestroy</A>()</font>
+<a name="line163">163: </a><font color="#B22222">*/</font>
+<a name="line166">166: </a><strong><font color="#4169E1"><a name="PCDestroy_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line167">167: </a>{
+<a name="line168">168: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line171">171: </a>  PCReset_AINVCUSP(pc);
+
+<a name="line173">173: </a>  <font color="#B22222">/*</font>
+<a name="line174">174: </a><font color="#B22222">      Free the private data structure that was hanging off the <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+<a name="line175">175: </a><font color="#B22222">  */</font>
+<a name="line176">176: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pc-&gt;data);
+<a name="line177">177: </a>  <font color="#4169E1">return</font>(0);
+<a name="line178">178: </a>}
+
+
+
+<a name="line184">184: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetDropTolerance_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetDropTolerance_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> droptolerance)</font></strong>
+<a name="line185">185: </a>{
+<a name="line186">186: </a>  PC_AINVCUSP *ainv = (PC_AINVCUSP*)pc-&gt;data;
+
+<a name="line189">189: </a>  ainv-&gt;droptolerance = droptolerance;
+<a name="line190">190: </a>  ainv-&gt;uselin        = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line191">191: </a>  ainv-&gt;linparam      = 1;
+<a name="line192">192: </a>  ainv-&gt;nonzeros      = -1;
+<a name="line193">193: </a>  <font color="#4169E1">return</font>(0);
+<a name="line194">194: </a>}
+
+<a name="line198">198: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetDropTolerance"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetDropTolerance(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> droptolerance)</font></strong>
+<a name="line199">199: </a>{
+
+<a name="line204">204: </a>  PetscTryMethod(pc, <font color="#666666">"PCAINVCUSPSetDropTolerance_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>),(pc,droptolerance));
+<a name="line205">205: </a>  <font color="#4169E1">return</font>(0);
+<a name="line206">206: </a>}
+<a name="line209">209: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetNonzeros_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetNonzeros_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nonzeros)</font></strong>
+<a name="line210">210: </a>{
+<a name="line211">211: </a>  PC_AINVCUSP *ainv = (PC_AINVCUSP*)pc-&gt;data;
+
+<a name="line214">214: </a>  ainv-&gt;droptolerance = 0;
+<a name="line215">215: </a>  ainv-&gt;uselin        = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line216">216: </a>  ainv-&gt;linparam      = 1;
+<a name="line217">217: </a>  ainv-&gt;nonzeros      = nonzeros;
+<a name="line218">218: </a>  <font color="#4169E1">return</font>(0);
+<a name="line219">219: </a>}
+
+<a name="line223">223: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetNonzeros"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetNonzeros(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nonzeros)</font></strong>
+<a name="line224">224: </a>{
+
+<a name="line229">229: </a>  PetscTryMethod(pc, <font color="#666666">"PCAINVCUSPSetNonzeros_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(pc,nonzeros));
+<a name="line230">230: </a>  <font color="#4169E1">return</font>(0);
+<a name="line231">231: </a>}
+<a name="line234">234: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetLinParameter_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetLinParameter_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> param)</font></strong>
+<a name="line235">235: </a>{
+<a name="line236">236: </a>  PC_AINVCUSP *ainv = (PC_AINVCUSP*)pc-&gt;data;
+
+<a name="line239">239: </a>  ainv-&gt;droptolerance = 0;
+<a name="line240">240: </a>  ainv-&gt;uselin        = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line241">241: </a>  ainv-&gt;linparam      = param;
+<a name="line242">242: </a>  ainv-&gt;nonzeros      = -1;
+<a name="line243">243: </a>  <font color="#4169E1">return</font>(0);
+<a name="line244">244: </a>}
+
+<a name="line248">248: </a><strong><font color="#4169E1"><a name="PCAINVCUSPSetLinParameter"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPSetLinParameter(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> param)</font></strong>
+<a name="line249">249: </a>{
+
+<a name="line254">254: </a>  PetscTryMethod(pc, <font color="#666666">"PCAINVCUSPSetLinParameter_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(pc,param));
+<a name="line255">255: </a>  <font color="#4169E1">return</font>(0);
+<a name="line256">256: </a>}
+<a name="line259">259: </a><strong><font color="#4169E1"><a name="PCAINVCUSPUseScaling_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPUseScaling_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> scaled)</font></strong>
+<a name="line260">260: </a>{
+<a name="line261">261: </a>  PC_AINVCUSP *ainv = (PC_AINVCUSP*)pc-&gt;data;
+
+<a name="line264">264: </a>  ainv-&gt;scaled = scaled;
+<a name="line265">265: </a>  <font color="#4169E1">return</font>(0);
+<a name="line266">266: </a>}
+
+<a name="line270">270: </a><strong><font color="#4169E1"><a name="PCAINVCUSPUseScaling"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCAINVCUSPUseScaling(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> scaled)</font></strong>
+<a name="line271">271: </a>{
+
+<a name="line276">276: </a>  PetscTryMethod(pc, <font color="#666666">"PCAINVCUSPUseScaling_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>),(pc,scaled));
+<a name="line277">277: </a>  <font color="#4169E1">return</font>(0);
+<a name="line278">278: </a>}
+
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_AINVCUSP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetFromOptions_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  PC_AINVCUSP     *ainv = (PC_AINVCUSP*)pc-&gt;data;
+<a name="line285">285: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       flag  = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line286">286: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line289">289: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"AINVCUSP options"</font>);
+<a name="line290">290: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-pc_ainvcusp_droptol"</font>,<font color="#666666">"drop tolerance for AINVCUSP preconditioner"</font>,<font color="#666666">"PCAINVCUSPSetDropTolerance"</font>,ainv-&gt;droptolerance,&amp;ainv-&gt;droptolerance,&amp;flag);
+<a name="line291">291: </a>  <font color="#4169E1">if</font> (flag) {
+<a name="line292">292: </a>    ainv-&gt;nonzeros = -1;
+<a name="line293">293: </a>    ainv-&gt;uselin   = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line294">294: </a>    ainv-&gt;linparam = 1;
+<a name="line295">295: </a>    flag           = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line296">296: </a>  }
+<a name="line297">297: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_ainvcusp_nonzeros"</font>,<font color="#666666">"nonzeros/row for AINVCUSP preconditioner"</font>,<font color="#666666">"PCAINVCUSPSetNonzeros"</font>,ainv-&gt;nonzeros,&amp;ainv-&gt;nonzeros,&amp;flag);
+<a name="line298">298: </a>  <font color="#4169E1">if</font> (flag) {
+<a name="line299">299: </a>    ainv-&gt;droptolerance = 0;
+<a name="line300">300: </a>    ainv-&gt;uselin        = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line301">301: </a>    ainv-&gt;linparam      = 1;
+<a name="line302">302: </a>    flag                = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line303">303: </a>  }
+<a name="line304">304: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_ainvcusp_linparameter"</font>,<font color="#666666">"Lin parameter for AINVCUSP preconditioner"</font>,<font color="#666666">"PCAINVCUSPSetLinParameter"</font>,ainv-&gt;linparam,&amp;ainv-&gt;linparam,&amp;flag);
+<a name="line305">305: </a>  <font color="#4169E1">if</font> (flag) {
+<a name="line306">306: </a>    ainv-&gt;droptolerance = 0;
+<a name="line307">307: </a>    ainv-&gt;uselin        = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line308">308: </a>    ainv-&gt;droptolerance = 0;
+<a name="line309">309: </a>    ainv-&gt;nonzeros      = -1;
+<a name="line310">310: </a>  }
+<a name="line311">311: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-pc_ainvcusp_scale"</font>,<font color="#666666">"Whether to use scaled AINVCUSP preconditioner or not"</font>,<font color="#666666">"PCAINVCUSPUseScaling"</font>,ainv-&gt;scaled,&amp;ainv-&gt;scaled,0);
+<a name="line312">312: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line313">313: </a>  <font color="#4169E1">return</font>(0);
+<a name="line314">314: </a>}
+
+<a name="line316">316: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+
+<a name="line318">318: </a><font color="#B22222">/*MC</font>
+<a name="line319">319: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/PC/PCAINVCUSP.html#PCAINVCUSP">PCAINVCUSP</A>  - A sparse approximate inverse precondition that runs on the Nvidia GPU.</font>
+
+
+<a name="line322">322: </a><font color="#B22222">   http://docs.cusp-library.googlecode.com/hg/classcusp_1_1precond_1_1bridson__ainv.html</font>
+
+<a name="line324">324: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line326">326: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>(), <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCType.html#PCType">PCType</A> (for list of available types), <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line328">328: </a><font color="#B22222">M*/</font>
+
+<a name="line330">330: </a>EXTERN_C_BEGIN
+<a name="line333">333: </a><strong><font color="#4169E1"><a name="PCCreate_AINVCUSP"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCCreate_AINVCUSP(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line334">334: </a>{
+<a name="line335">335: </a>  PC_AINVCUSP     *ainv;
+<a name="line336">336: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line339">339: </a>  <font color="#B22222">/*</font>
+<a name="line340">340: </a><font color="#B22222">     Creates the private data structure for this preconditioner and</font>
+<a name="line341">341: </a><font color="#B22222">     attach it to the <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> object.</font>
+<a name="line342">342: </a><font color="#B22222">   */</font>
+<a name="line343">343: </a>  <A href="../../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(pc,PC_AINVCUSP,&amp;ainv);
+<a name="line344">344: </a>  pc-&gt;data             = (void*)ainv;
+<a name="line345">345: </a>  ainv-&gt;AINVCUSP       = 0;
+<a name="line346">346: </a>  ainv-&gt;droptolerance  = 0.1;
+<a name="line347">347: </a>  ainv-&gt;nonzeros       = -1;
+<a name="line348">348: </a>  ainv-&gt;scaled         = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line349">349: </a>  ainv-&gt;linparam       = 1;
+<a name="line350">350: </a>  ainv-&gt;uselin         = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line351">351: </a>  <font color="#B22222">/*</font>
+<a name="line352">352: </a><font color="#B22222">      Set the pointers for the functions that are provided above.</font>
+<a name="line353">353: </a><font color="#B22222">      Now when the user-level routines (such as <A href="../../../../../docs/manualpages/PC/PCApply.html#PCApply">PCApply</A>(), <A href="../../../../../docs/manualpages/PC/PCDestroy.html#PCDestroy">PCDestroy</A>(), etc.)</font>
+<a name="line354">354: </a><font color="#B22222">      are called, they will automatically call these functions.  Note we</font>
+<a name="line355">355: </a><font color="#B22222">      choose not to provide a couple of these functions since they are</font>
+<a name="line356">356: </a><font color="#B22222">      not needed.</font>
+<a name="line357">357: </a><font color="#B22222">  */</font>
+<a name="line358">358: </a>  pc-&gt;ops-&gt;apply               = PCApply_AINVCUSP;
+<a name="line359">359: </a>  pc-&gt;ops-&gt;applytranspose      = 0;
+<a name="line360">360: </a>  pc-&gt;ops-&gt;setup               = PCSetUp_AINVCUSP;
+<a name="line361">361: </a>  pc-&gt;ops-&gt;reset               = PCReset_AINVCUSP;
+<a name="line362">362: </a>  pc-&gt;ops-&gt;destroy             = PCDestroy_AINVCUSP;
+<a name="line363">363: </a>  pc-&gt;ops-&gt;setfromoptions      = PCSetFromOptions_AINVCUSP;
+<a name="line364">364: </a>  pc-&gt;ops-&gt;view                = 0;
+<a name="line365">365: </a>  pc-&gt;ops-&gt;applyrichardson     = 0;
+<a name="line366">366: </a>  pc-&gt;ops-&gt;applysymmetricleft  = 0;
+<a name="line367">367: </a>  pc-&gt;ops-&gt;applysymmetricright = 0;
+
+<a name="line369">369: </a> <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc, <font color="#666666">"PCAINVCUSPSetDropTolerance_C"</font>, <font color="#666666">"PCAINVCUSPSetDropTolerance_AINVCUSP"</font>, PCAINVCUSPSetDropTolerance_AINVCUSP);
+<a name="line370">370: </a> <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc, <font color="#666666">"PCAINVCUSPUseScaling_C"</font>, <font color="#666666">"PCAINVCUSPUseScaling_AINVCUSP"</font>, PCAINVCUSPUseScaling_AINVCUSP);
+<a name="line371">371: </a> <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc, <font color="#666666">"PCAINVCUSPSetLinParameter_C"</font>, <font color="#666666">"PCAINVCUSPSetLinParameter_AINVCUSP"</font>, PCAINVCUSPSetLinParameter_AINVCUSP);
+<a name="line372">372: </a> <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc, <font color="#666666">"PCAINVCUSPSetNonzeros_C"</font>, <font color="#666666">"PCAINVCUSPSetNonzeros_AINVCUSP"</font>, PCAINVCUSPSetNonzeros_AINVCUSP);
+<a name="line373">373: </a>  <font color="#4169E1">return</font>(0);
+<a name="line374">374: </a>}
+<a name="line375">375: </a>EXTERN_C_END
+
+</pre>
+</body>
+
+</html>

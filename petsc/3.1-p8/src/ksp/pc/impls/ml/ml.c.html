@@ -1,0 +1,765 @@
+<center><a href="ml.c">Actual source code: ml.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T19:01:58+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCKSP_DLL</font></strong>
+
+<a name="line3">  3: </a><font color="#B22222">/* </font>
+<a name="line4">  4: </a><font color="#B22222">   Provides an interface to the ML smoothed Aggregation</font>
+<a name="line5">  5: </a><font color="#B22222">   Note: Something non-obvious breaks -pc_mg_type ADDITIVE for parallel runs</font>
+<a name="line6">  6: </a><font color="#B22222">                                    Jed Brown, see [PETSC #18321, #18449]. </font>
+<a name="line7">  7: </a><font color="#B22222">*/</font>
+<a name="line8"> 8: </a> #include <A href="../../../../../include/private/pcimpl.h.html">private/pcimpl.h</A>
+<a name="line9"> 9: </a> #include <A href="../../../../../include/../src/ksp/pc/impls/mg/mgimpl.h.html">../src/ksp/pc/impls/mg/mgimpl.h</A>
+<a name="line10"> 10: </a> #include <A href="../../../../../include/../src/mat/impls/aij/seq/aij.h.html">../src/mat/impls/aij/seq/aij.h</A>
+<a name="line11"> 11: </a> #include <A href="../../../../../include/../src/mat/impls/aij/mpi/mpiaij.h.html">../src/mat/impls/aij/mpi/mpiaij.h</A>
+
+<a name="line13"> 13: </a><font color="#A020F0">#include &lt;math.h&gt;</font>
+<a name="line15"> 15: </a><font color="#B22222">/* HAVE_CONFIG_H flag is required by ML include files */</font>
+<a name="line16"> 16: </a><font color="#A020F0">#if !defined(HAVE_CONFIG_H)</font>
+<a name="line17"> 17: </a><strong><font color="#228B22">#define HAVE_CONFIG_H</font></strong>
+<a name="line18"> 18: </a><font color="#A020F0">#endif</font>
+<a name="line19"> 19: </a><font color="#A020F0">#include </font><font color="#666666">"ml_include.h"</font><font color="#A020F0"></font>
+
+<a name="line22"> 22: </a><font color="#B22222">/* The context (data structure) at each grid level */</font>
+<a name="line23"> 23: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line24"> 24: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        x,b,r;           <font color="#B22222">/* global vectors */</font>
+<a name="line25"> 25: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>        A,P,R;
+<a name="line26"> 26: </a>  <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>        ksp;
+<a name="line27"> 27: </a>} GridCtx;
+
+<a name="line29"> 29: </a><font color="#B22222">/* The context used to input PETSc matrix into ML at fine grid */</font>
+<a name="line30"> 30: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line31"> 31: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>          A;      <font color="#B22222">/* Petsc matrix in aij format */</font>
+<a name="line32"> 32: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>          Aloc;   <font color="#B22222">/* local portion of A to be used by ML */</font>
+<a name="line33"> 33: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          x,y;
+<a name="line34"> 34: </a>  ML_Operator  *mlmat;
+<a name="line35"> 35: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  *pwork; <font color="#B22222">/* tmp array used by PetscML_comm() */</font>
+<a name="line36"> 36: </a>} FineGridCtx;
+
+<a name="line38"> 38: </a><font color="#B22222">/* The context associates a ML matrix with a PETSc shell matrix */</font>
+<a name="line39"> 39: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line40"> 40: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>          A;       <font color="#B22222">/* PETSc shell matrix associated with mlmat */</font>
+<a name="line41"> 41: </a>  ML_Operator  *mlmat;  <font color="#B22222">/* ML matrix assorciated with A */</font>
+<a name="line42"> 42: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          y;
+<a name="line43"> 43: </a>} Mat_MLShell;
+
+<a name="line45"> 45: </a><font color="#B22222">/* Private context for the ML preconditioner */</font>
+<a name="line46"> 46: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line47"> 47: </a>  ML             *ml_object;
+<a name="line48"> 48: </a>  ML_Aggregate   *agg_object;
+<a name="line49"> 49: </a>  GridCtx        *gridctx;
+<a name="line50"> 50: </a>  FineGridCtx    *PetscMLdata;
+<a name="line51"> 51: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       Nlevels,MaxNlevels,MaxCoarseSize,CoarsenScheme;
+<a name="line52"> 52: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      Threshold,DampingFactor;
+<a name="line53"> 53: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     SpectralNormScheme_Anorm;
+<a name="line54"> 54: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size; <font color="#B22222">/* size of communicator for pc-&gt;pmat */</font>
+<a name="line55"> 55: </a>} PC_ML;
+
+<a name="line59"> 59: </a><strong><font color="#4169E1"><a name="PetscML_getrow"></a>static int PetscML_getrow(ML_Operator *ML_data, int N_requested_rows, int requested_rows[],int allocated_space, int columns[], double values[], int row_lengths[])</font></strong>
+<a name="line60"> 60: </a>{
+<a name="line62"> 62: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m,i,j,k=0,row,*aj;
+<a name="line63"> 63: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *aa;
+<a name="line64"> 64: </a>  FineGridCtx    *ml=(FineGridCtx*)ML_Get_MyGetrowData(ML_data);
+<a name="line65"> 65: </a>  Mat_SeqAIJ     *a = (Mat_SeqAIJ*)ml-&gt;Aloc-&gt;data;
+
+
+<a name="line68"> 68: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(ml-&gt;Aloc,&amp;m,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>); <font color="#4169E1">if</font> (ierr) <font color="#4169E1">return</font>(0);
+<a name="line69"> 69: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;N_requested_rows; i++) {
+<a name="line70"> 70: </a>    row   = requested_rows[i];
+<a name="line71"> 71: </a>    row_lengths[i] = a-&gt;ilen[row];
+<a name="line72"> 72: </a>    <font color="#4169E1">if</font> (allocated_space &lt; k+row_lengths[i]) <font color="#4169E1">return</font>(0);
+<a name="line73"> 73: </a>    <font color="#4169E1">if</font> ( (row &gt;= 0) || (row &lt;= (m-1)) ) {
+<a name="line74"> 74: </a>      aj = a-&gt;j + a-&gt;i[row];
+<a name="line75"> 75: </a>      aa = a-&gt;a + a-&gt;i[row];
+<a name="line76"> 76: </a>      <font color="#4169E1">for</font> (j=0; j&lt;row_lengths[i]; j++){
+<a name="line77"> 77: </a>        columns[k]  = aj[j];
+<a name="line78"> 78: </a>        values[k++] = aa[j];
+<a name="line79"> 79: </a>      }
+<a name="line80"> 80: </a>    }
+<a name="line81"> 81: </a>  }
+<a name="line82"> 82: </a>  <font color="#4169E1">return</font>(1);
+<a name="line83"> 83: </a>}
+
+<a name="line87"> 87: </a><strong><font color="#4169E1"><a name="PetscML_comm"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscML_comm(double p[],void *ML_data)</font></strong>
+<a name="line88"> 88: </a>{
+<a name="line90"> 90: </a>  FineGridCtx    *ml=(FineGridCtx*)ML_data;
+<a name="line91"> 91: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            A=ml-&gt;A;
+<a name="line92"> 92: </a>  Mat_MPIAIJ     *a = (Mat_MPIAIJ*)A-&gt;data;
+<a name="line93"> 93: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+<a name="line94"> 94: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,in_length=A-&gt;rmap-&gt;n,out_length=ml-&gt;Aloc-&gt;cmap-&gt;n;
+<a name="line95"> 95: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *array;
+
+<a name="line98"> 98: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line99"> 99: </a>  <font color="#4169E1">if</font> (size == 1) <font color="#4169E1">return</font> 0;
+<a name="line100">100: </a>
+<a name="line101">101: </a>  <A href="../../../../../docs/manualpages/Vec/VecPlaceArray.html#VecPlaceArray">VecPlaceArray</A>(ml-&gt;y,p);
+<a name="line102">102: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(a-&gt;Mvctx,ml-&gt;y,a-&gt;lvec,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Sys/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line103">103: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(a-&gt;Mvctx,ml-&gt;y,a-&gt;lvec,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Sys/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line104">104: </a>  <A href="../../../../../docs/manualpages/Vec/VecResetArray.html#VecResetArray">VecResetArray</A>(ml-&gt;y);
+<a name="line105">105: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(a-&gt;lvec,&amp;array);
+<a name="line106">106: </a>  <font color="#4169E1">for</font> (i=in_length; i&lt;out_length; i++){
+<a name="line107">107: </a>    p[i] = array[i-in_length];
+<a name="line108">108: </a>  }
+<a name="line109">109: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(a-&gt;lvec,&amp;array);
+<a name="line110">110: </a>  <font color="#4169E1">return</font>(0);
+<a name="line111">111: </a>}
+
+<a name="line115">115: </a><strong><font color="#4169E1"><a name="PetscML_matvec"></a>static int PetscML_matvec(ML_Operator *ML_data,int in_length,double p[],int out_length,double ap[])</font></strong>
+<a name="line116">116: </a>{
+<a name="line118">118: </a>  FineGridCtx    *ml=(FineGridCtx*)ML_Get_MyMatvecData(ML_data);
+<a name="line119">119: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            A=ml-&gt;A, Aloc=ml-&gt;Aloc;
+<a name="line120">120: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+<a name="line121">121: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *pwork=ml-&gt;pwork;
+<a name="line122">122: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line125">125: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line126">126: </a>  <font color="#4169E1">if</font> (size == 1){
+<a name="line127">127: </a>    <A href="../../../../../docs/manualpages/Vec/VecPlaceArray.html#VecPlaceArray">VecPlaceArray</A>(ml-&gt;x,p);
+<a name="line128">128: </a>  } <font color="#4169E1">else</font> {
+<a name="line129">129: </a>    <font color="#4169E1">for</font> (i=0; i&lt;in_length; i++) pwork[i] = p[i];
+<a name="line130">130: </a>    PetscML_comm(pwork,ml);
+<a name="line131">131: </a>    <A href="../../../../../docs/manualpages/Vec/VecPlaceArray.html#VecPlaceArray">VecPlaceArray</A>(ml-&gt;x,pwork);
+<a name="line132">132: </a>  }
+<a name="line133">133: </a>  <A href="../../../../../docs/manualpages/Vec/VecPlaceArray.html#VecPlaceArray">VecPlaceArray</A>(ml-&gt;y,ap);
+<a name="line134">134: </a>  <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(Aloc,ml-&gt;x,ml-&gt;y);
+<a name="line135">135: </a>  <A href="../../../../../docs/manualpages/Vec/VecResetArray.html#VecResetArray">VecResetArray</A>(ml-&gt;x);
+<a name="line136">136: </a>  <A href="../../../../../docs/manualpages/Vec/VecResetArray.html#VecResetArray">VecResetArray</A>(ml-&gt;y);
+<a name="line137">137: </a>  <font color="#4169E1">return</font>(0);
+<a name="line138">138: </a>}
+
+<a name="line142">142: </a><strong><font color="#4169E1"><a name="MatMult_ML"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMult_ML(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line143">143: </a>{
+<a name="line144">144: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line145">145: </a>  Mat_MLShell      *shell;
+<a name="line146">146: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      *xarray,*yarray;
+<a name="line147">147: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         x_length,y_length;
+<a name="line148">148: </a>
+<a name="line150">150: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(A,(void **)&amp;shell);
+<a name="line151">151: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x,&amp;xarray);
+<a name="line152">152: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(y,&amp;yarray);
+<a name="line153">153: </a>  x_length = shell-&gt;mlmat-&gt;invec_leng;
+<a name="line154">154: </a>  y_length = shell-&gt;mlmat-&gt;outvec_leng;
+<a name="line155">155: </a>  ML_Operator_Apply(shell-&gt;mlmat,x_length,xarray,y_length,yarray);
+<a name="line156">156: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x,&amp;xarray);
+<a name="line157">157: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(y,&amp;yarray);
+<a name="line158">158: </a>  <font color="#4169E1">return</font>(0);
+<a name="line159">159: </a>}
+
+<a name="line163">163: </a><strong><font color="#4169E1"><a name="MatMultAdd_ML"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultAdd_ML(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> w,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line164">164: </a>{
+<a name="line165">165: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line166">166: </a>  Mat_MLShell       *shell;
+<a name="line167">167: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       *xarray,*yarray;
+<a name="line168">168: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          x_length,y_length;
+<a name="line169">169: </a>
+<a name="line171">171: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(A,(void **)&amp;shell);
+<a name="line172">172: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x,&amp;xarray);
+<a name="line173">173: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(y,&amp;yarray);
+<a name="line174">174: </a>  x_length = shell-&gt;mlmat-&gt;invec_leng;
+<a name="line175">175: </a>  y_length = shell-&gt;mlmat-&gt;outvec_leng;
+<a name="line176">176: </a>  ML_Operator_Apply(shell-&gt;mlmat,x_length,xarray,y_length,yarray);
+<a name="line177">177: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x,&amp;xarray);
+<a name="line178">178: </a>  <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(y,&amp;yarray);
+<a name="line179">179: </a>  <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(y,1.0,w);
+<a name="line180">180: </a>  <font color="#4169E1">return</font>(0);
+<a name="line181">181: </a>}
+
+<a name="line183">183: </a><font color="#B22222">/* newtype is ignored because "ml" is not listed under Petsc <A href="../../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> */</font>
+<a name="line186">186: </a><strong><font color="#4169E1"><a name="MatConvert_MPIAIJ_ML"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatConvert_MPIAIJ_ML(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> newtype,<A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> scall,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *Aloc)</font></strong>
+<a name="line187">187: </a>{
+<a name="line188">188: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line189">189: </a>  Mat_MPIAIJ      *mpimat=(Mat_MPIAIJ*)A-&gt;data;
+<a name="line190">190: </a>  Mat_SeqAIJ      *mat,*a=(Mat_SeqAIJ*)(mpimat-&gt;A)-&gt;data,*b=(Mat_SeqAIJ*)(mpimat-&gt;B)-&gt;data;
+<a name="line191">191: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *ai=a-&gt;i,*aj=a-&gt;j,*bi=b-&gt;i,*bj=b-&gt;j;
+<a name="line192">192: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>     *aa=a-&gt;a,*ba=b-&gt;a,*ca;
+<a name="line193">193: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        am=A-&gt;rmap-&gt;n,an=A-&gt;cmap-&gt;n,i,j,k;
+<a name="line194">194: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *ci,*cj,ncols;
+
+<a name="line197">197: </a>  <font color="#4169E1">if</font> (am != an) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(PETSC_ERR_ARG_WRONG,<font color="#666666">"A must have a square diagonal portion, am: %d != an: %d"</font>,am,an);
+
+<a name="line199">199: </a>  <font color="#4169E1">if</font> (scall == MAT_INITIAL_MATRIX){
+<a name="line200">200: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((1+am)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;ci);
+<a name="line201">201: </a>    ci[0] = 0;
+<a name="line202">202: </a>    <font color="#4169E1">for</font> (i=0; i&lt;am; i++){
+<a name="line203">203: </a>      ci[i+1] = ci[i] + (ai[i+1] - ai[i]) + (bi[i+1] - bi[i]);
+<a name="line204">204: </a>    }
+<a name="line205">205: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((1+ci[am])*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;cj);
+<a name="line206">206: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((1+ci[am])*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;ca);
+
+<a name="line208">208: </a>    k = 0;
+<a name="line209">209: </a>    <font color="#4169E1">for</font> (i=0; i&lt;am; i++){
+<a name="line210">210: </a>      <font color="#B22222">/* diagonal portion of A */</font>
+<a name="line211">211: </a>      ncols = ai[i+1] - ai[i];
+<a name="line212">212: </a>      <font color="#4169E1">for</font> (j=0; j&lt;ncols; j++) {
+<a name="line213">213: </a>        cj[k]   = *aj++;
+<a name="line214">214: </a>        ca[k++] = *aa++;
+<a name="line215">215: </a>      }
+<a name="line216">216: </a>      <font color="#B22222">/* off-diagonal portion of A */</font>
+<a name="line217">217: </a>      ncols = bi[i+1] - bi[i];
+<a name="line218">218: </a>      <font color="#4169E1">for</font> (j=0; j&lt;ncols; j++) {
+<a name="line219">219: </a>        cj[k]   = an + (*bj); bj++;
+<a name="line220">220: </a>        ca[k++] = *ba++;
+<a name="line221">221: </a>      }
+<a name="line222">222: </a>    }
+<a name="line223">223: </a>    <font color="#4169E1">if</font> (k != ci[am]) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(PETSC_ERR_ARG_WRONG,<font color="#666666">"k: %d != ci[am]: %d"</font>,k,ci[am]);
+
+<a name="line225">225: </a>    <font color="#B22222">/* put together the new matrix */</font>
+<a name="line226">226: </a>    an = mpimat-&gt;A-&gt;cmap-&gt;n+mpimat-&gt;B-&gt;cmap-&gt;n;
+<a name="line227">227: </a>    <A href="../../../../../docs/manualpages/Mat/MatCreateSeqAIJWithArrays.html#MatCreateSeqAIJWithArrays">MatCreateSeqAIJWithArrays</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,am,an,ci,cj,ca,Aloc);
+
+<a name="line229">229: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Mat/MatCreateSeqAIJWithArrays.html#MatCreateSeqAIJWithArrays">MatCreateSeqAIJWithArrays</A> flags matrix so PETSc doesn't free the user's arrays. */</font>
+<a name="line230">230: </a>    <font color="#B22222">/* Since these are PETSc arrays, change flags to free them as necessary. */</font>
+<a name="line231">231: </a>    mat = (Mat_SeqAIJ*)(*Aloc)-&gt;data;
+<a name="line232">232: </a>    mat-&gt;free_a       = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line233">233: </a>    mat-&gt;free_ij      = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line235">235: </a>    mat-&gt;nonew    = 0;
+<a name="line236">236: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (scall == MAT_REUSE_MATRIX){
+<a name="line237">237: </a>    mat=(Mat_SeqAIJ*)(*Aloc)-&gt;data;
+<a name="line238">238: </a>    ci = mat-&gt;i; cj = mat-&gt;j; ca = mat-&gt;a;
+<a name="line239">239: </a>    <font color="#4169E1">for</font> (i=0; i&lt;am; i++) {
+<a name="line240">240: </a>      <font color="#B22222">/* diagonal portion of A */</font>
+<a name="line241">241: </a>      ncols = ai[i+1] - ai[i];
+<a name="line242">242: </a>      <font color="#4169E1">for</font> (j=0; j&lt;ncols; j++) *ca++ = *aa++;
+<a name="line243">243: </a>      <font color="#B22222">/* off-diagonal portion of A */</font>
+<a name="line244">244: </a>      ncols = bi[i+1] - bi[i];
+<a name="line245">245: </a>      <font color="#4169E1">for</font> (j=0; j&lt;ncols; j++) *ca++ = *ba++;
+<a name="line246">246: </a>    }
+<a name="line247">247: </a>  } <font color="#4169E1">else</font> {
+<a name="line248">248: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_ARG_WRONG,<font color="#666666">"Invalid <A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> %d"</font>,(int)scall);
+<a name="line249">249: </a>  }
+<a name="line250">250: </a>  <font color="#4169E1">return</font>(0);
+<a name="line251">251: </a>}
+
+<a name="line256">256: </a><strong><font color="#4169E1"><a name="MatDestroy_ML"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_ML(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line257">257: </a>{
+<a name="line259">259: </a>  Mat_MLShell    *shell;
+
+<a name="line262">262: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(A,(void **)&amp;shell);
+<a name="line263">263: </a>  <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(shell-&gt;y);
+<a name="line264">264: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(shell);
+<a name="line265">265: </a>  MatDestroy_Shell(A);
+<a name="line266">266: </a>  PetscObjectChangeTypeName((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A,0);
+<a name="line267">267: </a>  <font color="#4169E1">return</font>(0);
+<a name="line268">268: </a>}
+
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="MatWrapML_SeqAIJ"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatWrapML_SeqAIJ(ML_Operator *mlmat,<A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> reuse,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *newmat)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  <font color="#4169E1">struct ML_CSR_MSRdata</font> *matdata = (<font color="#4169E1">struct ML_CSR_MSRdata</font> *)mlmat-&gt;data;
+<a name="line275">275: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>        ierr;
+<a name="line276">276: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>              m=mlmat-&gt;outvec_leng,n=mlmat-&gt;invec_leng,*nnz,nz_max;
+<a name="line277">277: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>              *ml_cols=matdata-&gt;columns,*ml_rowptr=matdata-&gt;rowptr,*aj,i,j,k;
+<a name="line278">278: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>           *ml_vals=matdata-&gt;values,*aa;
+<a name="line279">279: </a>
+<a name="line281">281: </a>  <font color="#4169E1">if</font> ( mlmat-&gt;getrow == NULL) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_NULL,<font color="#666666">"mlmat-&gt;getrow = NULL"</font>);
+<a name="line282">282: </a>  <font color="#4169E1">if</font> (m != n){ <font color="#B22222">/* ML Pmat and Rmat are in CSR format. Pass array pointers into SeqAIJ matrix */</font>
+<a name="line283">283: </a>    <font color="#4169E1">if</font> (reuse){
+<a name="line284">284: </a>      Mat_SeqAIJ  *aij= (Mat_SeqAIJ*)(*newmat)-&gt;data;
+<a name="line285">285: </a>      aij-&gt;i = ml_rowptr;
+<a name="line286">286: </a>      aij-&gt;j = ml_cols;
+<a name="line287">287: </a>      aij-&gt;a = ml_vals;
+<a name="line288">288: </a>    } <font color="#4169E1">else</font> {
+<a name="line289">289: </a>      <font color="#B22222">/* sort ml_cols and ml_vals */</font>
+<a name="line290">290: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((m+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;nnz);
+<a name="line291">291: </a>      <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line292">292: </a>        nnz[i] = ml_rowptr[i+1] - ml_rowptr[i];
+<a name="line293">293: </a>      }
+<a name="line294">294: </a>      aj = ml_cols; aa = ml_vals;
+<a name="line295">295: </a>      <font color="#4169E1">for</font> (i=0; i&lt;m; i++){
+<a name="line296">296: </a>        <A href="../../../../../docs/manualpages/Sys/PetscSortIntWithScalarArray.html#PetscSortIntWithScalarArray">PetscSortIntWithScalarArray</A>(nnz[i],aj,aa);
+<a name="line297">297: </a>        aj += nnz[i]; aa += nnz[i];
+<a name="line298">298: </a>      }
+<a name="line299">299: </a>      <A href="../../../../../docs/manualpages/Mat/MatCreateSeqAIJWithArrays.html#MatCreateSeqAIJWithArrays">MatCreateSeqAIJWithArrays</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,m,n,ml_rowptr,ml_cols,ml_vals,newmat);
+<a name="line300">300: </a>      <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nnz);
+<a name="line301">301: </a>    }
+<a name="line302">302: </a>    <font color="#4169E1">return</font>(0);
+<a name="line303">303: </a>  }
+
+<a name="line305">305: </a>  <font color="#B22222">/* ML Amat is in MSR format. Copy its data into SeqAIJ matrix */</font>
+<a name="line306">306: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,newmat);
+<a name="line307">307: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(*newmat,m,n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line308">308: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(*newmat,<A href="../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>);
+
+<a name="line310">310: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((m+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;nnz);
+<a name="line311">311: </a>  nz_max = 1;
+<a name="line312">312: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line313">313: </a>    nnz[i] = ml_cols[i+1] - ml_cols[i] + 1;
+<a name="line314">314: </a>    <font color="#4169E1">if</font> (nnz[i] &gt; nz_max) nz_max += nnz[i];
+<a name="line315">315: </a>  }
+
+<a name="line317">317: </a>  <A href="../../../../../docs/manualpages/Mat/MatSeqAIJSetPreallocation.html#MatSeqAIJSetPreallocation">MatSeqAIJSetPreallocation</A>(*newmat,0,nnz);
+<a name="line318">318: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc2.html#PetscMalloc2">PetscMalloc2</A>(nz_max,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;aa,nz_max,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,&amp;aj);
+<a name="line319">319: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++){
+<a name="line320">320: </a>    k = 0;
+<a name="line321">321: </a>    <font color="#B22222">/* diagonal entry */</font>
+<a name="line322">322: </a>    aj[k] = i; aa[k++] = ml_vals[i];
+<a name="line323">323: </a>    <font color="#B22222">/* off diagonal entries */</font>
+<a name="line324">324: </a>    <font color="#4169E1">for</font> (j=ml_cols[i]; j&lt;ml_cols[i+1]; j++){
+<a name="line325">325: </a>      aj[k] = ml_cols[j]; aa[k++] = ml_vals[j];
+<a name="line326">326: </a>    }
+<a name="line327">327: </a>    <font color="#B22222">/* sort aj and aa */</font>
+<a name="line328">328: </a>    <A href="../../../../../docs/manualpages/Sys/PetscSortIntWithScalarArray.html#PetscSortIntWithScalarArray">PetscSortIntWithScalarArray</A>(nnz[i],aj,aa);
+<a name="line329">329: </a>    <A href="../../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(*newmat,1,&amp;i,nnz[i],aj,aa,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line330">330: </a>  }
+<a name="line331">331: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*newmat,MAT_FINAL_ASSEMBLY);
+<a name="line332">332: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*newmat,MAT_FINAL_ASSEMBLY);
+
+<a name="line334">334: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree2.html#PetscFree2">PetscFree2</A>(aa,aj);
+<a name="line335">335: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nnz);
+<a name="line336">336: </a>  <font color="#4169E1">return</font>(0);
+<a name="line337">337: </a>}
+
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="MatWrapML_SHELL"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatWrapML_SHELL(ML_Operator *mlmat,<A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A> reuse,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *newmat)</font></strong>
+<a name="line342">342: </a>{
+<a name="line344">344: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m,n;
+<a name="line345">345: </a>  ML_Comm        *MLcomm;
+<a name="line346">346: </a>  Mat_MLShell    *shellctx;
+
+<a name="line349">349: </a>  m = mlmat-&gt;outvec_leng;
+<a name="line350">350: </a>  n = mlmat-&gt;invec_leng;
+<a name="line351">351: </a>  <font color="#4169E1">if</font> (!m || !n){
+<a name="line352">352: </a>    newmat = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line353">353: </a>    <font color="#4169E1">return</font>(0);
+<a name="line354">354: </a>  }
+
+<a name="line356">356: </a>  <font color="#4169E1">if</font> (reuse){
+<a name="line357">357: </a>    <A href="../../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(*newmat,(void **)&amp;shellctx);
+<a name="line358">358: </a>    shellctx-&gt;mlmat = mlmat;
+<a name="line359">359: </a>    <font color="#4169E1">return</font>(0);
+<a name="line360">360: </a>  }
+
+<a name="line362">362: </a>  MLcomm = mlmat-&gt;comm;
+<a name="line363">363: </a>  <A href="../../../../../docs/manualpages/Sys/PetscNew.html#PetscNew">PetscNew</A>(Mat_MLShell,&amp;shellctx);
+<a name="line364">364: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(MLcomm-&gt;USR_comm,m,n,<A href="../../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>,shellctx,newmat);
+<a name="line365">365: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(*newmat,MATOP_MULT,(void(*)(void))MatMult_ML);
+<a name="line366">366: </a>  <A href="../../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(*newmat,MATOP_MULT_ADD,(void(*)(void))MatMultAdd_ML);
+<a name="line367">367: </a>  shellctx-&gt;A         = *newmat;
+<a name="line368">368: </a>  shellctx-&gt;mlmat     = mlmat;
+<a name="line369">369: </a>  <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;shellctx-&gt;y);
+<a name="line370">370: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(shellctx-&gt;y,m,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line371">371: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetFromOptions.html#VecSetFromOptions">VecSetFromOptions</A>(shellctx-&gt;y);
+<a name="line372">372: </a>  (*newmat)-&gt;ops-&gt;destroy = MatDestroy_ML;
+<a name="line373">373: </a>  <font color="#4169E1">return</font>(0);
+<a name="line374">374: </a>}
+
+<a name="line378">378: </a><strong><font color="#4169E1"><a name="MatWrapML_MPIAIJ"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatWrapML_MPIAIJ(ML_Operator *mlmat,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *newmat)</font></strong>
+<a name="line379">379: </a>{
+<a name="line380">380: </a>  <font color="#4169E1">struct ML_CSR_MSRdata</font> *matdata = (<font color="#4169E1">struct ML_CSR_MSRdata</font> *)mlmat-&gt;data;
+<a name="line381">381: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>              *ml_cols=matdata-&gt;columns,*aj;
+<a name="line382">382: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>           *ml_vals=matdata-&gt;values,*aa;
+<a name="line383">383: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>        ierr;
+<a name="line384">384: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>              i,j,k,*gordering;
+<a name="line385">385: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>              m=mlmat-&gt;outvec_leng,n,*nnzA,*nnzB,*nnz,nz_max,row;
+<a name="line386">386: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>                   A;
+
+<a name="line389">389: </a>  <font color="#4169E1">if</font> (mlmat-&gt;getrow == NULL) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_NULL,<font color="#666666">"mlmat-&gt;getrow = NULL"</font>);
+<a name="line390">390: </a>  n = mlmat-&gt;invec_leng;
+<a name="line391">391: </a>  <font color="#4169E1">if</font> (m != n) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"m %d must equal to n %d"</font>,m,n);
+
+<a name="line393">393: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(mlmat-&gt;comm-&gt;USR_comm,&amp;A);
+<a name="line394">394: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(A,m,n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line395">395: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(A,<A href="../../../../../docs/manualpages/Mat/MATMPIAIJ.html#MATMPIAIJ">MATMPIAIJ</A>);
+<a name="line396">396: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc3.html#PetscMalloc3">PetscMalloc3</A>(m,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,&amp;nnzA,m,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,&amp;nnzB,m,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,&amp;nnz);
+<a name="line397">397: </a>
+<a name="line398">398: </a>  nz_max = 0;
+<a name="line399">399: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++){
+<a name="line400">400: </a>    nnz[i] = ml_cols[i+1] - ml_cols[i] + 1;
+<a name="line401">401: </a>    <font color="#4169E1">if</font> (nz_max &lt; nnz[i]) nz_max = nnz[i];
+<a name="line402">402: </a>    nnzA[i] = 1; <font color="#B22222">/* diag */</font>
+<a name="line403">403: </a>    <font color="#4169E1">for</font> (j=ml_cols[i]; j&lt;ml_cols[i+1]; j++){
+<a name="line404">404: </a>      <font color="#4169E1">if</font> (ml_cols[j] &lt; m) nnzA[i]++;
+<a name="line405">405: </a>    }
+<a name="line406">406: </a>    nnzB[i] = nnz[i] - nnzA[i];
+<a name="line407">407: </a>  }
+<a name="line408">408: </a>  <A href="../../../../../docs/manualpages/Mat/MatMPIAIJSetPreallocation.html#MatMPIAIJSetPreallocation">MatMPIAIJSetPreallocation</A>(A,0,nnzA,0,nnzB);
+
+<a name="line410">410: </a>  <font color="#B22222">/* insert mat values -- remap row and column indices */</font>
+<a name="line411">411: </a>  nz_max++;
+<a name="line412">412: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc2.html#PetscMalloc2">PetscMalloc2</A>(nz_max,<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,&amp;aa,nz_max,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,&amp;aj);
+<a name="line413">413: </a>  <font color="#B22222">/* create global row numbering for a ML_Operator */</font>
+<a name="line414">414: </a>  ML_build_global_numbering(mlmat,&amp;gordering,<font color="#666666">"rows"</font>);
+<a name="line415">415: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++){
+<a name="line416">416: </a>    row = gordering[i];
+<a name="line417">417: </a>    k = 0;
+<a name="line418">418: </a>    <font color="#B22222">/* diagonal entry */</font>
+<a name="line419">419: </a>    aj[k] = row; aa[k++] = ml_vals[i];
+<a name="line420">420: </a>    <font color="#B22222">/* off diagonal entries */</font>
+<a name="line421">421: </a>    <font color="#4169E1">for</font> (j=ml_cols[i]; j&lt;ml_cols[i+1]; j++){
+<a name="line422">422: </a>      aj[k] = gordering[ml_cols[j]]; aa[k++] = ml_vals[j];
+<a name="line423">423: </a>    }
+<a name="line424">424: </a>    <A href="../../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(A,1,&amp;row,nnz[i],aj,aa,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line425">425: </a>  }
+<a name="line426">426: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(A,MAT_FINAL_ASSEMBLY);
+<a name="line427">427: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(A,MAT_FINAL_ASSEMBLY);
+<a name="line428">428: </a>  *newmat = A;
+
+<a name="line430">430: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree3.html#PetscFree3">PetscFree3</A>(nnzA,nnzB,nnz);
+<a name="line431">431: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree2.html#PetscFree2">PetscFree2</A>(aa,aj);
+<a name="line432">432: </a>  <font color="#4169E1">return</font>(0);
+<a name="line433">433: </a>}
+
+<a name="line435">435: </a><font color="#B22222">/* -----------------------------------------------------------------------------*/</font>
+<a name="line438">438: </a><strong><font color="#4169E1"><a name="PCDestroy_ML_Private"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_ML_Private(void *ptr)</font></strong>
+<a name="line439">439: </a>{
+<a name="line440">440: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line441">441: </a>  PC_ML           *pc_ml = (PC_ML*)ptr;
+<a name="line442">442: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        level,fine_level=pc_ml-&gt;Nlevels-1;
+
+<a name="line445">445: </a>  ML_Aggregate_Destroy(&amp;pc_ml-&gt;agg_object);
+<a name="line446">446: </a>  ML_Destroy(&amp;pc_ml-&gt;ml_object);
+
+<a name="line448">448: </a>  <font color="#4169E1">if</font> (pc_ml-&gt;PetscMLdata) {
+<a name="line449">449: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pc_ml-&gt;PetscMLdata-&gt;pwork);
+<a name="line450">450: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;size &gt; 1)      {<A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(pc_ml-&gt;PetscMLdata-&gt;Aloc);}
+<a name="line451">451: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;PetscMLdata-&gt;x){<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(pc_ml-&gt;PetscMLdata-&gt;x);}
+<a name="line452">452: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;PetscMLdata-&gt;y){<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(pc_ml-&gt;PetscMLdata-&gt;y);}
+<a name="line453">453: </a>  }
+<a name="line454">454: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pc_ml-&gt;PetscMLdata);
+
+<a name="line456">456: </a>  <font color="#4169E1">for</font> (level=0; level&lt;fine_level; level++){
+<a name="line457">457: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level].A){<A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(pc_ml-&gt;gridctx[level].A);}
+<a name="line458">458: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level].P){<A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(pc_ml-&gt;gridctx[level].P);}
+<a name="line459">459: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level].R){<A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(pc_ml-&gt;gridctx[level].R);}
+<a name="line460">460: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level].x){<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(pc_ml-&gt;gridctx[level].x);}
+<a name="line461">461: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level].b){<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(pc_ml-&gt;gridctx[level].b);}
+<a name="line462">462: </a>    <font color="#4169E1">if</font> (pc_ml-&gt;gridctx[level+1].r){<A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(pc_ml-&gt;gridctx[level+1].r);}
+<a name="line463">463: </a>  }
+<a name="line464">464: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pc_ml-&gt;gridctx);
+<a name="line465">465: </a>  <font color="#4169E1">return</font>(0);
+<a name="line466">466: </a>}
+<a name="line467">467: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line468">468: </a><font color="#B22222">/*</font>
+<a name="line469">469: </a><font color="#B22222">   PCSetUp_ML - Prepares for the use of the ML preconditioner</font>
+<a name="line470">470: </a><font color="#B22222">                    by setting data structures and options.   </font>
+
+<a name="line472">472: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line473">473: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line475">475: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>()</font>
+
+<a name="line477">477: </a><font color="#B22222">   Notes:</font>
+<a name="line478">478: </a><font color="#B22222">   The interface routine <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>() is not usually called directly by</font>
+<a name="line479">479: </a><font color="#B22222">   the user, but instead is called by <A href="../../../../../docs/manualpages/PC/PCApply.html#PCApply">PCApply</A>() if necessary.</font>
+<a name="line480">480: </a><font color="#B22222">*/</font>
+
+<a name="line486">486: </a><strong><font color="#4169E1"><a name="PCSetUp_ML"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_ML(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line487">487: </a>{
+<a name="line488">488: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line489">489: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>     size;
+<a name="line490">490: </a>  FineGridCtx     *PetscMLdata;
+<a name="line491">491: </a>  ML              *ml_object;
+<a name="line492">492: </a>  ML_Aggregate    *agg_object;
+<a name="line493">493: </a>  ML_Operator     *mlmat;
+<a name="line494">494: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        nlocal_allcols,Nlevels,mllevel,level,level1,m,fine_level,bs;
+<a name="line495">495: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>             A,Aloc;
+<a name="line496">496: </a>  GridCtx         *gridctx;
+<a name="line497">497: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line498">498: </a>  PC_ML           *pc_ml = (PC_ML*)mg-&gt;innerctx;
+<a name="line499">499: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>      isSeq, isMPI;
+<a name="line500">500: </a>  <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>             smoother;
+<a name="line501">501: </a>  <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>              subpc;
+
+<a name="line504">504: </a>  <font color="#4169E1">if</font> (pc-&gt;setupcalled){
+<a name="line505">505: </a>    <font color="#B22222">/* since ML can change the size of vectors/matrices at any level we must destroy everything */</font>
+<a name="line506">506: </a>    PCDestroy_ML_Private(pc_ml);
+<a name="line507">507: </a>    PCDestroy_MG_Private(pc);
+<a name="line508">508: </a>  }
+<a name="line509">509: </a>
+<a name="line510">510: </a>  <font color="#B22222">/* setup special features of <A href="../../../../../docs/manualpages/PC/PCML.html#PCML">PCML</A> */</font>
+<a name="line511">511: </a>  <font color="#B22222">/*--------------------------------*/</font>
+<a name="line512">512: </a>  <font color="#B22222">/* covert A to Aloc to be used by ML at fine grid */</font>
+<a name="line513">513: </a>  A = pc-&gt;pmat;
+<a name="line514">514: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line515">515: </a>  pc_ml-&gt;size = size;
+<a name="line516">516: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) A, <A href="../../../../../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>, &amp;isSeq);
+<a name="line517">517: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) A, <A href="../../../../../docs/manualpages/Mat/MATMPIAIJ.html#MATMPIAIJ">MATMPIAIJ</A>, &amp;isMPI);
+<a name="line518">518: </a>  <font color="#4169E1">if</font> (isMPI){
+<a name="line519">519: </a>    MatConvert_MPIAIJ_ML(A,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,MAT_INITIAL_MATRIX,&amp;Aloc);
+<a name="line520">520: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (isSeq) {
+<a name="line521">521: </a>    Aloc = A;
+<a name="line522">522: </a>  } <font color="#4169E1">else</font> {
+<a name="line523">523: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_WRONG, <font color="#666666">"Invalid matrix type for ML. ML can only handle AIJ matrices."</font>);
+<a name="line524">524: </a>  }
+
+<a name="line526">526: </a>  <font color="#B22222">/* create and initialize struct 'PetscMLdata' */</font>
+<a name="line527">527: </a>  PetscNewLog(pc,FineGridCtx,&amp;PetscMLdata);
+<a name="line528">528: </a>  pc_ml-&gt;PetscMLdata = PetscMLdata;
+<a name="line529">529: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((Aloc-&gt;cmap-&gt;n+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),&amp;PetscMLdata-&gt;pwork);
+
+<a name="line531">531: </a>  <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,&amp;PetscMLdata-&gt;x);
+<a name="line532">532: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(PetscMLdata-&gt;x,Aloc-&gt;cmap-&gt;n,Aloc-&gt;cmap-&gt;n);
+<a name="line533">533: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetType.html#VecSetType">VecSetType</A>(PetscMLdata-&gt;x,<A href="../../../../../docs/manualpages/Vec/VECSEQ.html#VECSEQ">VECSEQ</A>);
+
+<a name="line535">535: </a>  <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,&amp;PetscMLdata-&gt;y);
+<a name="line536">536: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(PetscMLdata-&gt;y,A-&gt;rmap-&gt;n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line537">537: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetType.html#VecSetType">VecSetType</A>(PetscMLdata-&gt;y,<A href="../../../../../docs/manualpages/Vec/VECSEQ.html#VECSEQ">VECSEQ</A>);
+<a name="line538">538: </a>  PetscMLdata-&gt;A    = A;
+<a name="line539">539: </a>  PetscMLdata-&gt;Aloc = Aloc;
+<a name="line540">540: </a>
+<a name="line541">541: </a>  <font color="#B22222">/* create ML discretization matrix at fine grid */</font>
+<a name="line542">542: </a>  <font color="#B22222">/* ML requires input of fine-grid matrix. It determines nlevels. */</font>
+<a name="line543">543: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(Aloc,&amp;m,&amp;nlocal_allcols);
+<a name="line544">544: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetBlockSize.html#MatGetBlockSize">MatGetBlockSize</A>(A,&amp;bs);
+<a name="line545">545: </a>  ML_Create(&amp;ml_object,pc_ml-&gt;MaxNlevels);
+<a name="line546">546: </a>  ML_Comm_Set_UsrComm(ml_object-&gt;comm,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm);
+<a name="line547">547: </a>  pc_ml-&gt;ml_object = ml_object;
+<a name="line548">548: </a>  ML_Init_Amatrix(ml_object,0,m,m,PetscMLdata);
+<a name="line549">549: </a>  ML_Set_Amatrix_Getrow(ml_object,0,PetscML_getrow,PetscML_comm,nlocal_allcols);
+<a name="line550">550: </a>  ML_Set_Amatrix_Matvec(ml_object,0,PetscML_matvec);
+<a name="line551">551: </a>
+<a name="line552">552: </a>  <font color="#B22222">/* aggregation */</font>
+<a name="line553">553: </a>  ML_Aggregate_Create(&amp;agg_object);
+<a name="line554">554: </a>  pc_ml-&gt;agg_object = agg_object;
+
+<a name="line556">556: </a>  ML_Aggregate_Set_NullSpace(agg_object,bs,bs,0,0);
+<a name="line557">557: </a>  ML_Aggregate_Set_MaxCoarseSize(agg_object,pc_ml-&gt;MaxCoarseSize);
+<a name="line558">558: </a>  <font color="#B22222">/* set options */</font>
+<a name="line559">559: </a>  <font color="#4169E1">switch</font> (pc_ml-&gt;CoarsenScheme) {
+<a name="line560">560: </a>  <font color="#4169E1">case</font> 1:
+<a name="line561">561: </a>    ML_Aggregate_Set_CoarsenScheme_Coupled(agg_object);<font color="#4169E1">break</font>;
+<a name="line562">562: </a>  <font color="#4169E1">case</font> 2:
+<a name="line563">563: </a>    ML_Aggregate_Set_CoarsenScheme_MIS(agg_object);<font color="#4169E1">break</font>;
+<a name="line564">564: </a>  <font color="#4169E1">case</font> 3:
+<a name="line565">565: </a>    ML_Aggregate_Set_CoarsenScheme_METIS(agg_object);<font color="#4169E1">break</font>;
+<a name="line566">566: </a>  }
+<a name="line567">567: </a>  ML_Aggregate_Set_Threshold(agg_object,pc_ml-&gt;Threshold);
+<a name="line568">568: </a>  ML_Aggregate_Set_DampingFactor(agg_object,pc_ml-&gt;DampingFactor);
+<a name="line569">569: </a>  <font color="#4169E1">if</font> (pc_ml-&gt;SpectralNormScheme_Anorm){
+<a name="line570">570: </a>    ML_Set_SpectralNormScheme_Anorm(ml_object);
+<a name="line571">571: </a>  }
+
+<a name="line573">573: </a>  Nlevels = ML_Gen_MGHierarchy_UsingAggregation(ml_object,0,ML_INCREASING,agg_object);
+<a name="line574">574: </a>  <font color="#4169E1">if</font> (Nlevels&lt;=0) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"Nlevels %d must &gt; 0"</font>,Nlevels);
+<a name="line575">575: </a>  pc_ml-&gt;Nlevels = Nlevels;
+<a name="line576">576: </a>  fine_level = Nlevels - 1;
+
+<a name="line578">578: </a>  <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>(pc,Nlevels,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line579">579: </a>  <font color="#B22222">/* set default smoothers */</font>
+<a name="line580">580: </a>  <font color="#4169E1">for</font> (level=1; level&lt;=fine_level; level++){
+<a name="line581">581: </a>    <font color="#4169E1">if</font> (size == 1){
+<a name="line582">582: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(pc,level,&amp;smoother);
+<a name="line583">583: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(smoother,<A href="../../../../../docs/manualpages/KSP/KSPRICHARDSON.html#KSPRICHARDSON">KSPRICHARDSON</A>);
+<a name="line584">584: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>(smoother,&amp;subpc);
+<a name="line585">585: </a>      <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(subpc,<A href="../../../../../docs/manualpages/PC/PCSOR.html#PCSOR">PCSOR</A>);
+<a name="line586">586: </a>    } <font color="#4169E1">else</font> {
+<a name="line587">587: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(pc,level,&amp;smoother);
+<a name="line588">588: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(smoother,<A href="../../../../../docs/manualpages/KSP/KSPRICHARDSON.html#KSPRICHARDSON">KSPRICHARDSON</A>);
+<a name="line589">589: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>(smoother,&amp;subpc);
+<a name="line590">590: </a>      <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(subpc,<A href="../../../../../docs/manualpages/PC/PCSOR.html#PCSOR">PCSOR</A>);
+<a name="line591">591: </a>    }
+<a name="line592">592: </a>  }
+<a name="line593">593: </a>  PCSetFromOptions_MG(pc); <font color="#B22222">/* should be called in PCSetFromOptions_ML(), but cannot be called prior to <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>() */</font>
+<a name="line594">594: </a>
+<a name="line595">595: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(Nlevels*<font color="#4169E1">sizeof</font>(GridCtx),&amp;gridctx);
+<a name="line596">596: </a>  pc_ml-&gt;gridctx = gridctx;
+
+<a name="line598">598: </a>  <font color="#B22222">/* wrap ML matrices by PETSc shell matrices at coarsened grids. </font>
+<a name="line599">599: </a><font color="#B22222">     Level 0 is the finest grid for ML, but coarsest for PETSc! */</font>
+<a name="line600">600: </a>  gridctx[fine_level].A = A;
+<a name="line601">601: </a>
+<a name="line602">602: </a>  level = fine_level - 1;
+<a name="line603">603: </a>  <font color="#4169E1">if</font> (size == 1){ <font color="#B22222">/* convert ML P, R and A into seqaij format */</font>
+<a name="line604">604: </a>    <font color="#4169E1">for</font> (mllevel=1; mllevel&lt;Nlevels; mllevel++){
+<a name="line605">605: </a>      mlmat = &amp;(ml_object-&gt;Pmat[mllevel]);
+<a name="line606">606: </a>      MatWrapML_SeqAIJ(mlmat,MAT_INITIAL_MATRIX,&amp;gridctx[level].P);
+<a name="line607">607: </a>      mlmat = &amp;(ml_object-&gt;Rmat[mllevel-1]);
+<a name="line608">608: </a>      MatWrapML_SeqAIJ(mlmat,MAT_INITIAL_MATRIX,&amp;gridctx[level].R);
+<a name="line609">609: </a>
+<a name="line610">610: </a>      mlmat = &amp;(ml_object-&gt;Amat[mllevel]);
+<a name="line611">611: </a>      MatWrapML_SeqAIJ(mlmat,MAT_INITIAL_MATRIX,&amp;gridctx[level].A);
+<a name="line612">612: </a>      level--;
+<a name="line613">613: </a>    }
+<a name="line614">614: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* convert ML P and R into shell format, ML A into mpiaij format */</font>
+<a name="line615">615: </a>    <font color="#4169E1">for</font> (mllevel=1; mllevel&lt;Nlevels; mllevel++){
+<a name="line616">616: </a>      mlmat  = &amp;(ml_object-&gt;Pmat[mllevel]);
+<a name="line617">617: </a>      MatWrapML_SHELL(mlmat,MAT_INITIAL_MATRIX,&amp;gridctx[level].P);
+<a name="line618">618: </a>      mlmat  = &amp;(ml_object-&gt;Rmat[mllevel-1]);
+<a name="line619">619: </a>      MatWrapML_SHELL(mlmat,MAT_INITIAL_MATRIX,&amp;gridctx[level].R);
+
+<a name="line621">621: </a>      mlmat  = &amp;(ml_object-&gt;Amat[mllevel]);
+<a name="line622">622: </a>      MatWrapML_MPIAIJ(mlmat,&amp;gridctx[level].A);
+<a name="line623">623: </a>      level--;
+<a name="line624">624: </a>    }
+<a name="line625">625: </a>  }
+
+<a name="line627">627: </a>  <font color="#B22222">/* create vectors and ksp at all levels */</font>
+<a name="line628">628: </a>  <font color="#4169E1">for</font> (level=0; level&lt;fine_level; level++){
+<a name="line629">629: </a>    level1 = level + 1;
+<a name="line630">630: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)gridctx[level].A)-&gt;comm,&amp;gridctx[level].x);
+<a name="line631">631: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(gridctx[level].x,gridctx[level].A-&gt;cmap-&gt;n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line632">632: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetType.html#VecSetType">VecSetType</A>(gridctx[level].x,<A href="../../../../../docs/manualpages/Vec/VECMPI.html#VECMPI">VECMPI</A>);
+<a name="line633">633: </a>    <A href="../../../../../docs/manualpages/PC/PCMGSetX.html#PCMGSetX">PCMGSetX</A>(pc,level,gridctx[level].x);
+<a name="line634">634: </a>
+<a name="line635">635: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)gridctx[level].A)-&gt;comm,&amp;gridctx[level].b);
+<a name="line636">636: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(gridctx[level].b,gridctx[level].A-&gt;rmap-&gt;n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line637">637: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetType.html#VecSetType">VecSetType</A>(gridctx[level].b,<A href="../../../../../docs/manualpages/Vec/VECMPI.html#VECMPI">VECMPI</A>);
+<a name="line638">638: </a>    <A href="../../../../../docs/manualpages/PC/PCMGSetRhs.html#PCMGSetRhs">PCMGSetRhs</A>(pc,level,gridctx[level].b);
+<a name="line639">639: </a>
+<a name="line640">640: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)gridctx[level1].A)-&gt;comm,&amp;gridctx[level1].r);
+<a name="line641">641: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>(gridctx[level1].r,gridctx[level1].A-&gt;rmap-&gt;n,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line642">642: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetType.html#VecSetType">VecSetType</A>(gridctx[level1].r,<A href="../../../../../docs/manualpages/Vec/VECMPI.html#VECMPI">VECMPI</A>);
+<a name="line643">643: </a>    <A href="../../../../../docs/manualpages/PC/PCMGSetR.html#PCMGSetR">PCMGSetR</A>(pc,level1,gridctx[level1].r);
+
+<a name="line645">645: </a>    <font color="#4169E1">if</font> (level == 0){
+<a name="line646">646: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetCoarseSolve.html#PCMGGetCoarseSolve">PCMGGetCoarseSolve</A>(pc,&amp;gridctx[level].ksp);
+<a name="line647">647: </a>    } <font color="#4169E1">else</font> {
+<a name="line648">648: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(pc,level,&amp;gridctx[level].ksp);
+<a name="line649">649: </a>    }
+<a name="line650">650: </a>  }
+<a name="line651">651: </a>  <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(pc,fine_level,&amp;gridctx[fine_level].ksp);
+
+<a name="line653">653: </a>  <font color="#B22222">/* create coarse level and the interpolation between the levels */</font>
+<a name="line654">654: </a>  <font color="#4169E1">for</font> (level=0; level&lt;fine_level; level++){
+<a name="line655">655: </a>    level1 = level + 1;
+<a name="line656">656: </a>    <A href="../../../../../docs/manualpages/PC/PCMGSetInterpolation.html#PCMGSetInterpolation">PCMGSetInterpolation</A>(pc,level1,gridctx[level].P);
+<a name="line657">657: </a>    <A href="../../../../../docs/manualpages/PC/PCMGSetRestriction.html#PCMGSetRestriction">PCMGSetRestriction</A>(pc,level1,gridctx[level].R);
+<a name="line658">658: </a>    <font color="#4169E1">if</font> (level &gt; 0){
+<a name="line659">659: </a>      <A href="../../../../../docs/manualpages/PC/PCMGSetResidual.html#PCMGSetResidual">PCMGSetResidual</A>(pc,level,<A href="../../../../../docs/manualpages/PC/PCMGDefaultResidual.html#PCMGDefaultResidual">PCMGDefaultResidual</A>,gridctx[level].A);
+<a name="line660">660: </a>    }
+<a name="line661">661: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(gridctx[level].ksp,gridctx[level].A,gridctx[level].A,DIFFERENT_NONZERO_PATTERN);
+<a name="line662">662: </a>  }
+<a name="line663">663: </a>  <A href="../../../../../docs/manualpages/PC/PCMGSetResidual.html#PCMGSetResidual">PCMGSetResidual</A>(pc,fine_level,<A href="../../../../../docs/manualpages/PC/PCMGDefaultResidual.html#PCMGDefaultResidual">PCMGDefaultResidual</A>,gridctx[fine_level].A);
+<a name="line664">664: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(gridctx[fine_level].ksp,gridctx[level].A,gridctx[fine_level].A,DIFFERENT_NONZERO_PATTERN);
+
+<a name="line666">666: </a>  <font color="#B22222">/* setupcalled is set to 0 so that MG is setup from scratch */</font>
+<a name="line667">667: </a>  pc-&gt;setupcalled = 0;
+<a name="line668">668: </a>  PCSetUp_MG(pc);
+<a name="line669">669: </a>  <font color="#4169E1">return</font>(0);
+<a name="line670">670: </a>}
+
+<a name="line672">672: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line673">673: </a><font color="#B22222">/*</font>
+<a name="line674">674: </a><font color="#B22222">   PCDestroy_ML - Destroys the private context for the ML preconditioner</font>
+<a name="line675">675: </a><font color="#B22222">   that was created with PCCreate_ML().</font>
+
+<a name="line677">677: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line678">678: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line680">680: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCDestroy.html#PCDestroy">PCDestroy</A>()</font>
+<a name="line681">681: </a><font color="#B22222">*/</font>
+<a name="line684">684: </a><strong><font color="#4169E1"><a name="PCDestroy_ML"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_ML(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line685">685: </a>{
+<a name="line686">686: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line687">687: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line688">688: </a>  PC_ML           *pc_ml= (PC_ML*)mg-&gt;innerctx;
+
+<a name="line691">691: </a>  PCDestroy_ML_Private(pc_ml);
+<a name="line692">692: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pc_ml);
+<a name="line693">693: </a>  PCDestroy_MG(pc);
+<a name="line694">694: </a>  <font color="#4169E1">return</font>(0);
+<a name="line695">695: </a>}
+
+<a name="line699">699: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_ML"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetFromOptions_ML(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line700">700: </a>{
+<a name="line701">701: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line702">702: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        indx,PrintLevel;
+<a name="line703">703: </a>  const char      *scheme[] = {<font color="#666666">"Uncoupled"</font>,<font color="#666666">"Coupled"</font>,<font color="#666666">"MIS"</font>,<font color="#666666">"METIS"</font>};
+<a name="line704">704: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line705">705: </a>  PC_ML           *pc_ml = (PC_ML*)mg-&gt;innerctx;
+
+<a name="line708">708: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"ML options"</font>);
+<a name="line709">709: </a>  PrintLevel    = 0;
+<a name="line710">710: </a>  indx          = 0;
+<a name="line711">711: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_ml_PrintLevel"</font>,<font color="#666666">"Print level"</font>,<font color="#666666">"ML_Set_PrintLevel"</font>,PrintLevel,&amp;PrintLevel,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line712">712: </a>  ML_Set_PrintLevel(PrintLevel);
+<a name="line713">713: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_ml_maxNlevels"</font>,<font color="#666666">"Maximum number of levels"</font>,<font color="#666666">"None"</font>,pc_ml-&gt;MaxNlevels,&amp;pc_ml-&gt;MaxNlevels,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line714">714: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_ml_maxCoarseSize"</font>,<font color="#666666">"Maximum coarsest mesh size"</font>,<font color="#666666">"ML_Aggregate_Set_MaxCoarseSize"</font>,pc_ml-&gt;MaxCoarseSize,&amp;pc_ml-&gt;MaxCoarseSize,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line715">715: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-pc_ml_CoarsenScheme"</font>,<font color="#666666">"Aggregate Coarsen Scheme"</font>,<font color="#666666">"ML_Aggregate_Set_CoarsenScheme_*"</font>,scheme,4,scheme[0],&amp;indx,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line716">716: </a>  pc_ml-&gt;CoarsenScheme = indx;
+<a name="line717">717: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-pc_ml_DampingFactor"</font>,<font color="#666666">"P damping factor"</font>,<font color="#666666">"ML_Aggregate_Set_DampingFactor"</font>,pc_ml-&gt;DampingFactor,&amp;pc_ml-&gt;DampingFactor,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line718">718: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-pc_ml_Threshold"</font>,<font color="#666666">"Smoother drop tol"</font>,<font color="#666666">"ML_Aggregate_Set_Threshold"</font>,pc_ml-&gt;Threshold,&amp;pc_ml-&gt;Threshold,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line719">719: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTruth.html#PetscOptionsTruth">PetscOptionsTruth</A>(<font color="#666666">"-pc_ml_SpectralNormScheme_Anorm"</font>,<font color="#666666">"Method used for estimating spectral radius"</font>,<font color="#666666">"ML_Set_SpectralNormScheme_Anorm"</font>,pc_ml-&gt;SpectralNormScheme_Anorm,&amp;pc_ml-&gt;SpectralNormScheme_Anorm,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line720">720: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line721">721: </a>  <font color="#4169E1">return</font>(0);
+<a name="line722">722: </a>}
+
+<a name="line724">724: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line725">725: </a><font color="#B22222">/*</font>
+<a name="line726">726: </a><font color="#B22222">   PCCreate_ML - Creates a ML preconditioner context, PC_ML, </font>
+<a name="line727">727: </a><font color="#B22222">   and sets this as the private data within the generic preconditioning </font>
+<a name="line728">728: </a><font color="#B22222">   context, <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>, that was created within <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>().</font>
+
+<a name="line730">730: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line731">731: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line733">733: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>()</font>
+<a name="line734">734: </a><font color="#B22222">*/</font>
+
+<a name="line736">736: </a><font color="#B22222">/*MC</font>
+<a name="line737">737: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/PC/PCML.html#PCML">PCML</A> - Use algebraic multigrid preconditioning. This preconditioner requires you provide </font>
+<a name="line738">738: </a><font color="#B22222">       fine grid discretization matrix. The coarser grid matrices and restriction/interpolation </font>
+<a name="line739">739: </a><font color="#B22222">       operators are computed by ML, with the matrices coverted to PETSc matrices in aij format</font>
+<a name="line740">740: </a><font color="#B22222">       and the restriction/interpolation operators wrapped as PETSc shell matrices.</font>
+
+<a name="line742">742: </a><font color="#B22222">   Options Database Key: </font>
+<a name="line743">743: </a><font color="#B22222">   Multigrid options(inherited)</font>
+<a name="line744">744: </a><font color="#B22222">+  -pc_mg_cycles &lt;1&gt;: 1 for V cycle, 2 for W-cycle (MGSetCycles)</font>
+<a name="line745">745: </a><font color="#B22222">.  -pc_mg_smoothup &lt;1&gt;: Number of post-smoothing steps (MGSetNumberSmoothUp)</font>
+<a name="line746">746: </a><font color="#B22222">.  -pc_mg_smoothdown &lt;1&gt;: Number of pre-smoothing steps (MGSetNumberSmoothDown)</font>
+<a name="line747">747: </a><font color="#B22222">-  -pc_mg_type &lt;multiplicative&gt;: (one of) additive multiplicative full cascade kascade</font>
+<a name="line748">748: </a><font color="#B22222">   </font>
+<a name="line749">749: </a><font color="#B22222">   ML options:</font>
+<a name="line750">750: </a><font color="#B22222">+  -pc_ml_PrintLevel &lt;0&gt;: Print level (ML_Set_PrintLevel)</font>
+<a name="line751">751: </a><font color="#B22222">.  -pc_ml_maxNlevels &lt;10&gt;: Maximum number of levels (None)</font>
+<a name="line752">752: </a><font color="#B22222">.  -pc_ml_maxCoarseSize &lt;1&gt;: Maximum coarsest mesh size (ML_Aggregate_Set_MaxCoarseSize)</font>
+<a name="line753">753: </a><font color="#B22222">.  -pc_ml_CoarsenScheme &lt;Uncoupled&gt;: (one of) Uncoupled Coupled MIS METIS</font>
+<a name="line754">754: </a><font color="#B22222">.  -pc_ml_DampingFactor &lt;1.33333&gt;: P damping factor (ML_Aggregate_Set_DampingFactor)</font>
+<a name="line755">755: </a><font color="#B22222">.  -pc_ml_Threshold &lt;0&gt;: Smoother drop tol (ML_Aggregate_Set_Threshold)</font>
+<a name="line756">756: </a><font color="#B22222">-  -pc_ml_SpectralNormScheme_Anorm &lt;false&gt;: Method used for estimating spectral radius (ML_Set_SpectralNormScheme_Anorm)</font>
+
+<a name="line758">758: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line760">760: </a><font color="#B22222">  Concepts: multigrid</font>
+<a name="line761">761: </a><font color="#B22222"> </font>
+<a name="line762">762: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>(), <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCType.html#PCType">PCType</A> (for list of available types), <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>, <A href="../../../../../docs/manualpages/PC/PCMGType.html#PCMGType">PCMGType</A>, </font>
+<a name="line763">763: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetLevels.html#PCMGGetLevels">PCMGGetLevels</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetType.html#PCMGSetType">PCMGSetType</A>(), MPSetCycles(), <A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothDown.html#PCMGSetNumberSmoothDown">PCMGSetNumberSmoothDown</A>(),</font>
+<a name="line764">764: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothUp.html#PCMGSetNumberSmoothUp">PCMGSetNumberSmoothUp</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetCoarseSolve.html#PCMGGetCoarseSolve">PCMGGetCoarseSolve</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetResidual.html#PCMGSetResidual">PCMGSetResidual</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetInterpolation.html#PCMGSetInterpolation">PCMGSetInterpolation</A>(),</font>
+<a name="line765">765: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetRestriction.html#PCMGSetRestriction">PCMGSetRestriction</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmootherUp.html#PCMGGetSmootherUp">PCMGGetSmootherUp</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmootherDown.html#PCMGGetSmootherDown">PCMGGetSmootherDown</A>(),</font>
+<a name="line766">766: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetCyclesOnLevel.html#PCMGSetCyclesOnLevel">PCMGSetCyclesOnLevel</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetRhs.html#PCMGSetRhs">PCMGSetRhs</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetX.html#PCMGSetX">PCMGSetX</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetR.html#PCMGSetR">PCMGSetR</A>()      </font>
+<a name="line767">767: </a><font color="#B22222">M*/</font>
+
+<a name="line772">772: </a><strong><font color="#4169E1"><a name="PCCreate_ML"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCCreate_ML(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line773">773: </a>{
+<a name="line774">774: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line775">775: </a>  PC_ML           *pc_ml;
+<a name="line776">776: </a>  PC_MG           *mg;
+
+<a name="line779">779: </a>  <font color="#B22222">/* <A href="../../../../../docs/manualpages/PC/PCML.html#PCML">PCML</A> is an inherited class of <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A>. Initialize pc as <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A> */</font>
+<a name="line780">780: </a>  PetscObjectChangeTypeName((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<A href="../../../../../docs/manualpages/PC/PCML.html#PCML">PCML</A>);
+<a name="line781">781: </a>  <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(pc,<A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A>); <font color="#B22222">/* calls PCCreate_MG() and MGCreate_Private() */</font>
+
+<a name="line783">783: </a>  <font color="#B22222">/* create a supporting struct and attach it to pc */</font>
+<a name="line784">784: </a>  PetscNewLog(pc,PC_ML,&amp;pc_ml);
+<a name="line785">785: </a>  mg = (PC_MG*)pc-&gt;data;
+<a name="line786">786: </a>  mg-&gt;innerctx = pc_ml;
+<a name="line787">787: </a>
+<a name="line788">788: </a>  pc_ml-&gt;ml_object     = 0;
+<a name="line789">789: </a>  pc_ml-&gt;agg_object    = 0;
+<a name="line790">790: </a>  pc_ml-&gt;gridctx       = 0;
+<a name="line791">791: </a>  pc_ml-&gt;PetscMLdata   = 0;
+<a name="line792">792: </a>  pc_ml-&gt;Nlevels       = -1;
+<a name="line793">793: </a>  pc_ml-&gt;MaxNlevels    = 10;
+<a name="line794">794: </a>  pc_ml-&gt;MaxCoarseSize = 1;
+<a name="line795">795: </a>  pc_ml-&gt;CoarsenScheme = 1;
+<a name="line796">796: </a>  pc_ml-&gt;Threshold     = 0.0;
+<a name="line797">797: </a>  pc_ml-&gt;DampingFactor = 4.0/3.0;
+<a name="line798">798: </a>  pc_ml-&gt;SpectralNormScheme_Anorm = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line799">799: </a>  pc_ml-&gt;size          = 0;
+
+<a name="line801">801: </a>  <font color="#B22222">/* overwrite the pointers of <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A> by the functions of <A href="../../../../../docs/manualpages/PC/PCML.html#PCML">PCML</A> */</font>
+<a name="line802">802: </a>  pc-&gt;ops-&gt;setfromoptions = PCSetFromOptions_ML;
+<a name="line803">803: </a>  pc-&gt;ops-&gt;setup          = PCSetUp_ML;
+<a name="line804">804: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_ML;
+<a name="line805">805: </a>  <font color="#4169E1">return</font>(0);
+<a name="line806">806: </a>}
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,523 @@
+<center><a href="ms.c">Actual source code: ms.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/impls/ms/ms.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:21:28+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a><font color="#A020F0">#include &lt;petsc-private/snesimpl.h&gt;   </font><font color="#B22222">/*I "petscsnes.h" I*/</font><font color="#A020F0"></font>
+
+<a name="line3">  3: </a>static const <A href="../../../docs/manualpages/SNES/SNESMSType.html#SNESMSType">SNESMSType</A> SNESMSDefault = SNESMSM62;
+<a name="line4">  4: </a>static <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> SNESMSRegisterAllCalled;
+<a name="line5">  5: </a>static <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> SNESMSPackageInitialized;
+
+<a name="line7">  7: </a><font color="#4169E1">typedef struct _SNESMSTableau *SNESMSTableau;</font>
+<a name="line8">  8: </a><font color="#4169E1"><a name="_SNESMSTableau"></a>struct _SNESMSTableau </font>{
+<a name="line9">  9: </a>  char      *name;
+<a name="line10"> 10: </a>  <A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  nstages;            <font color="#B22222">/* Number of stages */</font>
+<a name="line11"> 11: </a>  <A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  nregisters;         <font color="#B22222">/* Number of registers */</font>
+<a name="line12"> 12: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> stability;          <font color="#B22222">/* Scaled stability region */</font>
+<a name="line13"> 13: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *gamma;             <font color="#B22222">/* Coefficients of 3S* method */</font>
+<a name="line14"> 14: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *delta;             <font color="#B22222">/* Coefficients of 3S* method */</font>
+<a name="line15"> 15: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *betasub;           <font color="#B22222">/* Subdiagonal of beta in Shu-Osher form */</font>
+<a name="line16"> 16: </a>};
+
+<a name="line18"> 18: </a><font color="#4169E1">typedef struct _SNESMSTableauLink *SNESMSTableauLink;</font>
+<a name="line19"> 19: </a><font color="#4169E1"><a name="_SNESMSTableauLink"></a>struct _SNESMSTableauLink </font>{
+<a name="line20"> 20: </a>  <font color="#4169E1">struct _SNESMSTableau</font> tab;
+<a name="line21"> 21: </a>  SNESMSTableauLink next;
+<a name="line22"> 22: </a>};
+<a name="line23"> 23: </a>static SNESMSTableauLink SNESMSTableauList;
+
+<a name="line25"> 25: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line26"> 26: </a>  SNESMSTableau tableau;        <font color="#B22222">/* Tableau in low-storage form */</font>
+<a name="line27"> 27: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>     damping;        <font color="#B22222">/* Damping parameter, like length of (pseudo) time step */</font>
+<a name="line28"> 28: </a>  <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>     norms;          <font color="#B22222">/* Compute norms, usually only for monitoring purposes */</font>
+<a name="line29"> 29: </a>} SNES_MS;
+
+<a name="line33"> 33: </a><font color="#B22222">/*@C</font>
+<a name="line34"> 34: </a><font color="#B22222">  <A href="../../../docs/manualpages/SNES/SNESMSRegisterAll.html#SNESMSRegisterAll">SNESMSRegisterAll</A> - Registers all of the multi-stage methods in <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A></font>
+
+<a name="line36"> 36: </a><font color="#B22222">  Not Collective, but should be called by all processes which will need the schemes to be registered</font>
+
+<a name="line38"> 38: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line40"> 40: </a><font color="#B22222">.keywords: <A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A>, register, all</font>
+
+<a name="line42"> 42: </a><font color="#B22222">.seealso:  <A href="../../../docs/manualpages/SNES/SNESMSRegisterDestroy.html#SNESMSRegisterDestroy">SNESMSRegisterDestroy</A>()</font>
+<a name="line43"> 43: </a><font color="#B22222">@*/</font>
+<a name="line44"> 44: </a><strong><font color="#4169E1"><a name="SNESMSRegisterAll"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSRegisterAll.html#SNESMSRegisterAll">SNESMSRegisterAll</A>(void)</font></strong>
+<a name="line45"> 45: </a>{
+
+<a name="line49"> 49: </a>  <font color="#4169E1">if</font> (SNESMSRegisterAllCalled) <font color="#4169E1">return</font>(0);
+<a name="line50"> 50: </a>  SNESMSRegisterAllCalled = <A href="../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line52"> 52: </a>  {
+<a name="line53"> 53: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][1] = {{1.0},{0.0},{0.0}};
+<a name="line54"> 54: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[1] = {0.0};
+<a name="line55"> 55: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[1] = {1.0};
+<a name="line56"> 56: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSEULER,1,3,1.0,&amp;gamma[0][0],delta,betasub);
+<a name="line57"> 57: </a>  }
+
+<a name="line59"> 59: </a>  {
+<a name="line60"> 60: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][6] = {
+<a name="line61"> 61: </a>      {0.0000000000000000E+00,  -7.0304722367110606E-01, -1.9836719667506464E-01, -1.6023843981863788E+00, 9.4483822882855284E-02,  -1.4204296130641869E-01},
+<a name="line62"> 62: </a>      {1.0000000000000000E+00,  1.1111025767083920E+00,  5.6150921583923230E-01,  7.4151723494934041E-01,  3.1714538168600587E-01,  4.6479276238548706E-01},
+<a name="line63"> 63: </a>      {0.0000000000000000E+00,  0.0000000000000000E+00,  0.0000000000000000E+00,  6.7968174970583317E-01,  -4.1755042846051737E-03, -1.9115668129923846E-01}
+<a name="line64"> 64: </a>    };
+<a name="line65"> 65: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[6] = {1.0000000000000000E+00, 5.3275427433201750E-01, 6.0143544663985238E-01, 4.5874077053842177E-01, 2.7544386906104651E-01, 0.0000000000000000E+00};
+<a name="line66"> 66: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[6] = {8.4753115429481929E-01, 7.4018896368655618E-01, 6.5963574086583309E-03, 4.6747795645517759E-01, 1.3314545813643919E-01, 5.3260800028018784E-01};
+<a name="line67"> 67: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSM62,6,3,1.0,&amp;gamma[0][0],delta,betasub);
+<a name="line68"> 68: </a>  }
+<a name="line69"> 69: </a>  {
+<a name="line70"> 70: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][4] = {{0,0,0,0},{0,0,0,0},{1,1,1,1}};
+<a name="line71"> 71: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[4] = {0,0,0,0};
+<a name="line72"> 72: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[4] = {0.25, 0.5, 0.55, 1.0};
+<a name="line73"> 73: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSJAMESON83,4,3,1.0,&amp;gamma[0][0],delta,betasub);
+<a name="line74"> 74: </a>  }
+<a name="line75"> 75: </a>  {                             <font color="#B22222">/* Van Leer, Tai, and Powell (1989) 2 stage, order 1 */</font>
+<a name="line76"> 76: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][2] = {{0,0},{0,0},{1,1}};
+<a name="line77"> 77: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[2] = {0,0};
+<a name="line78"> 78: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[2] = {0.3333,1.0};
+<a name="line79"> 79: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSVLTP21,2,3,1.0,&amp;gamma[0][0],delta,betasub);
+<a name="line80"> 80: </a>  }
+<a name="line81"> 81: </a>  {                             <font color="#B22222">/* Van Leer, Tai, and Powell (1989) 3 stage, order 1 */</font>
+<a name="line82"> 82: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][3] = {{0,0,0},{0,0,0},{1,1,1}};
+<a name="line83"> 83: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[3] = {0,0,0};
+<a name="line84"> 84: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[3] = {0.1481,0.4000,1.0};
+<a name="line85"> 85: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSVLTP31,3,3,1.5,&amp;gamma[0][0],delta,betasub);
+<a name="line86"> 86: </a>  }
+<a name="line87"> 87: </a>  {                             <font color="#B22222">/* Van Leer, Tai, and Powell (1989) 4 stage, order 1 */</font>
+<a name="line88"> 88: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][4] = {{0,0,0,0},{0,0,0,0},{1,1,1,1}};
+<a name="line89"> 89: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[4] = {0,0,0,0};
+<a name="line90"> 90: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[4] = {0.0833,0.2069,0.4265,1.0};
+<a name="line91"> 91: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSVLTP41,4,3,2.0,&amp;gamma[0][0],delta,betasub);
+<a name="line92"> 92: </a>  }
+<a name="line93"> 93: </a>  {                             <font color="#B22222">/* Van Leer, Tai, and Powell (1989) 5 stage, order 1 */</font>
+<a name="line94"> 94: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][5] = {{0,0,0,0,0},{0,0,0,0,0},{1,1,1,1,1}};
+<a name="line95"> 95: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[5] = {0,0,0,0,0};
+<a name="line96"> 96: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[5] = {0.0533,0.1263,0.2375,0.4414,1.0};
+<a name="line97"> 97: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSVLTP51,5,3,2.5,&amp;gamma[0][0],delta,betasub);
+<a name="line98"> 98: </a>  }
+<a name="line99"> 99: </a>  {                             <font color="#B22222">/* Van Leer, Tai, and Powell (1989) 6 stage, order 1 */</font>
+<a name="line100">100: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[3][6] = {{0,0,0,0,0,0},{0,0,0,0,0,0},{1,1,1,1,1,1}};
+<a name="line101">101: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[6] = {0,0,0,0,0,0};
+<a name="line102">102: </a>    <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[6] = {0.0370,0.0851,0.1521,0.2562,0.4512,1.0};
+<a name="line103">103: </a>    <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(SNESMSVLTP61,6,3,3.0,&amp;gamma[0][0],delta,betasub);
+<a name="line104">104: </a>  }
+<a name="line105">105: </a>  <font color="#4169E1">return</font>(0);
+<a name="line106">106: </a>}
+
+<a name="line110">110: </a><font color="#B22222">/*@C</font>
+<a name="line111">111: </a><font color="#B22222">   <A href="../../../docs/manualpages/SNES/SNESMSRegisterDestroy.html#SNESMSRegisterDestroy">SNESMSRegisterDestroy</A> - Frees the list of schemes that were registered by <A href="../../../docs/manualpages/TS/TSRosWRegister.html#TSRosWRegister">TSRosWRegister</A>().</font>
+
+<a name="line113">113: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line115">115: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line117">117: </a><font color="#B22222">.keywords: TSRosW, register, destroy</font>
+<a name="line118">118: </a><font color="#B22222">.seealso: <A href="../../../docs/manualpages/TS/TSRosWRegister.html#TSRosWRegister">TSRosWRegister</A>(), <A href="../../../docs/manualpages/TS/TSRosWRegisterAll.html#TSRosWRegisterAll">TSRosWRegisterAll</A>(), TSRosWRegisterDynamic()</font>
+<a name="line119">119: </a><font color="#B22222">@*/</font>
+<a name="line120">120: </a><strong><font color="#4169E1"><a name="SNESMSRegisterDestroy"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSRegisterDestroy.html#SNESMSRegisterDestroy">SNESMSRegisterDestroy</A>(void)</font></strong>
+<a name="line121">121: </a>{
+<a name="line123">123: </a>  SNESMSTableauLink link;
+
+<a name="line126">126: </a>  <font color="#4169E1">while</font> ((link = SNESMSTableauList)) {
+<a name="line127">127: </a>    SNESMSTableau t = &amp;link-&gt;tab;
+<a name="line128">128: </a>    SNESMSTableauList = link-&gt;next;
+<a name="line129">129: </a>    <A href="../../../docs/manualpages/Sys/PetscFree3.html#PetscFree3">PetscFree3</A>(t-&gt;gamma,t-&gt;delta,t-&gt;betasub);
+<a name="line130">130: </a>    <A href="../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(t-&gt;name);
+<a name="line131">131: </a>    <A href="../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(link);
+<a name="line132">132: </a>  }
+<a name="line133">133: </a>  SNESMSRegisterAllCalled = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line134">134: </a>  <font color="#4169E1">return</font>(0);
+<a name="line135">135: </a>}
+
+<a name="line139">139: </a><font color="#B22222">/*@C</font>
+<a name="line140">140: </a><font color="#B22222">  <A href="../../../docs/manualpages/SNES/SNESMSInitializePackage.html#SNESMSInitializePackage">SNESMSInitializePackage</A> - This function initializes everything in the <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A> package. It is called</font>
+<a name="line141">141: </a><font color="#B22222">  from PetscDLLibraryRegister() when using dynamic libraries, and on the first call to SNESCreate_MS()</font>
+<a name="line142">142: </a><font color="#B22222">  when using static libraries.</font>
+
+<a name="line144">144: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line145">145: </a><font color="#B22222">  path - The dynamic library path, or <A href="../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A></font>
+
+<a name="line147">147: </a><font color="#B22222">  Level: developer</font>
+
+<a name="line149">149: </a><font color="#B22222">.keywords: <A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A>, initialize, package</font>
+<a name="line150">150: </a><font color="#B22222">.seealso: <A href="../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>()</font>
+<a name="line151">151: </a><font color="#B22222">@*/</font>
+<a name="line152">152: </a><strong><font color="#4169E1"><a name="SNESMSInitializePackage"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSInitializePackage.html#SNESMSInitializePackage">SNESMSInitializePackage</A>(const char path[])</font></strong>
+<a name="line153">153: </a>{
+
+<a name="line157">157: </a>  <font color="#4169E1">if</font> (SNESMSPackageInitialized) <font color="#4169E1">return</font>(0);
+<a name="line158">158: </a>  SNESMSPackageInitialized = <A href="../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line159">159: </a>  <A href="../../../docs/manualpages/SNES/SNESMSRegisterAll.html#SNESMSRegisterAll">SNESMSRegisterAll</A>();
+<a name="line160">160: </a>  <A href="../../../docs/manualpages/Sys/PetscRegisterFinalize.html#PetscRegisterFinalize">PetscRegisterFinalize</A>(<A href="../../../docs/manualpages/SNES/SNESMSFinalizePackage.html#SNESMSFinalizePackage">SNESMSFinalizePackage</A>);
+<a name="line161">161: </a>  <font color="#4169E1">return</font>(0);
+<a name="line162">162: </a>}
+
+<a name="line166">166: </a><font color="#B22222">/*@C</font>
+<a name="line167">167: </a><font color="#B22222">  <A href="../../../docs/manualpages/SNES/SNESMSFinalizePackage.html#SNESMSFinalizePackage">SNESMSFinalizePackage</A> - This function destroys everything in the <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A> package. It is</font>
+<a name="line168">168: </a><font color="#B22222">  called from <A href="../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>().</font>
+
+<a name="line170">170: </a><font color="#B22222">  Level: developer</font>
+
+<a name="line172">172: </a><font color="#B22222">.keywords: Petsc, destroy, package</font>
+<a name="line173">173: </a><font color="#B22222">.seealso: <A href="../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>()</font>
+<a name="line174">174: </a><font color="#B22222">@*/</font>
+<a name="line175">175: </a><strong><font color="#4169E1"><a name="SNESMSFinalizePackage"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSFinalizePackage.html#SNESMSFinalizePackage">SNESMSFinalizePackage</A>(void)</font></strong>
+<a name="line176">176: </a>{
+
+<a name="line180">180: </a>  SNESMSPackageInitialized = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line181">181: </a>  <A href="../../../docs/manualpages/SNES/SNESMSRegisterDestroy.html#SNESMSRegisterDestroy">SNESMSRegisterDestroy</A>();
+<a name="line182">182: </a>  <font color="#4169E1">return</font>(0);
+<a name="line183">183: </a>}
+
+<a name="line187">187: </a><font color="#B22222">/*@C</font>
+<a name="line188">188: </a><font color="#B22222">   <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A> - register a multistage scheme</font>
+
+<a name="line190">190: </a><font color="#B22222">   Not Collective, but the same schemes should be registered on all processes on which they will be used</font>
+
+<a name="line192">192: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line193">193: </a><font color="#B22222">+  name - identifier for method</font>
+<a name="line194">194: </a><font color="#B22222">.  nstages - number of stages</font>
+<a name="line195">195: </a><font color="#B22222">.  nregisters - number of registers used by low-storage implementation</font>
+<a name="line196">196: </a><font color="#B22222">.  gamma - coefficients, see Ketcheson's paper</font>
+<a name="line197">197: </a><font color="#B22222">.  delta - coefficients, see Ketcheson's paper</font>
+<a name="line198">198: </a><font color="#B22222">-  betasub - subdiagonal of Shu-Osher form</font>
+
+<a name="line200">200: </a><font color="#B22222">   Notes:</font>
+<a name="line201">201: </a><font color="#B22222">   The notation is described in Ketcheson (2010) Runge-Kutta methods with minimum storage implementations.</font>
+
+<a name="line203">203: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line205">205: </a><font color="#B22222">.keywords: <A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, register</font>
+
+<a name="line207">207: </a><font color="#B22222">.seealso: <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A></font>
+<a name="line208">208: </a><font color="#B22222">@*/</font>
+<a name="line209">209: </a><strong><font color="#4169E1"><a name="SNESMSRegister"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>(const <A href="../../../docs/manualpages/SNES/SNESMSType.html#SNESMSType">SNESMSType</A> name,<A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nstages,<A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nregisters,<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> stability,const <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> gamma[],const <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> delta[],const <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> betasub[])</font></strong>
+<a name="line210">210: </a>{
+<a name="line212">212: </a>  SNESMSTableauLink link;
+<a name="line213">213: </a>  SNESMSTableau t;
+
+<a name="line217">217: </a>  <font color="#4169E1">if</font> (nstages &lt; 1) <A href="../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"Must have at least one stage"</font>);
+<a name="line218">218: </a>  <font color="#4169E1">if</font> (nregisters != 3) <A href="../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Only support for methods written in 3-register form"</font>);
+
+<a name="line223">223: </a>  <A href="../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(<font color="#4169E1">sizeof</font>(*link),&amp;link);
+<a name="line224">224: </a>  <A href="../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(link,<font color="#4169E1">sizeof</font>(*link));
+<a name="line225">225: </a>  t = &amp;link-&gt;tab;
+<a name="line226">226: </a>  <A href="../../../docs/manualpages/Sys/PetscStrallocpy.html#PetscStrallocpy">PetscStrallocpy</A>(name,&amp;t-&gt;name);
+<a name="line227">227: </a>  t-&gt;nstages    = nstages;
+<a name="line228">228: </a>  t-&gt;nregisters = nregisters;
+<a name="line229">229: </a>  t-&gt;stability  = stability;
+<a name="line230">230: </a>  <A href="../../../docs/manualpages/Sys/PetscMalloc3.html#PetscMalloc3">PetscMalloc3</A>(nstages*nregisters,<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,&amp;t-&gt;gamma,nstages,<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,&amp;t-&gt;delta,nstages,<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,&amp;t-&gt;betasub);
+<a name="line231">231: </a>  <A href="../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(t-&gt;gamma,gamma,nstages*nregisters*<font color="#4169E1">sizeof</font>(<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>));
+<a name="line232">232: </a>  <A href="../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(t-&gt;delta,delta,nstages*<font color="#4169E1">sizeof</font>(<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>));
+<a name="line233">233: </a>  <A href="../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(t-&gt;betasub,betasub,nstages*<font color="#4169E1">sizeof</font>(<A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>));
+
+<a name="line235">235: </a>  link-&gt;next = SNESMSTableauList;
+<a name="line236">236: </a>  SNESMSTableauList = link;
+<a name="line237">237: </a>  <font color="#4169E1">return</font>(0);
+<a name="line238">238: </a>}
+
+<a name="line242">242: </a><font color="#B22222">/*</font>
+<a name="line243">243: </a><font color="#B22222">  X - initial state, updated in-place.</font>
+<a name="line244">244: </a><font color="#B22222">  F - residual, computed at the initial X on input</font>
+<a name="line245">245: </a><font color="#B22222">*/</font>
+<a name="line246">246: </a><strong><font color="#4169E1"><a name="SNESMSStep_3Sstar"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESMSStep_3Sstar(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F)</font></strong>
+<a name="line247">247: </a>{
+<a name="line249">249: </a>  SNES_MS        *ms = (SNES_MS*)snes-&gt;data;
+<a name="line250">250: </a>  SNESMSTableau  t = ms-&gt;tableau;
+<a name="line251">251: </a>  const <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *gamma = t-&gt;gamma,*delta = t-&gt;delta,*betasub = t-&gt;betasub;
+<a name="line252">252: </a>  <A href="../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            S1,S2,S3,Y;
+<a name="line253">253: </a>  <A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,nstages = t-&gt;nstages;;
+
+
+<a name="line257">257: </a>  Y = snes-&gt;work[0];
+<a name="line258">258: </a>  S1 = X;
+<a name="line259">259: </a>  S2 = snes-&gt;work[1];
+<a name="line260">260: </a>  S3 = snes-&gt;work[2];
+<a name="line261">261: </a>  <A href="../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(S2);
+<a name="line262">262: </a>  <A href="../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(X,S3);
+<a name="line263">263: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nstages; i++) {
+<a name="line264">264: </a>    <A href="../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Ss[4] = {S1,S2,S3,Y};
+<a name="line265">265: </a>    <A href="../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> scoeff[4] = {gamma[0*nstages+i]-1.0,gamma[1*nstages+i],gamma[2*nstages+i],-betasub[i]*ms-&gt;damping};
+<a name="line266">266: </a>    <A href="../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(S2,delta[i],S1);
+<a name="line267">267: </a>    <font color="#4169E1">if</font> (i&gt;0) {
+<a name="line268">268: </a>      <A href="../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,S1,F);
+<a name="line269">269: </a>      <font color="#4169E1">if</font> (snes-&gt;domainerror) {
+<a name="line270">270: </a>        snes-&gt;reason = SNES_DIVERGED_FUNCTION_DOMAIN;
+<a name="line271">271: </a>        <font color="#4169E1">return</font>(0);
+<a name="line272">272: </a>      }
+<a name="line273">273: </a>    }
+<a name="line274">274: </a>    SNES_KSPSolve(snes,snes-&gt;ksp,F,Y);
+<a name="line275">275: </a>    <A href="../../../docs/manualpages/Vec/VecMAXPY.html#VecMAXPY">VecMAXPY</A>(S1,4,scoeff,Ss);
+<a name="line276">276: </a>  }
+<a name="line277">277: </a>  <font color="#4169E1">return</font>(0);
+<a name="line278">278: </a>}
+
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="SNESSolve_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSolve_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  SNES_MS        *ms = (SNES_MS*)snes-&gt;data;
+<a name="line285">285: </a>  <A href="../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X = snes-&gt;vec_sol,F = snes-&gt;vec_func;
+<a name="line286">286: </a>  <A href="../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      fnorm;
+<a name="line287">287: </a>  <A href="../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>   mstruct;
+<a name="line288">288: </a>  <A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line292">292: </a>  snes-&gt;reason = SNES_CONVERGED_ITERATING;
+<a name="line293">293: </a>  PetscObjectTakeAccess(snes);
+<a name="line294">294: </a>  snes-&gt;iter = 0;
+<a name="line295">295: </a>  snes-&gt;norm = 0.;
+<a name="line296">296: </a>  PetscObjectGrantAccess(snes);
+<a name="line297">297: </a>  <font color="#4169E1">if</font> (!snes-&gt;vec_func_init_set) {
+<a name="line298">298: </a>    <A href="../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,X,F);
+<a name="line299">299: </a>    <font color="#4169E1">if</font> (snes-&gt;domainerror) {
+<a name="line300">300: </a>      snes-&gt;reason = SNES_DIVERGED_FUNCTION_DOMAIN;
+<a name="line301">301: </a>      <font color="#4169E1">return</font>(0);
+<a name="line302">302: </a>    }
+<a name="line303">303: </a>  } <font color="#4169E1">else</font> {
+<a name="line304">304: </a>    snes-&gt;vec_func_init_set = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line305">305: </a>  }
+<a name="line306">306: </a>  <font color="#4169E1">if</font> (snes-&gt;jacobian) {         <font color="#B22222">/* This method does not require a Jacobian, but it is usually preconditioned by PBJacobi */</font>
+<a name="line307">307: </a>    <A href="../../../docs/manualpages/SNES/SNESComputeJacobian.html#SNESComputeJacobian">SNESComputeJacobian</A>(snes,snes-&gt;vec_sol,&amp;snes-&gt;jacobian,&amp;snes-&gt;jacobian_pre,&amp;mstruct);
+<a name="line308">308: </a>    <A href="../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(snes-&gt;ksp,snes-&gt;jacobian,snes-&gt;jacobian_pre,mstruct);
+<a name="line309">309: </a>  }
+<a name="line310">310: </a>  <font color="#4169E1">if</font> (ms-&gt;norms) {
+<a name="line311">311: </a>    <font color="#4169E1">if</font> (!snes-&gt;norm_init_set) {
+<a name="line312">312: </a>      <A href="../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(F,<A href="../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;fnorm); <font color="#B22222">/* fnorm &lt;- ||F||  */</font>
+<a name="line313">313: </a>      <font color="#4169E1">if</font> (PetscIsInfOrNanReal(fnorm)) <A href="../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_FP,<font color="#666666">"Infinite or not-a-number generated in norm"</font>);
+<a name="line314">314: </a>    } <font color="#4169E1">else</font> {
+<a name="line315">315: </a>      fnorm = snes-&gt;norm_init;
+<a name="line316">316: </a>      snes-&gt;norm_init_set = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line317">317: </a>    }
+<a name="line318">318: </a>    <font color="#B22222">/* Monitor convergence */</font>
+<a name="line319">319: </a>    PetscObjectTakeAccess(snes);
+<a name="line320">320: </a>    snes-&gt;iter = 0;
+<a name="line321">321: </a>    snes-&gt;norm = fnorm;
+<a name="line322">322: </a>    PetscObjectGrantAccess(snes);
+<a name="line323">323: </a>    SNESLogConvHistory(snes,snes-&gt;norm,0);
+<a name="line324">324: </a>    <A href="../../../docs/manualpages/SNES/SNESMonitor.html#SNESMonitor">SNESMonitor</A>(snes,snes-&gt;iter,snes-&gt;norm);
+
+<a name="line326">326: </a>    <font color="#B22222">/* set parameter for default relative tolerance convergence test */</font>
+<a name="line327">327: </a>    snes-&gt;ttol = fnorm*snes-&gt;rtol;
+<a name="line328">328: </a>    <font color="#B22222">/* Test for convergence */</font>
+<a name="line329">329: </a>    (*snes-&gt;ops-&gt;converged)(snes,snes-&gt;iter,0.0,0.0,fnorm,&amp;snes-&gt;reason,snes-&gt;cnvP);
+<a name="line330">330: </a>    <font color="#4169E1">if</font> (snes-&gt;reason) <font color="#4169E1">return</font>(0);
+<a name="line331">331: </a>  }
+
+<a name="line333">333: </a>  <font color="#B22222">/* Call general purpose update function */</font>
+<a name="line334">334: </a>  <font color="#4169E1">if</font> (snes-&gt;ops-&gt;update) {
+<a name="line335">335: </a>    (*snes-&gt;ops-&gt;update)(snes,snes-&gt;iter);
+<a name="line336">336: </a>  }
+<a name="line337">337: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; snes-&gt;max_its; i++) {
+<a name="line338">338: </a>    SNESMSStep_3Sstar(snes,X,F);
+
+<a name="line340">340: </a>    <font color="#4169E1">if</font> (i+1 &lt; snes-&gt;max_its || ms-&gt;norms) {
+<a name="line341">341: </a>      <A href="../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,X,F);
+<a name="line342">342: </a>      <font color="#4169E1">if</font> (snes-&gt;domainerror) {
+<a name="line343">343: </a>        snes-&gt;reason = SNES_DIVERGED_FUNCTION_DOMAIN;
+<a name="line344">344: </a>        <font color="#4169E1">return</font>(0);
+<a name="line345">345: </a>      }
+<a name="line346">346: </a>    }
+
+<a name="line348">348: </a>    <font color="#4169E1">if</font> (ms-&gt;norms) {
+<a name="line349">349: </a>      <A href="../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(F,<A href="../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;fnorm); <font color="#B22222">/* fnorm &lt;- ||F||  */</font>
+<a name="line350">350: </a>      <font color="#4169E1">if</font> (PetscIsInfOrNanReal(fnorm)) <A href="../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_FP,<font color="#666666">"Infinite or not-a-number generated in norm"</font>);
+<a name="line351">351: </a>      <font color="#B22222">/* Monitor convergence */</font>
+<a name="line352">352: </a>      PetscObjectTakeAccess(snes);
+<a name="line353">353: </a>      snes-&gt;iter = i+1;
+<a name="line354">354: </a>      snes-&gt;norm = fnorm;
+<a name="line355">355: </a>      PetscObjectGrantAccess(snes);
+<a name="line356">356: </a>      SNESLogConvHistory(snes,snes-&gt;norm,0);
+<a name="line357">357: </a>      <A href="../../../docs/manualpages/SNES/SNESMonitor.html#SNESMonitor">SNESMonitor</A>(snes,snes-&gt;iter,snes-&gt;norm);
+
+<a name="line359">359: </a>      <font color="#B22222">/* Test for convergence */</font>
+<a name="line360">360: </a>      (*snes-&gt;ops-&gt;converged)(snes,snes-&gt;iter,0.0,0.0,fnorm,&amp;snes-&gt;reason,snes-&gt;cnvP);
+<a name="line361">361: </a>      <font color="#4169E1">if</font> (snes-&gt;reason) <font color="#4169E1">return</font>(0);
+<a name="line362">362: </a>    }
+
+<a name="line364">364: </a>    <font color="#B22222">/* Call general purpose update function */</font>
+<a name="line365">365: </a>    <font color="#4169E1">if</font> (snes-&gt;ops-&gt;update) {
+<a name="line366">366: </a>      (*snes-&gt;ops-&gt;update)(snes, snes-&gt;iter);
+<a name="line367">367: </a>    }
+<a name="line368">368: </a>  }
+<a name="line369">369: </a>  <font color="#4169E1">if</font> (!snes-&gt;reason) snes-&gt;reason = SNES_CONVERGED_ITS;
+<a name="line370">370: </a>  <font color="#4169E1">return</font>(0);
+<a name="line371">371: </a>}
+
+<a name="line375">375: </a><strong><font color="#4169E1"><a name="SNESSetUp_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSetUp_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line376">376: </a>{
+<a name="line377">377: </a>  SNES_MS * ms = (SNES_MS *)snes-&gt;data;
+
+<a name="line381">381: </a>  <font color="#4169E1">if</font> (!ms-&gt;tableau) {<A href="../../../docs/manualpages/SNES/SNESMSSetType.html#SNESMSSetType">SNESMSSetType</A>(snes,SNESMSDefault);}
+<a name="line382">382: </a>  <A href="../../../docs/manualpages/SNES/SNESDefaultGetWork.html#SNESDefaultGetWork">SNESDefaultGetWork</A>(snes,3);
+<a name="line383">383: </a>  <A href="../../../docs/manualpages/SNES/SNESSetUpMatrices.html#SNESSetUpMatrices">SNESSetUpMatrices</A>(snes);
+<a name="line384">384: </a>  <font color="#4169E1">return</font>(0);
+<a name="line385">385: </a>}
+
+<a name="line389">389: </a><strong><font color="#4169E1"><a name="SNESReset_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESReset_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line390">390: </a>{
+
+<a name="line393">393: </a>  <font color="#4169E1">return</font>(0);
+<a name="line394">394: </a>}
+
+<a name="line398">398: </a><strong><font color="#4169E1"><a name="SNESDestroy_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESDestroy_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line399">399: </a>{
+
+<a name="line403">403: </a>  <A href="../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(snes-&gt;data);
+<a name="line404">404: </a>  <A href="../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">""</font>,<font color="#666666">""</font>,<A href="../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line405">405: </a>  <font color="#4169E1">return</font>(0);
+<a name="line406">406: </a>}
+
+<a name="line410">410: </a><strong><font color="#4169E1"><a name="SNESView_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESView_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line411">411: </a>{
+<a name="line412">412: </a>  <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        iascii;
+<a name="line413">413: </a>  <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line414">414: </a>  SNES_MS          *ms = (SNES_MS*)snes-&gt;data;
+
+<a name="line417">417: </a>  <A href="../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) viewer, PETSCVIEWERASCII, &amp;iascii);
+<a name="line418">418: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line419">419: </a>    SNESMSTableau tab = ms-&gt;tableau;
+<a name="line420">420: </a>    <A href="../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  multi-stage method type: %s\n"</font>,tab?tab-&gt;name:<font color="#666666">"not yet set"</font>);
+<a name="line421">421: </a>  }
+<a name="line422">422: </a>  <font color="#4169E1">return</font>(0);
+<a name="line423">423: </a>}
+
+<a name="line427">427: </a><strong><font color="#4169E1"><a name="SNESSetFromOptions_MS"></a>static <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSetFromOptions_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line428">428: </a>{
+<a name="line429">429: </a>  SNES_MS        *ms = (SNES_MS*)snes-&gt;data;
+
+<a name="line433">433: </a>  <A href="../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> MS options"</font>);
+<a name="line434">434: </a>  {
+<a name="line435">435: </a>    SNESMSTableauLink link;
+<a name="line436">436: </a>    <A href="../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> count,choice;
+<a name="line437">437: </a>    <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg;
+<a name="line438">438: </a>    const char **namelist;
+<a name="line439">439: </a>    char mstype[256];
+
+<a name="line441">441: </a>    <A href="../../../docs/manualpages/Sys/PetscStrncpy.html#PetscStrncpy">PetscStrncpy</A>(mstype,SNESMSDefault,<font color="#4169E1">sizeof</font> mstype);
+<a name="line442">442: </a>    <font color="#4169E1">for</font> (link=SNESMSTableauList,count=0; link; link=link-&gt;next,count++) ;
+<a name="line443">443: </a>    <A href="../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(count*<font color="#4169E1">sizeof</font>(char*),&amp;namelist);
+<a name="line444">444: </a>    <font color="#4169E1">for</font> (link=SNESMSTableauList,count=0; link; link=link-&gt;next,count++) namelist[count] = link-&gt;tab.name;
+<a name="line445">445: </a>    <A href="../../../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-snes_ms_type"</font>,<font color="#666666">"Multistage smoother type"</font>,<font color="#666666">"<A href="../../../docs/manualpages/SNES/SNESMSSetType.html#SNESMSSetType">SNESMSSetType</A>"</font>,(const char*const*)namelist,count,mstype,&amp;choice,&amp;flg);
+<a name="line446">446: </a>    <A href="../../../docs/manualpages/SNES/SNESMSSetType.html#SNESMSSetType">SNESMSSetType</A>(snes,flg ? namelist[choice] : mstype);
+<a name="line447">447: </a>    <A href="../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(namelist);
+<a name="line448">448: </a>    <A href="../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-snes_ms_damping"</font>,<font color="#666666">"Damping for multistage method"</font>,<font color="#666666">"SNESMSSetDamping"</font>,ms-&gt;damping,&amp;ms-&gt;damping,<A href="../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line449">449: </a>    <A href="../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-snes_ms_norms"</font>,<font color="#666666">"Compute norms for monitoring"</font>,<font color="#666666">"none"</font>,ms-&gt;norms,&amp;ms-&gt;norms,<A href="../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line450">450: </a>  }
+<a name="line451">451: </a>  <A href="../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line452">452: </a>  <font color="#4169E1">return</font>(0);
+<a name="line453">453: </a>}
+
+<a name="line455">455: </a>EXTERN_C_BEGIN
+<a name="line458">458: </a><strong><font color="#4169E1"><a name="SNESMSSetType_MS"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  SNESMSSetType_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../docs/manualpages/SNES/SNESMSType.html#SNESMSType">SNESMSType</A> mstype)</font></strong>
+<a name="line459">459: </a>{
+<a name="line460">460: </a>  <A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line461">461: </a>  SNES_MS           *ms = (SNES_MS*)snes-&gt;data;
+<a name="line462">462: </a>  SNESMSTableauLink link;
+<a name="line463">463: </a>  <A href="../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>         match;
+
+<a name="line466">466: </a>  <font color="#4169E1">if</font> (ms-&gt;tableau) {
+<a name="line467">467: </a>    <A href="../../../docs/manualpages/Sys/PetscStrcmp.html#PetscStrcmp">PetscStrcmp</A>(ms-&gt;tableau-&gt;name,mstype,&amp;match);
+<a name="line468">468: </a>    <font color="#4169E1">if</font> (match) <font color="#4169E1">return</font>(0);
+<a name="line469">469: </a>  }
+<a name="line470">470: </a>  <font color="#4169E1">for</font> (link = SNESMSTableauList; link; link=link-&gt;next) {
+<a name="line471">471: </a>    <A href="../../../docs/manualpages/Sys/PetscStrcmp.html#PetscStrcmp">PetscStrcmp</A>(link-&gt;tab.name,mstype,&amp;match);
+<a name="line472">472: </a>    <font color="#4169E1">if</font> (match) {
+<a name="line473">473: </a>      SNESReset_MS(snes);
+<a name="line474">474: </a>      ms-&gt;tableau = &amp;link-&gt;tab;
+<a name="line475">475: </a>      <font color="#4169E1">return</font>(0);
+<a name="line476">476: </a>    }
+<a name="line477">477: </a>  }
+<a name="line478">478: </a>  <A href="../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(((<A href="../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes)-&gt;comm,PETSC_ERR_ARG_UNKNOWN_TYPE,<font color="#666666">"Could not find '%s'"</font>,mstype);
+<a name="line479">479: </a>  <font color="#4169E1">return</font>(0);
+<a name="line480">480: </a>}
+<a name="line481">481: </a>EXTERN_C_END
+
+
+<a name="line486">486: </a><font color="#B22222">/*@C</font>
+<a name="line487">487: </a><font color="#B22222">  <A href="../../../docs/manualpages/SNES/SNESMSSetType.html#SNESMSSetType">SNESMSSetType</A> - Set the type of multistage smoother</font>
+
+<a name="line489">489: </a><font color="#B22222">  Logically collective</font>
+
+<a name="line491">491: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line492">492: </a><font color="#B22222">+  snes - nonlinear solver context</font>
+<a name="line493">493: </a><font color="#B22222">-  mstype - type of multistage method</font>
+
+<a name="line495">495: </a><font color="#B22222">  Level: beginner</font>
+
+<a name="line497">497: </a><font color="#B22222">.seealso: SNESMSGetType(), <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A></font>
+<a name="line498">498: </a><font color="#B22222">@*/</font>
+<a name="line499">499: </a><strong><font color="#4169E1"><a name="SNESMSSetType"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../docs/manualpages/SNES/SNESMSSetType.html#SNESMSSetType">SNESMSSetType</A>(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,const <A href="../../../docs/manualpages/SNES/SNESMSType.html#SNESMSType">SNESMSType</A> rostype)</font></strong>
+<a name="line500">500: </a>{
+
+<a name="line505">505: </a>  PetscTryMethod(snes,<font color="#666666">"SNESMSSetType_C"</font>,(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,const <A href="../../../docs/manualpages/SNES/SNESMSType.html#SNESMSType">SNESMSType</A>),(snes,rostype));
+<a name="line506">506: </a>  <font color="#4169E1">return</font>(0);
+<a name="line507">507: </a>}
+
+<a name="line509">509: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line510">510: </a><font color="#B22222">/*MC</font>
+<a name="line511">511: </a><font color="#B22222">      <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A> - multi-stage smoothers</font>
+
+<a name="line513">513: </a><font color="#B22222">      Options Database:</font>
+
+<a name="line515">515: </a><font color="#B22222">+     -snes_ms_type - type of multi-stage smoother</font>
+<a name="line516">516: </a><font color="#B22222">-     -snes_ms_damping - damping for multi-stage method</font>
+
+<a name="line518">518: </a><font color="#B22222">      Notes:</font>
+<a name="line519">519: </a><font color="#B22222">      These multistage methods are explicit Runge-Kutta methods that are often used as smoothers for</font>
+<a name="line520">520: </a><font color="#B22222">      FAS multigrid for transport problems. In the linear case, these are equivalent to polynomial smoothers (such as Chebyshev).</font>
+
+<a name="line522">522: </a><font color="#B22222">      Multi-stage smoothers should usually be preconditioned by point-block Jacobi to ensure proper scaling and to normalize the wave speeds.</font>
+
+<a name="line524">524: </a><font color="#B22222">      The methods are specified in low storage form (Ketcheson 2010). New methods can be registered with <A href="../../../docs/manualpages/SNES/SNESMSRegister.html#SNESMSRegister">SNESMSRegister</A>().</font>
+
+<a name="line526">526: </a><font color="#B22222">      References:</font>
+
+<a name="line528">528: </a><font color="#B22222">      Ketcheson (2010) Runge-Kutta methods with minimum storage implementations.</font>
+
+<a name="line530">530: </a><font color="#B22222">      Jameson (1983) Solution of the Euler equations for two dimensional transonic flow by a multigrid method.</font>
+
+<a name="line532">532: </a><font color="#B22222">      Pierce and Giles (1997) Preconditioned multigrid methods for compressible flow calculations on stretched meshes.</font>
+
+<a name="line534">534: </a><font color="#B22222">      Level: beginner</font>
+
+<a name="line536">536: </a><font color="#B22222">.seealso:  <A href="../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(), <A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, <A href="../../../docs/manualpages/SNES/SNESSetType.html#SNESSetType">SNESSetType</A>(), <A href="../../../docs/manualpages/SNES/SNESMS.html#SNESMS">SNESMS</A>, <A href="../../../docs/manualpages/SNES/SNESFAS.html#SNESFAS">SNESFAS</A>, <A href="../../../docs/manualpages/KSP/KSPCHEBYSHEV.html#KSPCHEBYSHEV">KSPCHEBYSHEV</A></font>
+
+<a name="line538">538: </a><font color="#B22222">M*/</font>
+<a name="line539">539: </a>EXTERN_C_BEGIN
+<a name="line542">542: </a><strong><font color="#4169E1"><a name="SNESCreate_MS"></a><A href="../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  SNESCreate_MS(<A href="../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line543">543: </a>{
+<a name="line545">545: </a>  SNES_MS        *ms;
+
+<a name="line548">548: </a><font color="#A020F0">#if !defined(PETSC_USE_DYNAMIC_LIBRARIES)</font>
+<a name="line549">549: </a>  <A href="../../../docs/manualpages/SNES/SNESMSInitializePackage.html#SNESMSInitializePackage">SNESMSInitializePackage</A>(<A href="../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line550">550: </a><font color="#A020F0">#endif</font>
+
+<a name="line552">552: </a>  snes-&gt;ops-&gt;setup          = SNESSetUp_MS;
+<a name="line553">553: </a>  snes-&gt;ops-&gt;solve          = SNESSolve_MS;
+<a name="line554">554: </a>  snes-&gt;ops-&gt;destroy        = SNESDestroy_MS;
+<a name="line555">555: </a>  snes-&gt;ops-&gt;setfromoptions = SNESSetFromOptions_MS;
+<a name="line556">556: </a>  snes-&gt;ops-&gt;view           = SNESView_MS;
+<a name="line557">557: </a>  snes-&gt;ops-&gt;reset          = SNESReset_MS;
+
+<a name="line559">559: </a>  snes-&gt;usespc  = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line560">560: </a>  snes-&gt;usesksp = <A href="../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line562">562: </a>  <A href="../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(snes,SNES_MS,&amp;ms);
+<a name="line563">563: </a>  snes-&gt;data = (void*)ms;
+<a name="line564">564: </a>  ms-&gt;damping = 0.9;
+<a name="line565">565: </a>  ms-&gt;norms   = <A href="../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line567">567: </a>  <A href="../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESMSSetType_C"</font>,<font color="#666666">"SNESMSSetType_MS"</font>,SNESMSSetType_MS);
+<a name="line568">568: </a>  <font color="#4169E1">return</font>(0);
+<a name="line569">569: </a>}
+<a name="line570">570: </a>EXTERN_C_END
+</pre>
+</body>
+
+</html>

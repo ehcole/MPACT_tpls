@@ -1,0 +1,344 @@
+<center><a href="pmetis.c">Actual source code: pmetis.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T18:56:46+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCMAT_DLL</font></strong>
+<a name="line2">  2: </a>
+<a name="line3"> 3: </a> #include <A href="../../../../../include/../src/mat/impls/adj/mpi/mpiadj.h.html">../src/mat/impls/adj/mpi/mpiadj.h</A>
+
+<a name="line5">  5: </a><font color="#B22222">/* </font>
+<a name="line6">  6: </a><font color="#B22222">   Currently using ParMetis-2.0. The following include file has</font>
+<a name="line7">  7: </a><font color="#B22222">   to be changed to par_kmetis.h for ParMetis-1.0</font>
+<a name="line8">  8: </a><font color="#B22222">*/</font>
+<a name="line10"> 10: </a><font color="#A020F0">#include </font><font color="#666666">"parmetis.h"</font><font color="#A020F0"></font>
+
+<a name="line13"> 13: </a><font color="#B22222">/*</font>
+<a name="line14"> 14: </a><font color="#B22222">      The first 5 elements of this structure are the input control array to Metis</font>
+<a name="line15"> 15: </a><font color="#B22222">*/</font>
+<a name="line16"> 16: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line17"> 17: </a>  int cuts;         <font color="#B22222">/* number of cuts made (output) */</font>
+<a name="line18"> 18: </a>  int foldfactor;
+<a name="line19"> 19: </a>  int parallel;     <font color="#B22222">/* use parallel partitioner for coarse problem */</font>
+<a name="line20"> 20: </a>  int indexing;     <font color="#B22222">/* 0 indicates C indexing, 1 Fortran */</font>
+<a name="line21"> 21: </a>  int printout;     <font color="#B22222">/* indicates if one wishes Metis to print info */</font>
+<a name="line22"> 22: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm_pmetis;
+<a name="line23"> 23: </a>} MatPartitioning_Parmetis;
+
+<a name="line25"> 25: </a><font color="#B22222">/*</font>
+<a name="line26"> 26: </a><font color="#B22222">   Uses the ParMETIS parallel matrix partitioner to partition the matrix in parallel</font>
+<a name="line27"> 27: </a><font color="#B22222">*/</font>
+<a name="line30"> 30: </a><strong><font color="#4169E1"><a name="MatPartitioningApply_Parmetis"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningApply_Parmetis(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> *partitioning)</font></strong>
+<a name="line31"> 31: </a>{
+<a name="line32"> 32: </a>  MatPartitioning_Parmetis *parmetis = (MatPartitioning_Parmetis*)part-&gt;data;
+<a name="line33"> 33: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>           ierr;
+<a name="line34"> 34: </a>  int                      *locals,size,rank;
+<a name="line35"> 35: </a>  int                      *vtxdist,*xadj,*adjncy,itmp = 0;
+<a name="line36"> 36: </a>  int                      wgtflag=0, numflag=0, ncon=1, nparts=part-&gt;n, options[3],  i,j;
+<a name="line37"> 37: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>                      mat = part-&gt;adj;
+<a name="line38"> 38: </a>  Mat_MPIAdj               *adj = (Mat_MPIAdj *)mat-&gt;data;
+<a name="line39"> 39: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>               flg;
+<a name="line40"> 40: </a>  float                    *tpwgts,*ubvec;
+<a name="line41"> 41: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>                 bs = 1,nold;
+
+<a name="line44"> 44: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat)-&gt;comm,&amp;size);
+
+<a name="line46"> 46: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat,<A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>,&amp;flg);
+<a name="line47"> 47: </a>  <font color="#4169E1">if</font> (!flg) {
+<a name="line48"> 48: </a>    <font color="#B22222">/* bs indicates if the converted matrix is "reduced" from the original and hence the </font>
+<a name="line49"> 49: </a><font color="#B22222">       resulting partition results need to be stretched to match the original matrix */</font>
+<a name="line50"> 50: </a>    nold = mat-&gt;rmap-&gt;n;
+<a name="line51"> 51: </a>    <A href="../../../../../docs/manualpages/Mat/MatConvert.html#MatConvert">MatConvert</A>(mat,<A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>,MAT_INITIAL_MATRIX,&amp;mat);
+<a name="line52"> 52: </a>    bs   = nold/mat-&gt;rmap-&gt;n;
+<a name="line53"> 53: </a>    adj  = (Mat_MPIAdj *)mat-&gt;data;
+<a name="line54"> 54: </a>  }
+
+<a name="line56"> 56: </a>  vtxdist = mat-&gt;rmap-&gt;range;
+<a name="line57"> 57: </a>  xadj    = adj-&gt;i;
+<a name="line58"> 58: </a>  adjncy  = adj-&gt;j;
+<a name="line59"> 59: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm,&amp;rank);
+<a name="line60"> 60: </a><font color="#A020F0">#if 0</font>
+<a name="line61"> 61: </a>  <font color="#4169E1">if</font> (!(vtxdist[rank+1] - vtxdist[rank])) {
+<a name="line62"> 62: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_LIB,<font color="#666666">"Does not support any processor with no entries"</font>);
+<a name="line63"> 63: </a>  }
+<a name="line64"> 64: </a><font color="#A020F0">#endif</font>
+<a name="line65"> 65: </a><font color="#A020F0">#if defined(PETSC_USE_DEBUG)</font>
+<a name="line66"> 66: </a>  <font color="#B22222">/* check that matrix has no diagonal entries */</font>
+<a name="line67"> 67: </a>  {
+<a name="line68"> 68: </a>    int rstart;
+<a name="line69"> 69: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>(mat,&amp;rstart,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line70"> 70: </a>    <font color="#4169E1">for</font> (i=0; i&lt;mat-&gt;rmap-&gt;n; i++) {
+<a name="line71"> 71: </a>      <font color="#4169E1">for</font> (j=xadj[i]; j&lt;xadj[i+1]; j++) {
+<a name="line72"> 72: </a>        <font color="#4169E1">if</font> (adjncy[j] == i+rstart) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_ARG_WRONG,<font color="#666666">"Row %d has diagonal entry; Parmetis forbids diagonal entry"</font>,i+rstart);
+<a name="line73"> 73: </a>      }
+<a name="line74"> 74: </a>    }
+<a name="line75"> 75: </a>  }
+<a name="line76"> 76: </a><font color="#A020F0">#endif</font>
+
+<a name="line78"> 78: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((mat-&gt;rmap-&gt;n+1)*<font color="#4169E1">sizeof</font>(int),&amp;locals);
+
+<a name="line80"> 80: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) {itmp = parmetis-&gt;printout; parmetis-&gt;printout = 127;}
+<a name="line81"> 81: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(ncon*nparts*<font color="#4169E1">sizeof</font>(float),&amp;tpwgts);
+<a name="line82"> 82: </a>  <font color="#4169E1">for</font> (i=0; i&lt;ncon; i++) {
+<a name="line83"> 83: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nparts; j++) {
+<a name="line84"> 84: </a>      <font color="#4169E1">if</font> (part-&gt;part_weights) {
+<a name="line85"> 85: </a>        tpwgts[i*nparts+j] = part-&gt;part_weights[i*nparts+j];
+<a name="line86"> 86: </a>      } <font color="#4169E1">else</font> {
+<a name="line87"> 87: </a>        tpwgts[i*nparts+j] = 1./nparts;
+<a name="line88"> 88: </a>      }
+<a name="line89"> 89: </a>    }
+<a name="line90"> 90: </a>  }
+<a name="line91"> 91: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(ncon*<font color="#4169E1">sizeof</font>(float),&amp;ubvec);
+<a name="line92"> 92: </a>  <font color="#4169E1">for</font> (i=0; i&lt;ncon; i++) {
+<a name="line93"> 93: </a>    ubvec[i] = 1.05;
+<a name="line94"> 94: </a>  }
+<a name="line95"> 95: </a>  options[0] = 0;
+<a name="line96"> 96: </a>  <font color="#B22222">/* ParMETIS has no error conditions ??? */</font>
+<a name="line97"> 97: </a>  ParMETIS_V3_PartKway(vtxdist,xadj,adjncy,part-&gt;vertex_weights,adj-&gt;values,&amp;wgtflag,&amp;numflag,&amp;ncon,&amp;nparts,tpwgts,ubvec,options,&amp;parmetis-&gt;cuts,locals,&amp;parmetis-&gt;comm_pmetis);
+<a name="line98"> 98: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(tpwgts);
+<a name="line99"> 99: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ubvec);
+<a name="line100">100: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) {parmetis-&gt;printout = itmp;}
+
+<a name="line102">102: </a>  <font color="#4169E1">if</font> (bs &gt; 1) {
+<a name="line103">103: </a>    <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *newlocals;
+<a name="line104">104: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(bs*mat-&gt;rmap-&gt;n*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;newlocals);
+<a name="line105">105: </a>    <font color="#4169E1">for</font> (i=0; i&lt;mat-&gt;rmap-&gt;n; i++) {
+<a name="line106">106: </a>      <font color="#4169E1">for</font> (j=0; j&lt;bs; j++) {
+<a name="line107">107: </a>        newlocals[bs*i + j] = locals[i];
+<a name="line108">108: </a>      }
+<a name="line109">109: </a>    }
+<a name="line110">110: </a>    <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm,bs*mat-&gt;rmap-&gt;n,newlocals,partitioning);
+<a name="line111">111: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(newlocals);
+<a name="line112">112: </a>  } <font color="#4169E1">else</font> {
+<a name="line113">113: </a>    <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm,mat-&gt;rmap-&gt;n,locals,partitioning);
+<a name="line114">114: </a>  }
+<a name="line115">115: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(locals);
+
+<a name="line117">117: </a>  <font color="#4169E1">if</font> (!flg) {
+<a name="line118">118: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(mat);
+<a name="line119">119: </a>  }
+<a name="line120">120: </a>  <font color="#4169E1">return</font>(0);
+<a name="line121">121: </a>}
+
+
+<a name="line126">126: </a><strong><font color="#4169E1"><a name="MatPartitioningView_Parmetis"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningView_Parmetis(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part,<A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line127">127: </a>{
+<a name="line128">128: </a>  MatPartitioning_Parmetis *parmetis = (MatPartitioning_Parmetis *)part-&gt;data;
+<a name="line130">130: </a>  int rank;
+<a name="line131">131: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>               iascii;
+
+<a name="line134">134: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm,&amp;rank);
+<a name="line135">135: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSC_VIEWER_ASCII,&amp;iascii);
+<a name="line136">136: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line137">137: </a>    <font color="#4169E1">if</font> (parmetis-&gt;parallel == 2) {
+<a name="line138">138: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Using parallel coarse grid partitioner\n"</font>);
+<a name="line139">139: </a>    } <font color="#4169E1">else</font> {
+<a name="line140">140: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Using sequential coarse grid partitioner\n"</font>);
+<a name="line141">141: </a>    }
+<a name="line142">142: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Using %d fold factor\n"</font>,parmetis-&gt;foldfactor);
+<a name="line143">143: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html#PetscViewerASCIISynchronizedPrintf">PetscViewerASCIISynchronizedPrintf</A>(viewer,<font color="#666666">"  [%d]Number of cuts found %d\n"</font>,rank,parmetis-&gt;cuts);
+<a name="line144">144: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerFlush.html#PetscViewerFlush">PetscViewerFlush</A>(viewer);
+<a name="line145">145: </a>  } <font color="#4169E1">else</font> {
+<a name="line146">146: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_SUP,<font color="#666666">"Viewer type %s not supported for this Parmetis partitioner"</font>,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer)-&gt;type_name);
+<a name="line147">147: </a>  }
+
+<a name="line149">149: </a>  <font color="#4169E1">return</font>(0);
+<a name="line150">150: </a>}
+
+<a name="line154">154: </a><font color="#B22222">/*@</font>
+<a name="line155">155: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisSetCoarseSequential.html#MatPartitioningParmetisSetCoarseSequential">MatPartitioningParmetisSetCoarseSequential</A> - Use the sequential code to </font>
+<a name="line156">156: </a><font color="#B22222">         do the partitioning of the coarse grid.</font>
+
+<a name="line158">158: </a><font color="#B22222">  Collective on <A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A></font>
+
+<a name="line160">160: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line161">161: </a><font color="#B22222">.  part - the partitioning context</font>
+
+<a name="line163">163: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line165">165: </a><font color="#B22222">@*/</font>
+<a name="line166">166: </a><strong><font color="#4169E1"><a name="MatPartitioningParmetisSetCoarseSequential"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisSetCoarseSequential.html#MatPartitioningParmetisSetCoarseSequential">MatPartitioningParmetisSetCoarseSequential</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line167">167: </a>{
+<a name="line168">168: </a>  MatPartitioning_Parmetis *parmetis = (MatPartitioning_Parmetis *)part-&gt;data;
+
+<a name="line171">171: </a>  parmetis-&gt;parallel = 1;
+<a name="line172">172: </a>  <font color="#4169E1">return</font>(0);
+<a name="line173">173: </a>}
+
+<a name="line177">177: </a><font color="#B22222">/*@</font>
+<a name="line178">178: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisGetEdgeCut.html#MatPartitioningParmetisGetEdgeCut">MatPartitioningParmetisGetEdgeCut</A> - Returns the number of edge cuts in the vertex partition.</font>
+
+<a name="line180">180: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line181">181: </a><font color="#B22222">. part - the partitioning context</font>
+
+<a name="line183">183: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line184">184: </a><font color="#B22222">. cut - the edge cut</font>
+
+<a name="line186">186: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line188">188: </a><font color="#B22222">@*/</font>
+<a name="line189">189: </a><strong><font color="#4169E1"><a name="MatPartitioningParmetisGetEdgeCut"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisGetEdgeCut.html#MatPartitioningParmetisGetEdgeCut">MatPartitioningParmetisGetEdgeCut</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *cut)</font></strong>
+<a name="line190">190: </a>{
+<a name="line191">191: </a>  MatPartitioning_Parmetis *parmetis = (MatPartitioning_Parmetis *) part-&gt;data;
+
+<a name="line194">194: </a>  *cut = parmetis-&gt;cuts;
+<a name="line195">195: </a>  <font color="#4169E1">return</font>(0);
+<a name="line196">196: </a>}
+
+<a name="line200">200: </a><strong><font color="#4169E1"><a name="MatPartitioningSetFromOptions_Parmetis"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningSetFromOptions_Parmetis(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line201">201: </a>{
+<a name="line203">203: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     flag = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line206">206: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"Set ParMeTiS partitioning options"</font>);
+<a name="line207">207: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTruth.html#PetscOptionsTruth">PetscOptionsTruth</A>(<font color="#666666">"-mat_partitioning_parmetis_coarse_sequential"</font>,<font color="#666666">"Use sequential coarse partitioner"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisSetCoarseSequential.html#MatPartitioningParmetisSetCoarseSequential">MatPartitioningParmetisSetCoarseSequential</A>"</font>,flag,&amp;flag,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line208">208: </a>    <font color="#4169E1">if</font> (flag) {
+<a name="line209">209: </a>      <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningParmetisSetCoarseSequential.html#MatPartitioningParmetisSetCoarseSequential">MatPartitioningParmetisSetCoarseSequential</A>(part);
+<a name="line210">210: </a>    }
+<a name="line211">211: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line212">212: </a>  <font color="#4169E1">return</font>(0);
+<a name="line213">213: </a>}
+
+
+<a name="line218">218: </a><strong><font color="#4169E1"><a name="MatPartitioningDestroy_Parmetis"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningDestroy_Parmetis(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line219">219: </a>{
+<a name="line220">220: </a>  MatPartitioning_Parmetis *parmetis = (MatPartitioning_Parmetis *)part-&gt;data;
+
+<a name="line224">224: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</A>(&amp;(parmetis-&gt;comm_pmetis));
+<a name="line225">225: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(parmetis);
+<a name="line226">226: </a>  <font color="#4169E1">return</font>(0);
+<a name="line227">227: </a>}
+
+
+<a name="line230">230: </a><font color="#B22222">/*MC</font>
+<a name="line231">231: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/MatOrderings/MAT_PARTITIONING_PARMETIS.html#MAT_PARTITIONING_PARMETIS">MAT_PARTITIONING_PARMETIS</A> - Creates a partitioning context via the external package PARMETIS.</font>
+
+<a name="line233">233: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A></font>
+
+<a name="line235">235: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line236">236: </a><font color="#B22222">.  part - the partitioning context</font>
+
+<a name="line238">238: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line239">239: </a><font color="#B22222">+  -mat_partitioning_parmetis_coarse_sequential - use sequential PARMETIS coarse partitioner</font>
+
+<a name="line241">241: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line243">243: </a><font color="#B22222">   Notes: See http://www-users.cs.umn.edu/~karypis/metis/</font>
+
+<a name="line245">245: </a><font color="#B22222">.keywords: Partitioning, create, context</font>
+
+<a name="line247">247: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningSetType.html#MatPartitioningSetType">MatPartitioningSetType</A>(), <A href="../../../../../docs/manualpages/Mat/MatPartitioningType.html#MatPartitioningType">MatPartitioningType</A></font>
+
+<a name="line249">249: </a><font color="#B22222">M*/</font>
+
+<a name="line254">254: </a><strong><font color="#4169E1"><a name="MatPartitioningCreate_Parmetis"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  MatPartitioningCreate_Parmetis(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line255">255: </a>{
+<a name="line257">257: </a>  MatPartitioning_Parmetis *parmetis;
+
+<a name="line260">260: </a>  PetscNewLog(part,MatPartitioning_Parmetis,&amp;parmetis);
+<a name="line261">261: </a>  part-&gt;data                = (void*)parmetis;
+
+<a name="line263">263: </a>  parmetis-&gt;cuts       = 0;   <font color="#B22222">/* output variable */</font>
+<a name="line264">264: </a>  parmetis-&gt;foldfactor = 150; <font color="#B22222">/*folding factor */</font>
+<a name="line265">265: </a>  parmetis-&gt;parallel   = 2;   <font color="#B22222">/* use parallel partitioner for coarse grid */</font>
+<a name="line266">266: </a>  parmetis-&gt;indexing   = 0;   <font color="#B22222">/* index numbering starts from 0 */</font>
+<a name="line267">267: </a>  parmetis-&gt;printout   = 0;   <font color="#B22222">/* print no output while running */</font>
+
+<a name="line269">269: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm,&amp;(parmetis-&gt;comm_pmetis));
+
+<a name="line271">271: </a>  part-&gt;ops-&gt;apply          = MatPartitioningApply_Parmetis;
+<a name="line272">272: </a>  part-&gt;ops-&gt;view           = MatPartitioningView_Parmetis;
+<a name="line273">273: </a>  part-&gt;ops-&gt;destroy        = MatPartitioningDestroy_Parmetis;
+<a name="line274">274: </a>  part-&gt;ops-&gt;setfromoptions = MatPartitioningSetFromOptions_Parmetis;
+<a name="line275">275: </a>  <font color="#4169E1">return</font>(0);
+<a name="line276">276: </a>}
+
+<a name="line281">281: </a><font color="#B22222">/*@</font>
+<a name="line282">282: </a><font color="#B22222"> <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToVertexGraph.html#MatMeshToVertexGraph">MatMeshToVertexGraph</A> -   This routine does not exist because ParMETIS does not provide the functionality.  Uses the ParMETIS package to</font>
+<a name="line283">283: </a><font color="#B22222">                       convert a <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> that represents a mesh to a <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> the represents the graph of the coupling </font>
+<a name="line284">284: </a><font color="#B22222">                       between vertices of the cells and is suitable for partitioning with the <A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> object. Use this to partition</font>
+<a name="line285">285: </a><font color="#B22222">                       vertices of a mesh. More likely you should use <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToCellGraph.html#MatMeshToCellGraph">MatMeshToCellGraph</A>()</font>
+
+<a name="line287">287: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A></font>
+
+<a name="line289">289: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line290">290: </a><font color="#B22222">+     mesh - the graph that represents the mesh</font>
+<a name="line291">291: </a><font color="#B22222">-     ncommonnodes - mesh elements that share this number of common nodes are considered neighbors, use 2 for triangules and </font>
+<a name="line292">292: </a><font color="#B22222">                     quadralaterials, 3 for tetrahedrals and 4 for hexahedrals</font>
+
+<a name="line294">294: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line295">295: </a><font color="#B22222">.     dual - the dual graph</font>
+
+<a name="line297">297: </a><font color="#B22222">   Notes:</font>
+<a name="line298">298: </a><font color="#B22222">     Currently requires ParMetis to be installed and uses ParMETIS_V3_Mesh2Dual()</font>
+
+<a name="line300">300: </a><font color="#B22222">     The columns of each row of the <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mesh are the global vertex numbers of the vertices of that rows cell. The number of rows in mesh is </font>
+<a name="line301">301: </a><font color="#B22222">     number of cells, the number of columns is the number of vertices.</font>
+
+<a name="line303">303: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line305">305: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToCellGraph.html#MatMeshToCellGraph">MatMeshToCellGraph</A>(), <A href="../../../../../docs/manualpages/Mat/MatCreateMPIAdj.html#MatCreateMPIAdj">MatCreateMPIAdj</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningCreate.html#MatPartitioningCreate">MatPartitioningCreate</A>()</font>
+<a name="line306">306: </a><font color="#B22222">   </font>
+<a name="line307">307: </a><font color="#B22222">@*/</font>
+<a name="line308">308: </a><strong><font color="#4169E1"><a name="MatMeshToVertexGraph"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToVertexGraph.html#MatMeshToVertexGraph">MatMeshToVertexGraph</A>(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mesh,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ncommonnodes,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *dual)</font></strong>
+<a name="line309">309: </a>{
+<a name="line311">311: </a>  <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"ParMETIS does not provide this functionality"</font>);
+<a name="line312">312: </a>  <font color="#4169E1">return</font>(0);
+<a name="line313">313: </a>}
+
+<a name="line317">317: </a><font color="#B22222">/*@</font>
+<a name="line318">318: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToCellGraph.html#MatMeshToCellGraph">MatMeshToCellGraph</A> -   Uses the ParMETIS package to convert a <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> that represents a mesh to a <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> the represents the graph of the coupling </font>
+<a name="line319">319: </a><font color="#B22222">                       between cells (the "dual" graph) and is suitable for partitioning with the <A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> object. Use this to partition</font>
+<a name="line320">320: </a><font color="#B22222">                       cells of a mesh.</font>
+
+<a name="line322">322: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A></font>
+
+<a name="line324">324: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line325">325: </a><font color="#B22222">+     mesh - the graph that represents the mesh</font>
+<a name="line326">326: </a><font color="#B22222">-     ncommonnodes - mesh elements that share this number of common nodes are considered neighbors, use 2 for triangules and </font>
+<a name="line327">327: </a><font color="#B22222">                     quadralaterials, 3 for tetrahedrals and 4 for hexahedrals</font>
+
+<a name="line329">329: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line330">330: </a><font color="#B22222">.     dual - the dual graph</font>
+
+<a name="line332">332: </a><font color="#B22222">   Notes:</font>
+<a name="line333">333: </a><font color="#B22222">     Currently requires ParMetis to be installed and uses ParMETIS_V3_Mesh2Dual()</font>
+
+<a name="line335">335: </a><font color="#B22222">     The columns of each row of the <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mesh are the global vertex numbers of the vertices of that rows cell. The number of rows in mesh is </font>
+<a name="line336">336: </a><font color="#B22222">     number of cells, the number of columns is the number of vertices.</font>
+<a name="line337">337: </a><font color="#B22222">   </font>
+
+<a name="line339">339: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line341">341: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToVertexGraph.html#MatMeshToVertexGraph">MatMeshToVertexGraph</A>(), <A href="../../../../../docs/manualpages/Mat/MatCreateMPIAdj.html#MatCreateMPIAdj">MatCreateMPIAdj</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningCreate.html#MatPartitioningCreate">MatPartitioningCreate</A>()</font>
+
+
+<a name="line344">344: </a><font color="#B22222">@*/</font>
+<a name="line345">345: </a><strong><font color="#4169E1"><a name="MatMeshToCellGraph"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/MatOrderings/MatMeshToCellGraph.html#MatMeshToCellGraph">MatMeshToCellGraph</A>(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mesh,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ncommonnodes,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *dual)</font></strong>
+<a name="line346">346: </a>{
+<a name="line347">347: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>           ierr;
+<a name="line348">348: </a>  int                      *newxadj,*newadjncy;
+<a name="line349">349: </a>  int                      numflag=0;
+<a name="line350">350: </a>  Mat_MPIAdj               *adj = (Mat_MPIAdj *)mesh-&gt;data,*newadj;
+<a name="line351">351: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>               flg;
+
+<a name="line354">354: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mesh,<A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>,&amp;flg);
+<a name="line355">355: </a>  <font color="#4169E1">if</font> (!flg) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Must use MPIAdj matrix type"</font>);
+
+<a name="line357">357: </a>  <font color="#B22222">/* ParMETIS has no error conditions ??? */</font>
+<a name="line358">358: </a>  <A href="../../../../../docs/manualpages/Sys/CHKMEMQ.html#CHKMEMQ">CHKMEMQ</A>;
+<a name="line359">359: </a>  ParMETIS_V3_Mesh2Dual(mesh-&gt;rmap-&gt;range,adj-&gt;i,adj-&gt;j,&amp;numflag,&amp;ncommonnodes,&amp;newxadj,&amp;newadjncy,&amp;((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mesh)-&gt;comm);
+<a name="line360">360: </a>  <A href="../../../../../docs/manualpages/Sys/CHKMEMQ.html#CHKMEMQ">CHKMEMQ</A>;
+<a name="line361">361: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreateMPIAdj.html#MatCreateMPIAdj">MatCreateMPIAdj</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mesh)-&gt;comm,mesh-&gt;rmap-&gt;n,mesh-&gt;rmap-&gt;N,newxadj,newadjncy,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,dual);
+<a name="line362">362: </a>  newadj = (Mat_MPIAdj *)(*dual)-&gt;data;
+<a name="line363">363: </a>  newadj-&gt;freeaijwithfree = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>; <font color="#B22222">/* signal the matrix should be freed with system free since space was allocated by ParMETIS */</font>
+<a name="line364">364: </a>  <font color="#4169E1">return</font>(0);
+<a name="line365">365: </a>}
+</pre>
+</body>
+
+</html>

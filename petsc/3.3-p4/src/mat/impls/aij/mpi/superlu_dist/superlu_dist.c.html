@@ -1,0 +1,747 @@
+<center><a href="superlu_dist.c">Actual source code: superlu_dist.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/mat/impls/aij/mpi/superlu_dist/superlu_dist.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:04:22+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#B22222">/* </font>
+<a name="line3">  3: </a><font color="#B22222">        Provides an interface to the SuperLU_DIST_2.2 sparse solver</font>
+<a name="line4">  4: </a><font color="#B22222">*/</font>
+
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/seq/aij.h&gt;</font>
+<a name="line7">  7: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/mpi/mpiaij.h&gt;</font>
+<a name="line8">  8: </a><font color="#A020F0">#if defined(PETSC_HAVE_STDLIB_H) </font><font color="#B22222">/* This is to get around weird problem with SuperLU on cray */</font><font color="#A020F0"></font>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;stdlib.h&gt;</font>
+<a name="line10"> 10: </a><font color="#A020F0">#endif</font>
+
+<a name="line12"> 12: </a><font color="#A020F0">#if defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line13"> 13: </a><font color="#B22222">/* ugly SuperLU_Dist variable telling it to use long long int */</font>
+<a name="line14"> 14: </a><strong><font color="#228B22">#define _LONGINT</font></strong>
+<a name="line15"> 15: </a><font color="#A020F0">#endif</font>
+
+<a name="line17"> 17: </a>EXTERN_C_BEGIN
+<a name="line18"> 18: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line19"> 19: </a><font color="#A020F0">#include &lt;superlu_zdefs.h&gt;</font>
+<a name="line20"> 20: </a><font color="#A020F0">#else</font>
+<a name="line21"> 21: </a><font color="#A020F0">#include &lt;superlu_ddefs.h&gt;</font>
+<a name="line22"> 22: </a><font color="#A020F0">#endif</font>
+<a name="line23"> 23: </a>EXTERN_C_END
+
+<a name="line25"> 25: </a><font color="#B22222">/*</font>
+<a name="line26"> 26: </a><font color="#B22222">    GLOBAL - The sparse matrix and right hand side are all stored initially on process 0. Should be called centralized</font>
+<a name="line27"> 27: </a><font color="#B22222">    DISTRIBUTED - The sparse matrix and right hand size are initially stored across the entire MPI communicator.</font>
+<a name="line28"> 28: </a><font color="#B22222">*/</font>
+<a name="line29"> 29: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {GLOBAL,DISTRIBUTED} SuperLU_MatInputMode;
+<a name="line30"> 30: </a>const char *SuperLU_MatInputModes[] = {<font color="#666666">"GLOBAL"</font>,<font color="#666666">"DISTRIBUTED"</font>,<font color="#666666">"SuperLU_MatInputMode"</font>,<font color="#666666">"PETSC_"</font>,0};
+
+<a name="line32"> 32: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line33"> 33: </a>  int_t                   nprow,npcol,*row,*col;
+<a name="line34"> 34: </a>  gridinfo_t              grid;
+<a name="line35"> 35: </a>  superlu_options_t       options;
+<a name="line36"> 36: </a>  SuperMatrix             A_sup;
+<a name="line37"> 37: </a>  ScalePermstruct_t       ScalePermstruct;
+<a name="line38"> 38: </a>  LUstruct_t              LUstruct;
+<a name="line39"> 39: </a>  int                     StatPrint;
+<a name="line40"> 40: </a>  SuperLU_MatInputMode    MatInputMode;
+<a name="line41"> 41: </a>  SOLVEstruct_t           SOLVEstruct;
+<a name="line42"> 42: </a>  fact_t                  FactPattern;
+<a name="line43"> 43: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>                comm_superlu;
+<a name="line44"> 44: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line45"> 45: </a>  doublecomplex           *val;
+<a name="line46"> 46: </a><font color="#A020F0">#else</font>
+<a name="line47"> 47: </a>  double                  *val;
+<a name="line48"> 48: </a><font color="#A020F0">#endif</font>
+<a name="line49"> 49: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>               matsolve_iscalled,matmatsolve_iscalled;
+<a name="line50"> 50: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  CleanUpSuperLU_Dist; <font color="#B22222">/* Flag to clean up (non-global) SuperLU objects during Destroy */</font>
+<a name="line51"> 51: </a>} Mat_SuperLU_DIST;
+
+<a name="line53"> 53: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatFactorInfo_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>)</font></strong>;
+<a name="line54"> 54: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorNumeric_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,const <A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *)</font></strong>;
+<a name="line55"> 55: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>)</font></strong>;
+<a name="line56"> 56: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatView_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>)</font></strong>;
+<a name="line57"> 57: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatSolve_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line58"> 58: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorSymbolic_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A>,<A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A>,const <A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *)</font></strong>;
+<a name="line59"> 59: </a><strong><font color="#4169E1">extern <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_MPIAIJ(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>)</font></strong>;
+
+<a name="line63"> 63: </a><strong><font color="#4169E1"><a name="MatDestroy_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line64"> 64: </a>{
+<a name="line65"> 65: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line66"> 66: </a>  Mat_SuperLU_DIST *lu = (Mat_SuperLU_DIST*)A-&gt;spptr;
+<a name="line67"> 67: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        flg;
+
+<a name="line70"> 70: </a>  <font color="#4169E1">if</font> (lu &amp;&amp; lu-&gt;CleanUpSuperLU_Dist) {
+<a name="line71"> 71: </a>    <font color="#B22222">/* Deallocate SuperLU_DIST storage */</font>
+<a name="line72"> 72: </a>    <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL) {
+<a name="line73"> 73: </a>      Destroy_CompCol_Matrix_dist(&amp;lu-&gt;A_sup);
+<a name="line74"> 74: </a>    } <font color="#4169E1">else</font> {
+<a name="line75"> 75: </a>      Destroy_CompRowLoc_Matrix_dist(&amp;lu-&gt;A_sup);
+<a name="line76"> 76: </a>      <font color="#4169E1">if</font> ( lu-&gt;options.SolveInitialized ) {
+<a name="line77"> 77: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line78"> 78: </a>        zSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line79"> 79: </a><font color="#A020F0">#else</font>
+<a name="line80"> 80: </a>        dSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line81"> 81: </a><font color="#A020F0">#endif</font>
+<a name="line82"> 82: </a>      }
+<a name="line83"> 83: </a>    }
+<a name="line84"> 84: </a>    Destroy_LU(A-&gt;cmap-&gt;N, &amp;lu-&gt;grid, &amp;lu-&gt;LUstruct);
+<a name="line85"> 85: </a>    ScalePermstructFree(&amp;lu-&gt;ScalePermstruct);
+<a name="line86"> 86: </a>    LUstructFree(&amp;lu-&gt;LUstruct);
+
+<a name="line88"> 88: </a>    <font color="#B22222">/* Release the SuperLU_DIST process grid. */</font>
+<a name="line89"> 89: </a>    superlu_gridexit(&amp;lu-&gt;grid);
+
+<a name="line91"> 91: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</A>(&amp;(lu-&gt;comm_superlu));
+<a name="line92"> 92: </a>  }
+<a name="line93"> 93: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(A-&gt;spptr);
+
+<a name="line95"> 95: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A,<A href="../../../../.._dist/../docs/manualpages/Mat/MATSEQAIJ.html#MATSEQAIJ">MATSEQAIJ</A>,&amp;flg);
+<a name="line96"> 96: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line97"> 97: </a>    MatDestroy_SeqAIJ(A);
+<a name="line98"> 98: </a>  } <font color="#4169E1">else</font> {
+<a name="line99"> 99: </a>    MatDestroy_MPIAIJ(A);
+<a name="line100">100: </a>  }
+<a name="line101">101: </a>  <font color="#4169E1">return</font>(0);
+<a name="line102">102: </a>}
+
+<a name="line106">106: </a><strong><font color="#4169E1"><a name="MatSolve_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatSolve_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Vec/Vec.html#Vec">Vec</A> b_mpi,<A href="../../../../.._dist/../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x)</font></strong>
+<a name="line107">107: </a>{
+<a name="line108">108: </a>  Mat_SuperLU_DIST *lu = (Mat_SuperLU_DIST*)A-&gt;spptr;
+<a name="line109">109: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line110">110: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      size;
+<a name="line111">111: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         m=A-&gt;rmap-&gt;n,M=A-&gt;rmap-&gt;N,N=A-&gt;cmap-&gt;N;
+<a name="line112">112: </a>  SuperLUStat_t    stat;
+<a name="line113">113: </a>  double           berr[1];
+<a name="line114">114: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      *bptr;
+<a name="line115">115: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         nrhs=1;
+<a name="line116">116: </a>  <A href="../../../../.._dist/../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              x_seq;
+<a name="line117">117: </a>  <A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A>               iden;
+<a name="line118">118: </a>  <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>       scat;
+<a name="line119">119: </a>  int              info; <font color="#B22222">/* SuperLU_Dist info code is ALWAYS an int, even with long long indices */</font>
+
+<a name="line122">122: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line123">123: </a>  <font color="#4169E1">if</font> (size &gt; 1 &amp;&amp; lu-&gt;MatInputMode == GLOBAL) {
+<a name="line124">124: </a>    <font color="#B22222">/* global mat input, convert b to x_seq */</font>
+<a name="line125">125: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecCreateSeq.html#VecCreateSeq">VecCreateSeq</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,N,&amp;x_seq);
+<a name="line126">126: </a>    <A href="../../../../.._dist/../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,N,0,1,&amp;iden);
+<a name="line127">127: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterCreate.html#VecScatterCreate">VecScatterCreate</A>(b_mpi,iden,x_seq,iden,&amp;scat);
+<a name="line128">128: </a>    <A href="../../../../.._dist/../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(&amp;iden);
+
+<a name="line130">130: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(scat,b_mpi,x_seq,<A href="../../../../.._dist/../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line131">131: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(scat,b_mpi,x_seq,<A href="../../../../.._dist/../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line132">132: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x_seq,&amp;bptr);
+<a name="line133">133: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* size==1 || distributed mat input */</font>
+<a name="line134">134: </a>    <font color="#4169E1">if</font> (lu-&gt;options.SolveInitialized &amp;&amp; !lu-&gt;matsolve_iscalled){
+<a name="line135">135: </a>      <font color="#B22222">/* see comments in <A href="../../../../.._dist/../docs/manualpages/Mat/MatMatSolve.html#MatMatSolve">MatMatSolve</A>() */</font>
+<a name="line136">136: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line137">137: </a>      zSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line138">138: </a><font color="#A020F0">#else</font>
+<a name="line139">139: </a>      dSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line140">140: </a><font color="#A020F0">#endif</font>
+<a name="line141">141: </a>      lu-&gt;options.SolveInitialized = NO;
+<a name="line142">142: </a>    }
+<a name="line143">143: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(b_mpi,x);
+<a name="line144">144: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x,&amp;bptr);
+<a name="line145">145: </a>  }
+<a name="line146">146: </a>
+<a name="line147">147: </a>  <font color="#4169E1">if</font> (lu-&gt;options.Fact != FACTORED) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONG,<font color="#666666">"SuperLU_DIST options.Fact mush equal FACTORED"</font>);
+
+<a name="line149">149: </a>  PStatInit(&amp;stat);        <font color="#B22222">/* Initialize the statistics variables. */</font>
+<a name="line150">150: </a>  <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL) {
+<a name="line151">151: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line152">152: </a>    pzgssvx_ABglobal(&amp;lu-&gt;options,&amp;lu-&gt;A_sup,&amp;lu-&gt;ScalePermstruct,(doublecomplex*)bptr,M,nrhs,
+<a name="line153">153: </a>                   &amp;lu-&gt;grid,&amp;lu-&gt;LUstruct,berr,&amp;stat,&amp;info);
+<a name="line154">154: </a><font color="#A020F0">#else</font>
+<a name="line155">155: </a>    pdgssvx_ABglobal(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct,bptr,M,nrhs,
+<a name="line156">156: </a>                   &amp;lu-&gt;grid,&amp;lu-&gt;LUstruct,berr,&amp;stat,&amp;info);
+<a name="line157">157: </a><font color="#A020F0">#endif </font>
+<a name="line158">158: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* distributed mat input */</font>
+<a name="line159">159: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line160">160: </a>    pzgssvx(&amp;lu-&gt;options,&amp;lu-&gt;A_sup,&amp;lu-&gt;ScalePermstruct,(doublecomplex*)bptr,m,nrhs,&amp;lu-&gt;grid,
+<a name="line161">161: </a>            &amp;lu-&gt;LUstruct,&amp;lu-&gt;SOLVEstruct,berr,&amp;stat,&amp;info);
+<a name="line162">162: </a><font color="#A020F0">#else</font>
+<a name="line163">163: </a>    pdgssvx(&amp;lu-&gt;options,&amp;lu-&gt;A_sup,&amp;lu-&gt;ScalePermstruct,bptr,m,nrhs,&amp;lu-&gt;grid,
+<a name="line164">164: </a>            &amp;lu-&gt;LUstruct,&amp;lu-&gt;SOLVEstruct,berr,&amp;stat,&amp;info);
+<a name="line165">165: </a><font color="#A020F0">#endif</font>
+<a name="line166">166: </a>  }
+<a name="line167">167: </a>  <font color="#4169E1">if</font> (info) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"pdgssvx fails, info: %d\n"</font>,info);
+
+<a name="line169">169: </a>  <font color="#4169E1">if</font> (lu-&gt;options.PrintStat) {
+<a name="line170">170: </a>     PStatPrint(&amp;lu-&gt;options, &amp;stat, &amp;lu-&gt;grid);     <font color="#B22222">/* Print the statistics. */</font>
+<a name="line171">171: </a>  }
+<a name="line172">172: </a>  PStatFree(&amp;stat);
+<a name="line173">173: </a>
+<a name="line174">174: </a>  <font color="#4169E1">if</font> (size &gt; 1 &amp;&amp; lu-&gt;MatInputMode == GLOBAL) {
+<a name="line175">175: </a>    <font color="#B22222">/* convert seq x to mpi x */</font>
+<a name="line176">176: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x_seq,&amp;bptr);
+<a name="line177">177: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(scat,x_seq,x,<A href="../../../../.._dist/../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line178">178: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(scat,x_seq,x,<A href="../../../../.._dist/../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../.._dist/../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line179">179: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>(&amp;scat);
+<a name="line180">180: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;x_seq);
+<a name="line181">181: </a>  } <font color="#4169E1">else</font> {
+<a name="line182">182: </a>    <A href="../../../../.._dist/../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x,&amp;bptr);
+<a name="line183">183: </a>    lu-&gt;matsolve_iscalled    = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line184">184: </a>    lu-&gt;matmatsolve_iscalled = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line185">185: </a>  }
+<a name="line186">186: </a>  <font color="#4169E1">return</font>(0);
+<a name="line187">187: </a>}
+
+<a name="line191">191: </a><strong><font color="#4169E1"><a name="MatMatSolve_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMatSolve_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B_mpi,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> X)</font></strong>
+<a name="line192">192: </a>{
+<a name="line193">193: </a>  Mat_SuperLU_DIST *lu = (Mat_SuperLU_DIST*)A-&gt;spptr;
+<a name="line194">194: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line195">195: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      size;
+<a name="line196">196: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         M=A-&gt;rmap-&gt;N,m=A-&gt;rmap-&gt;n,nrhs;
+<a name="line197">197: </a>  SuperLUStat_t    stat;
+<a name="line198">198: </a>  double           berr[1];
+<a name="line199">199: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      *bptr;
+<a name="line200">200: </a>  int              info; <font color="#B22222">/* SuperLU_Dist info code is ALWAYS an int, even with long long indices */</font>
+<a name="line201">201: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        flg;
+
+<a name="line204">204: </a>  <font color="#4169E1">if</font> (lu-&gt;options.Fact != FACTORED) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONG,<font color="#666666">"SuperLU_DIST options.Fact mush equal FACTORED"</font>);
+<a name="line205">205: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectTypeCompareAny.html#PetscObjectTypeCompareAny">PetscObjectTypeCompareAny</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B_mpi,&amp;flg,<A href="../../../../.._dist/../docs/manualpages/Mat/MATSEQDENSE.html#MATSEQDENSE">MATSEQDENSE</A>,MATMPIDENSE,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line206">206: </a>  <font color="#4169E1">if</font> (!flg) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,PETSC_ERR_ARG_WRONG,<font color="#666666">"Matrix B must be <A href="../../../../.._dist/../docs/manualpages/Mat/MATDENSE.html#MATDENSE">MATDENSE</A> matrix"</font>);
+<a name="line207">207: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectTypeCompareAny.html#PetscObjectTypeCompareAny">PetscObjectTypeCompareAny</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X,&amp;flg,<A href="../../../../.._dist/../docs/manualpages/Mat/MATSEQDENSE.html#MATSEQDENSE">MATSEQDENSE</A>,MATMPIDENSE,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line208">208: </a>  <font color="#4169E1">if</font> (!flg) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,PETSC_ERR_ARG_WRONG,<font color="#666666">"Matrix X must be <A href="../../../../.._dist/../docs/manualpages/Mat/MATDENSE.html#MATDENSE">MATDENSE</A> matrix"</font>);
+<a name="line209">209: </a>
+<a name="line210">210: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line211">211: </a>  <font color="#4169E1">if</font> (size &gt; 1 &amp;&amp; lu-&gt;MatInputMode == GLOBAL) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"MatInputMode=GLOBAL for nproc %d&gt;1 is not supported"</font>,size);
+<a name="line212">212: </a>  <font color="#B22222">/* size==1 or distributed mat input */</font>
+<a name="line213">213: </a>  <font color="#4169E1">if</font> (lu-&gt;options.SolveInitialized &amp;&amp; !lu-&gt;matmatsolve_iscalled){
+<a name="line214">214: </a>    <font color="#B22222">/* communication pattern of SOLVEstruct is unlikely created for matmatsolve, </font>
+<a name="line215">215: </a><font color="#B22222">       thus destroy it and create a new SOLVEstruct.</font>
+<a name="line216">216: </a><font color="#B22222">       Otherwise it may result in memory corruption or incorrect solution </font>
+<a name="line217">217: </a><font color="#B22222">       See src/mat/examples/tests/ex125.c */</font>
+<a name="line218">218: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line219">219: </a>    zSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line220">220: </a><font color="#A020F0">#else</font>
+<a name="line221">221: </a>    dSolveFinalize(&amp;lu-&gt;options, &amp;lu-&gt;SOLVEstruct);
+<a name="line222">222: </a><font color="#A020F0">#endif</font>
+<a name="line223">223: </a>    lu-&gt;options.SolveInitialized  = NO;
+<a name="line224">224: </a>  }
+<a name="line225">225: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatCopy.html#MatCopy">MatCopy</A>(B_mpi,X,SAME_NONZERO_PATTERN);
+
+<a name="line227">227: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(B_mpi,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;nrhs);
+<a name="line228">228: </a>
+<a name="line229">229: </a>  PStatInit(&amp;stat);        <font color="#B22222">/* Initialize the statistics variables. */</font>
+<a name="line230">230: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatGetArray.html#MatGetArray">MatGetArray</A>(X,&amp;bptr);
+<a name="line231">231: </a>  <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL) { <font color="#B22222">/* size == 1 */</font>
+<a name="line232">232: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line233">233: </a>    pzgssvx_ABglobal(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct,(doublecomplex*)bptr, M, nrhs,
+<a name="line234">234: </a>                   &amp;lu-&gt;grid, &amp;lu-&gt;LUstruct, berr, &amp;stat, &amp;info);
+<a name="line235">235: </a><font color="#A020F0">#else</font>
+<a name="line236">236: </a>    pdgssvx_ABglobal(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct,bptr, M, nrhs,
+<a name="line237">237: </a>                   &amp;lu-&gt;grid, &amp;lu-&gt;LUstruct, berr, &amp;stat, &amp;info);
+<a name="line238">238: </a><font color="#A020F0">#endif </font>
+<a name="line239">239: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* distributed mat input */</font>
+<a name="line240">240: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line241">241: </a>    pzgssvx(&amp;lu-&gt;options,&amp;lu-&gt;A_sup,&amp;lu-&gt;ScalePermstruct,(doublecomplex*)bptr,m,nrhs,&amp;lu-&gt;grid,
+<a name="line242">242: </a>            &amp;lu-&gt;LUstruct,&amp;lu-&gt;SOLVEstruct,berr,&amp;stat,&amp;info);
+<a name="line243">243: </a><font color="#A020F0">#else</font>
+<a name="line244">244: </a>    pdgssvx(&amp;lu-&gt;options,&amp;lu-&gt;A_sup,&amp;lu-&gt;ScalePermstruct,bptr,m,nrhs,&amp;lu-&gt;grid,
+<a name="line245">245: </a>            &amp;lu-&gt;LUstruct,&amp;lu-&gt;SOLVEstruct,berr,&amp;stat,&amp;info);
+<a name="line246">246: </a><font color="#A020F0">#endif</font>
+<a name="line247">247: </a>  }
+<a name="line248">248: </a>  <font color="#4169E1">if</font> (info) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"pdgssvx fails, info: %d\n"</font>,info);
+<a name="line249">249: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatRestoreArray.html#MatRestoreArray">MatRestoreArray</A>(X,&amp;bptr);
+
+<a name="line251">251: </a>  <font color="#4169E1">if</font> (lu-&gt;options.PrintStat) {
+<a name="line252">252: </a>     PStatPrint(&amp;lu-&gt;options, &amp;stat, &amp;lu-&gt;grid); <font color="#B22222">/* Print the statistics. */</font>
+<a name="line253">253: </a>  }
+<a name="line254">254: </a>  PStatFree(&amp;stat);
+<a name="line255">255: </a>  lu-&gt;matsolve_iscalled    = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line256">256: </a>  lu-&gt;matmatsolve_iscalled = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line257">257: </a>  <font color="#4169E1">return</font>(0);
+<a name="line258">258: </a>}
+
+
+<a name="line263">263: </a><strong><font color="#4169E1"><a name="MatLUFactorNumeric_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorNumeric_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> F,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,const <A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line264">264: </a>{
+<a name="line265">265: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              *tseq,A_seq = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line266">266: </a>  Mat_SeqAIJ       *aa,*bb;
+<a name="line267">267: </a>  Mat_SuperLU_DIST *lu = (Mat_SuperLU_DIST*)(F)-&gt;spptr;
+<a name="line268">268: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line269">269: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         M=A-&gt;rmap-&gt;N,N=A-&gt;cmap-&gt;N,i,*ai,*aj,*bi,*bj,nz,rstart,*garray,
+<a name="line270">270: </a>                   m=A-&gt;rmap-&gt;n, colA_start,j,jcol,jB,countA,countB,*bjj,*ajj;
+<a name="line271">271: </a>  int              sinfo; <font color="#B22222">/* SuperLU_Dist info flag is always an int even with long long indices */</font>
+<a name="line272">272: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      size;
+<a name="line273">273: </a>  SuperLUStat_t    stat;
+<a name="line274">274: </a>  double           *berr=0;
+<a name="line275">275: </a>  <A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A>               isrow;
+<a name="line276">276: </a>  PetscLogDouble   time0,time,time_min,time_max;
+<a name="line277">277: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              F_diag=<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line278">278: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line279">279: </a>  doublecomplex    *av, *bv;
+<a name="line280">280: </a><font color="#A020F0">#else</font>
+<a name="line281">281: </a>  double           *av, *bv;
+<a name="line282">282: </a><font color="#A020F0">#endif</font>
+
+<a name="line285">285: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line286">286: </a>
+<a name="line287">287: </a>  <font color="#4169E1">if</font> (lu-&gt;options.PrintStat) { <font color="#B22222">/* collect time for mat conversion */</font>
+<a name="line288">288: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm);
+<a name="line289">289: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscGetTime.html#PetscGetTime">PetscGetTime</A>(&amp;time0);
+<a name="line290">290: </a>  }
+
+<a name="line292">292: </a>  <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL) { <font color="#B22222">/* global mat input */</font>
+<a name="line293">293: </a>    <font color="#4169E1">if</font> (size &gt; 1) { <font color="#B22222">/* convert mpi A to seq mat A */</font>
+<a name="line294">294: </a>      <A href="../../../../.._dist/../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,M,0,1,&amp;isrow);
+<a name="line295">295: </a>      <A href="../../../../.._dist/../docs/manualpages/Mat/MatGetSubMatrices.html#MatGetSubMatrices">MatGetSubMatrices</A>(A,1,&amp;isrow,&amp;isrow,MAT_INITIAL_MATRIX,&amp;tseq);
+<a name="line296">296: </a>      <A href="../../../../.._dist/../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(&amp;isrow);
+<a name="line297">297: </a>
+<a name="line298">298: </a>      A_seq = *tseq;
+<a name="line299">299: </a>      <A href="../../../../.._dist/../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(tseq);
+<a name="line300">300: </a>      aa =  (Mat_SeqAIJ*)A_seq-&gt;data;
+<a name="line301">301: </a>    } <font color="#4169E1">else</font> {
+<a name="line302">302: </a>      <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  flg;
+<a name="line303">303: </a>      <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A,<A href="../../../../.._dist/../docs/manualpages/Mat/MATMPIAIJ.html#MATMPIAIJ">MATMPIAIJ</A>,&amp;flg);
+<a name="line304">304: </a>      <font color="#4169E1">if</font> (flg) {
+<a name="line305">305: </a>        Mat_MPIAIJ *At = (Mat_MPIAIJ*)A-&gt;data;
+<a name="line306">306: </a>        A = At-&gt;A;
+<a name="line307">307: </a>      }
+<a name="line308">308: </a>      aa =  (Mat_SeqAIJ*)A-&gt;data;
+<a name="line309">309: </a>    }
+
+<a name="line311">311: </a>    <font color="#B22222">/* Convert Petsc NR matrix to SuperLU_DIST NC. </font>
+<a name="line312">312: </a><font color="#B22222">       Note: memories of lu-&gt;val, col and row are allocated by CompRow_to_CompCol_dist()! */</font>
+<a name="line313">313: </a>    <font color="#4169E1">if</font> (lu-&gt;options.Fact != DOFACT) {<font color="#B22222">/* successive numeric factorization, sparsity pattern is reused. */</font>
+<a name="line314">314: </a>      Destroy_CompCol_Matrix_dist(&amp;lu-&gt;A_sup);
+<a name="line315">315: </a>      <font color="#4169E1">if</font> (lu-&gt;FactPattern == SamePattern_SameRowPerm){
+<a name="line316">316: </a>        lu-&gt;options.Fact = SamePattern_SameRowPerm; <font color="#B22222">/* matrix has similar numerical values */</font>
+<a name="line317">317: </a>      } <font color="#4169E1">else</font> { <font color="#B22222">/* lu-&gt;FactPattern == SamePattern */</font>
+<a name="line318">318: </a>        Destroy_LU(N, &amp;lu-&gt;grid, &amp;lu-&gt;LUstruct);
+<a name="line319">319: </a>        lu-&gt;options.Fact = SamePattern;
+<a name="line320">320: </a>      }
+<a name="line321">321: </a>    }
+<a name="line322">322: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line323">323: </a>    zCompRow_to_CompCol_dist(M,N,aa-&gt;nz,(doublecomplex*)aa-&gt;a,aa-&gt;j,aa-&gt;i,&amp;lu-&gt;val,&amp;lu-&gt;col, &amp;lu-&gt;row);
+<a name="line324">324: </a><font color="#A020F0">#else</font>
+<a name="line325">325: </a>    dCompRow_to_CompCol_dist(M,N,aa-&gt;nz,aa-&gt;a,aa-&gt;j,aa-&gt;i,&amp;lu-&gt;val, &amp;lu-&gt;col, &amp;lu-&gt;row);
+<a name="line326">326: </a><font color="#A020F0">#endif</font>
+
+<a name="line328">328: </a>    <font color="#B22222">/* Create compressed column matrix A_sup. */</font>
+<a name="line329">329: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line330">330: </a>    zCreate_CompCol_Matrix_dist(&amp;lu-&gt;A_sup, M, N, aa-&gt;nz, lu-&gt;val, lu-&gt;col, lu-&gt;row, SLU_NC, SLU_Z, SLU_GE);
+<a name="line331">331: </a><font color="#A020F0">#else</font>
+<a name="line332">332: </a>    dCreate_CompCol_Matrix_dist(&amp;lu-&gt;A_sup, M, N, aa-&gt;nz, lu-&gt;val, lu-&gt;col, lu-&gt;row, SLU_NC, SLU_D, SLU_GE);
+<a name="line333">333: </a><font color="#A020F0">#endif</font>
+<a name="line334">334: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* distributed mat input */</font>
+<a name="line335">335: </a>    Mat_MPIAIJ *mat = (Mat_MPIAIJ*)A-&gt;data;
+<a name="line336">336: </a>    aa=(Mat_SeqAIJ*)(mat-&gt;A)-&gt;data;
+<a name="line337">337: </a>    bb=(Mat_SeqAIJ*)(mat-&gt;B)-&gt;data;
+<a name="line338">338: </a>    ai=aa-&gt;i; aj=aa-&gt;j;
+<a name="line339">339: </a>    bi=bb-&gt;i; bj=bb-&gt;j;
+<a name="line340">340: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line341">341: </a>    av=(doublecomplex*)aa-&gt;a;
+<a name="line342">342: </a>    bv=(doublecomplex*)bb-&gt;a;
+<a name="line343">343: </a><font color="#A020F0">#else</font>
+<a name="line344">344: </a>    av=aa-&gt;a;
+<a name="line345">345: </a>    bv=bb-&gt;a;
+<a name="line346">346: </a><font color="#A020F0">#endif</font>
+<a name="line347">347: </a>    rstart = A-&gt;rmap-&gt;rstart;
+<a name="line348">348: </a>    nz     = aa-&gt;nz + bb-&gt;nz;
+<a name="line349">349: </a>    garray = mat-&gt;garray;
+<a name="line350">350: </a>
+<a name="line351">351: </a>    <font color="#4169E1">if</font> (lu-&gt;options.Fact == DOFACT) {<font color="#B22222">/* first numeric factorization */</font>
+<a name="line352">352: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line353">353: </a>      zallocateA_dist(m, nz, &amp;lu-&gt;val, &amp;lu-&gt;col, &amp;lu-&gt;row);
+<a name="line354">354: </a><font color="#A020F0">#else</font>
+<a name="line355">355: </a>      dallocateA_dist(m, nz, &amp;lu-&gt;val, &amp;lu-&gt;col, &amp;lu-&gt;row);
+<a name="line356">356: </a><font color="#A020F0">#endif</font>
+<a name="line357">357: </a>    } <font color="#4169E1">else</font> { <font color="#B22222">/* successive numeric factorization, sparsity pattern and perm_c are reused. */</font>
+<a name="line358">358: </a>      <font color="#B22222">/* Destroy_CompRowLoc_Matrix_dist(&amp;lu-&gt;A_sup); */</font> <font color="#B22222">/* this leads to crash! However, see SuperLU_DIST_2.5/EXAMPLE/pzdrive2.c */</font>
+<a name="line359">359: </a>      <font color="#4169E1">if</font> (lu-&gt;FactPattern == SamePattern_SameRowPerm){
+<a name="line360">360: </a>        lu-&gt;options.Fact = SamePattern_SameRowPerm; <font color="#B22222">/* matrix has similar numerical values */</font>
+<a name="line361">361: </a>      } <font color="#4169E1">else</font> {
+<a name="line362">362: </a>        Destroy_LU(N, &amp;lu-&gt;grid, &amp;lu-&gt;LUstruct); <font color="#B22222">/* Deallocate storage associated with the L and U matrices. */</font>
+<a name="line363">363: </a>        lu-&gt;options.Fact = SamePattern;
+<a name="line364">364: </a>      }
+<a name="line365">365: </a>    }
+<a name="line366">366: </a>    nz = 0;
+<a name="line367">367: </a>    <font color="#4169E1">for</font> ( i=0; i&lt;m; i++ ) {
+<a name="line368">368: </a>      lu-&gt;row[i] = nz;
+<a name="line369">369: </a>      countA = ai[i+1] - ai[i];
+<a name="line370">370: </a>      countB = bi[i+1] - bi[i];
+<a name="line371">371: </a>      ajj = aj + ai[i];  <font color="#B22222">/* ptr to the beginning of this row */</font>
+<a name="line372">372: </a>      bjj = bj + bi[i];
+
+<a name="line374">374: </a>      <font color="#B22222">/* B part, smaller col index */</font>
+<a name="line375">375: </a>      colA_start = rstart + ajj[0]; <font color="#B22222">/* the smallest global col index of A */</font>
+<a name="line376">376: </a>      jB = 0;
+<a name="line377">377: </a>      <font color="#4169E1">for</font> (j=0; j&lt;countB; j++){
+<a name="line378">378: </a>        jcol = garray[bjj[j]];
+<a name="line379">379: </a>        <font color="#4169E1">if</font> (jcol &gt; colA_start) {
+<a name="line380">380: </a>          jB = j;
+<a name="line381">381: </a>          <font color="#4169E1">break</font>;
+<a name="line382">382: </a>        }
+<a name="line383">383: </a>        lu-&gt;col[nz] = jcol;
+<a name="line384">384: </a>        lu-&gt;val[nz++] = *bv++;
+<a name="line385">385: </a>        <font color="#4169E1">if</font> (j==countB-1) jB = countB;
+<a name="line386">386: </a>      }
+
+<a name="line388">388: </a>      <font color="#B22222">/* A part */</font>
+<a name="line389">389: </a>      <font color="#4169E1">for</font> (j=0; j&lt;countA; j++){
+<a name="line390">390: </a>        lu-&gt;col[nz] = rstart + ajj[j];
+<a name="line391">391: </a>        lu-&gt;val[nz++] = *av++;
+<a name="line392">392: </a>      }
+
+<a name="line394">394: </a>      <font color="#B22222">/* B part, larger col index */</font>
+<a name="line395">395: </a>      <font color="#4169E1">for</font> (j=jB; j&lt;countB; j++){
+<a name="line396">396: </a>        lu-&gt;col[nz] = garray[bjj[j]];
+<a name="line397">397: </a>        lu-&gt;val[nz++] = *bv++;
+<a name="line398">398: </a>      }
+<a name="line399">399: </a>    }
+<a name="line400">400: </a>    lu-&gt;row[m] = nz;
+<a name="line401">401: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line402">402: </a>    zCreate_CompRowLoc_Matrix_dist(&amp;lu-&gt;A_sup, M, N, nz, m, rstart,lu-&gt;val, lu-&gt;col, lu-&gt;row, SLU_NR_loc, SLU_Z, SLU_GE);
+<a name="line403">403: </a><font color="#A020F0">#else</font>
+<a name="line404">404: </a>    dCreate_CompRowLoc_Matrix_dist(&amp;lu-&gt;A_sup, M, N, nz, m, rstart,lu-&gt;val, lu-&gt;col, lu-&gt;row, SLU_NR_loc, SLU_D, SLU_GE);
+<a name="line405">405: </a><font color="#A020F0">#endif</font>
+<a name="line406">406: </a>  }
+<a name="line407">407: </a>  <font color="#4169E1">if</font> (lu-&gt;options.PrintStat) {
+<a name="line408">408: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscGetTime.html#PetscGetTime">PetscGetTime</A>(&amp;time);
+<a name="line409">409: </a>    time0 = time - time0;
+<a name="line410">410: </a>  }
+
+<a name="line412">412: </a>  <font color="#B22222">/* Factor the matrix. */</font>
+<a name="line413">413: </a>  PStatInit(&amp;stat);   <font color="#B22222">/* Initialize the statistics variables. */</font>
+<a name="line414">414: </a>  <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL) { <font color="#B22222">/* global mat input */</font>
+<a name="line415">415: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line416">416: </a>    pzgssvx_ABglobal(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct, 0, M, 0,&amp;lu-&gt;grid, &amp;lu-&gt;LUstruct, berr, &amp;stat, &amp;sinfo);
+<a name="line417">417: </a><font color="#A020F0">#else</font>
+<a name="line418">418: </a>    pdgssvx_ABglobal(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct, 0, M, 0,&amp;lu-&gt;grid, &amp;lu-&gt;LUstruct, berr, &amp;stat, &amp;sinfo);
+<a name="line419">419: </a><font color="#A020F0">#endif </font>
+<a name="line420">420: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* distributed mat input */</font>
+<a name="line421">421: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line422">422: </a>    pzgssvx(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct, 0, m, 0, &amp;lu-&gt;grid,&amp;lu-&gt;LUstruct, &amp;lu-&gt;SOLVEstruct, berr, &amp;stat, &amp;sinfo);
+<a name="line423">423: </a>    <font color="#4169E1">if</font> (sinfo) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"pzgssvx fails, info: %d\n"</font>,sinfo);
+<a name="line424">424: </a><font color="#A020F0">#else</font>
+<a name="line425">425: </a>    pdgssvx(&amp;lu-&gt;options, &amp;lu-&gt;A_sup, &amp;lu-&gt;ScalePermstruct, 0, m, 0, &amp;lu-&gt;grid,&amp;lu-&gt;LUstruct, &amp;lu-&gt;SOLVEstruct, berr, &amp;stat, &amp;sinfo);
+<a name="line426">426: </a>    <font color="#4169E1">if</font> (sinfo) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_LIB,<font color="#666666">"pdgssvx fails, info: %d\n"</font>,sinfo);
+<a name="line427">427: </a><font color="#A020F0">#endif</font>
+<a name="line428">428: </a>  }
+
+<a name="line430">430: </a>  <font color="#4169E1">if</font> (lu-&gt;MatInputMode == GLOBAL &amp;&amp; size &gt; 1){
+<a name="line431">431: </a>    <A href="../../../../.._dist/../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;A_seq);
+<a name="line432">432: </a>  }
+
+<a name="line434">434: </a>  <font color="#4169E1">if</font> (lu-&gt;options.PrintStat) {
+<a name="line435">435: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Reduce.html#MPI_Reduce">MPI_Reduce</A>(&amp;time0,&amp;time_max,1,MPI_DOUBLE,MPI_MAX,0,((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm);
+<a name="line436">436: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Reduce.html#MPI_Reduce">MPI_Reduce</A>(&amp;time0,&amp;time_min,1,MPI_DOUBLE,MPI_MIN,0,((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm);
+<a name="line437">437: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Reduce.html#MPI_Reduce">MPI_Reduce</A>(&amp;time0,&amp;time,1,MPI_DOUBLE,MPI_SUM,0,((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm);
+<a name="line438">438: </a>    time = time/size; <font color="#B22222">/* average time */</font>
+<a name="line439">439: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm, <font color="#666666">"        <A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> conversion(PETSc-&gt;SuperLU_DIST) time (max/min/avg): \n                              %g / %g / %g\n"</font>,time_max,time_min,time);
+<a name="line440">440: </a>    PStatPrint(&amp;lu-&gt;options, &amp;stat, &amp;lu-&gt;grid);  <font color="#B22222">/* Print the statistics. */</font>
+<a name="line441">441: </a>  }
+<a name="line442">442: </a>  PStatFree(&amp;stat);
+<a name="line443">443: </a>  <font color="#4169E1">if</font> (size &gt; 1){
+<a name="line444">444: </a>    F_diag = ((Mat_MPIAIJ *)(F)-&gt;data)-&gt;A;
+<a name="line445">445: </a>    F_diag-&gt;assembled = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line446">446: </a>  }
+<a name="line447">447: </a>  (F)-&gt;assembled    = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line448">448: </a>  (F)-&gt;preallocated = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line449">449: </a>  lu-&gt;options.Fact  = FACTORED; <font color="#B22222">/* The factored form of A is supplied. Local option used by this func. only */</font>
+<a name="line450">450: </a>  <font color="#4169E1">return</font>(0);
+<a name="line451">451: </a>}
+
+<a name="line453">453: </a><font color="#B22222">/* Note the Petsc r and c permutations are ignored */</font>
+<a name="line456">456: </a><strong><font color="#4169E1"><a name="MatLUFactorSymbolic_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorSymbolic_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> F,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A> r,<A href="../../../../.._dist/../docs/manualpages/IS/IS.html#IS">IS</A> c,const <A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line457">457: </a>{
+<a name="line458">458: </a>  Mat_SuperLU_DIST  *lu = (Mat_SuperLU_DIST*)F-&gt;spptr;
+<a name="line459">459: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          M=A-&gt;rmap-&gt;N,N=A-&gt;cmap-&gt;N;
+
+<a name="line462">462: </a>  <font color="#B22222">/* Initialize the SuperLU process grid. */</font>
+<a name="line463">463: </a>  superlu_gridinit(lu-&gt;comm_superlu, lu-&gt;nprow, lu-&gt;npcol, &amp;lu-&gt;grid);
+
+<a name="line465">465: </a>  <font color="#B22222">/* Initialize ScalePermstruct and LUstruct. */</font>
+<a name="line466">466: </a>  ScalePermstructInit(M, N, &amp;lu-&gt;ScalePermstruct);
+<a name="line467">467: </a>  LUstructInit(M, N, &amp;lu-&gt;LUstruct);
+<a name="line468">468: </a>  F-&gt;ops-&gt;lufactornumeric = MatLUFactorNumeric_SuperLU_DIST;
+<a name="line469">469: </a>  F-&gt;ops-&gt;solve           = MatSolve_SuperLU_DIST;
+<a name="line470">470: </a>  F-&gt;ops-&gt;matsolve        = MatMatSolve_SuperLU_DIST;
+<a name="line471">471: </a>  lu-&gt;CleanUpSuperLU_Dist = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line472">472: </a>  <font color="#4169E1">return</font>(0);
+<a name="line473">473: </a>}
+
+<a name="line475">475: </a>EXTERN_C_BEGIN
+<a name="line478">478: </a><strong><font color="#4169E1"><a name="MatFactorGetSolverPackage_aij_superlu_dist"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatFactorGetSolverPackage_aij_superlu_dist(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,const <A href="../../../../.._dist/../docs/manualpages/Mat/MatSolverPackage.html#MatSolverPackage">MatSolverPackage</A> *type)</font></strong>
+<a name="line479">479: </a>{
+<a name="line481">481: </a>  *type = <A href="../../../../.._dist/../docs/manualpages/Mat/MATSOLVERSUPERLU_DIST.html#MATSOLVERSUPERLU_DIST">MATSOLVERSUPERLU_DIST</A>;
+<a name="line482">482: </a>  <font color="#4169E1">return</font>(0);
+<a name="line483">483: </a>}
+<a name="line484">484: </a>EXTERN_C_END
+
+<a name="line488">488: </a><strong><font color="#4169E1"><a name="MatGetFactor_aij_superlu_dist"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatGetFactor_aij_superlu_dist(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorType.html#MatFactorType">MatFactorType</A> ftype,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *F)</font></strong>
+<a name="line489">489: </a>{
+<a name="line490">490: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>               B;
+<a name="line491">491: </a>  Mat_SuperLU_DIST  *lu;
+<a name="line492">492: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line493">493: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          M=A-&gt;rmap-&gt;N,N=A-&gt;cmap-&gt;N,indx;
+<a name="line494">494: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>       size;
+<a name="line495">495: </a>  superlu_options_t options;
+<a name="line496">496: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>         flg;
+<a name="line497">497: </a>  const char        *colperm[] = {<font color="#666666">"NATURAL"</font>,<font color="#666666">"MMD_AT_PLUS_A"</font>,<font color="#666666">"MMD_ATA"</font>,<font color="#666666">"METIS_AT_PLUS_A"</font>,<font color="#666666">"PARMETIS"</font>};
+<a name="line498">498: </a>  const char        *rowperm[] = {<font color="#666666">"LargeDiag"</font>,<font color="#666666">"NATURAL"</font>};
+<a name="line499">499: </a>  const char        *factPattern[] = {<font color="#666666">"SamePattern"</font>,<font color="#666666">"SamePattern_SameRowPerm"</font>};
+
+<a name="line502">502: </a>  <font color="#B22222">/* Create the factorization matrix */</font>
+<a name="line503">503: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;B);
+<a name="line504">504: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(B,A-&gt;rmap-&gt;n,A-&gt;cmap-&gt;n,M,N);
+<a name="line505">505: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(B,((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;type_name);
+<a name="line506">506: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatSeqAIJSetPreallocation.html#MatSeqAIJSetPreallocation">MatSeqAIJSetPreallocation</A>(B,0,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line507">507: </a>  <A href="../../../../.._dist/../docs/manualpages/Mat/MatMPIAIJSetPreallocation.html#MatMPIAIJSetPreallocation">MatMPIAIJSetPreallocation</A>(B,0,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,0,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line509">509: </a>  B-&gt;ops-&gt;lufactorsymbolic = MatLUFactorSymbolic_SuperLU_DIST;
+<a name="line510">510: </a>  B-&gt;ops-&gt;view             = MatView_SuperLU_DIST;
+<a name="line511">511: </a>  B-&gt;ops-&gt;destroy          = MatDestroy_SuperLU_DIST;
+<a name="line512">512: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)B,<font color="#666666">"MatFactorGetSolverPackage_C"</font>,<font color="#666666">"MatFactorGetSolverPackage_aij_superlu_dist"</font>,MatFactorGetSolverPackage_aij_superlu_dist);
+<a name="line513">513: </a>  B-&gt;factortype            = MAT_FACTOR_LU;
+
+<a name="line515">515: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(B,Mat_SuperLU_DIST,&amp;lu);
+<a name="line516">516: </a>  B-&gt;spptr = lu;
+
+<a name="line518">518: </a>  <font color="#B22222">/* Set the default input options:</font>
+<a name="line519">519: </a><font color="#B22222">     options.Fact              = DOFACT;</font>
+<a name="line520">520: </a><font color="#B22222">     options.Equil             = YES;</font>
+<a name="line521">521: </a><font color="#B22222">     options.ParSymbFact       = NO;</font>
+<a name="line522">522: </a><font color="#B22222">     options.ColPerm           = METIS_AT_PLUS_A; </font>
+<a name="line523">523: </a><font color="#B22222">     options.RowPerm           = LargeDiag;</font>
+<a name="line524">524: </a><font color="#B22222">     options.ReplaceTinyPivot  = YES;</font>
+<a name="line525">525: </a><font color="#B22222">     options.IterRefine        = DOUBLE;</font>
+<a name="line526">526: </a><font color="#B22222">     options.Trans             = NOTRANS;</font>
+<a name="line527">527: </a><font color="#B22222">     options.SolveInitialized  = NO; -hold the communication pattern used <A href="../../../../.._dist/../docs/manualpages/Mat/MatSolve.html#MatSolve">MatSolve</A>() and <A href="../../../../.._dist/../docs/manualpages/Mat/MatMatSolve.html#MatMatSolve">MatMatSolve</A>()</font>
+<a name="line528">528: </a><font color="#B22222">     options.RefineInitialized = NO;</font>
+<a name="line529">529: </a><font color="#B22222">     options.PrintStat         = YES;</font>
+<a name="line530">530: </a><font color="#B22222">  */</font>
+<a name="line531">531: </a>  set_default_options_dist(&amp;options);
+
+<a name="line533">533: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;(lu-&gt;comm_superlu));
+<a name="line534">534: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,&amp;size);
+<a name="line535">535: </a>  <font color="#B22222">/* Default num of process columns and rows */</font>
+<a name="line536">536: </a>  lu-&gt;npcol = PetscMPIIntCast((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)(0.5 + PetscSqrtReal((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)size)));
+<a name="line537">537: </a>  <font color="#4169E1">if</font> (!lu-&gt;npcol) lu-&gt;npcol = 1;
+<a name="line538">538: </a>  <font color="#4169E1">while</font> (lu-&gt;npcol &gt; 0) {
+<a name="line539">539: </a>    lu-&gt;nprow = PetscMPIIntCast(size/lu-&gt;npcol);
+<a name="line540">540: </a>    <font color="#4169E1">if</font> (size == lu-&gt;nprow * lu-&gt;npcol) <font color="#4169E1">break</font>;
+<a name="line541">541: </a>    lu-&gt;npcol --;
+<a name="line542">542: </a>  }
+<a name="line543">543: </a>
+<a name="line544">544: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBegin.html#PetscOptionsBegin">PetscOptionsBegin</A>(((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;comm,((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;prefix,<font color="#666666">"SuperLU_Dist Options"</font>,<font color="#666666">"<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A>"</font>);
+<a name="line545">545: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-mat_superlu_dist_r"</font>,<font color="#666666">"Number rows in processor partition"</font>,<font color="#666666">"None"</font>,lu-&gt;nprow,&amp;lu-&gt;nprow,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line546">546: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-mat_superlu_dist_c"</font>,<font color="#666666">"Number columns in processor partition"</font>,<font color="#666666">"None"</font>,lu-&gt;npcol,&amp;lu-&gt;npcol,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line547">547: </a>    <font color="#4169E1">if</font> (size != lu-&gt;nprow * lu-&gt;npcol) <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ3.html#SETERRQ3">SETERRQ3</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_SIZ,<font color="#666666">"Number of processes %d must equal to nprow %d * npcol %d"</font>,size,lu-&gt;nprow,lu-&gt;npcol);
+<a name="line548">548: </a>
+<a name="line549">549: </a>    lu-&gt;MatInputMode = DISTRIBUTED;
+<a name="line550">550: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-mat_superlu_dist_matinput"</font>,<font color="#666666">"Matrix input mode (global or distributed)"</font>,<font color="#666666">"None"</font>,SuperLU_MatInputModes,(<A href="../../../../.._dist/../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)lu-&gt;MatInputMode,(<A href="../../../../.._dist/../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;lu-&gt;MatInputMode,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line551">551: </a>    <font color="#4169E1">if</font>(lu-&gt;MatInputMode == DISTRIBUTED &amp;&amp; size == 1) lu-&gt;MatInputMode = GLOBAL;
+
+<a name="line553">553: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-mat_superlu_dist_equil"</font>,<font color="#666666">"Equilibrate matrix"</font>,<font color="#666666">"None"</font>,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;flg,0);
+<a name="line554">554: </a>    <font color="#4169E1">if</font> (!flg) {
+<a name="line555">555: </a>      options.Equil = NO;
+<a name="line556">556: </a>    }
+
+<a name="line558">558: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-mat_superlu_dist_rowperm"</font>,<font color="#666666">"Row permutation"</font>,<font color="#666666">"None"</font>,rowperm,2,rowperm[0],&amp;indx,&amp;flg);
+<a name="line559">559: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line560">560: </a>      <font color="#4169E1">switch</font> (indx) {
+<a name="line561">561: </a>      <font color="#4169E1">case</font> 0:
+<a name="line562">562: </a>        options.RowPerm = LargeDiag;
+<a name="line563">563: </a>        <font color="#4169E1">break</font>;
+<a name="line564">564: </a>      <font color="#4169E1">case</font> 1:
+<a name="line565">565: </a>        options.RowPerm = NOROWPERM;
+<a name="line566">566: </a>        <font color="#4169E1">break</font>;
+<a name="line567">567: </a>      }
+<a name="line568">568: </a>    }
+
+<a name="line570">570: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-mat_superlu_dist_colperm"</font>,<font color="#666666">"Column permutation"</font>,<font color="#666666">"None"</font>,colperm,5,colperm[3],&amp;indx,&amp;flg);
+<a name="line571">571: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line572">572: </a>      <font color="#4169E1">switch</font> (indx) {
+<a name="line573">573: </a>      <font color="#4169E1">case</font> 0:
+<a name="line574">574: </a>        options.ColPerm = NATURAL;
+<a name="line575">575: </a>        <font color="#4169E1">break</font>;
+<a name="line576">576: </a>      <font color="#4169E1">case</font> 1:
+<a name="line577">577: </a>        options.ColPerm = MMD_AT_PLUS_A;
+<a name="line578">578: </a>        <font color="#4169E1">break</font>;
+<a name="line579">579: </a>      <font color="#4169E1">case</font> 2:
+<a name="line580">580: </a>        options.ColPerm = MMD_ATA;
+<a name="line581">581: </a>        <font color="#4169E1">break</font>;
+<a name="line582">582: </a>      <font color="#4169E1">case</font> 3:
+<a name="line583">583: </a>        options.ColPerm = METIS_AT_PLUS_A;
+<a name="line584">584: </a>        <font color="#4169E1">break</font>;
+<a name="line585">585: </a>      <font color="#4169E1">case</font> 4:
+<a name="line586">586: </a>        options.ColPerm = PARMETIS; <font color="#B22222">/* only works for np&gt;1 */</font>
+<a name="line587">587: </a>        <font color="#4169E1">break</font>;
+<a name="line588">588: </a><strong><font color="#FF0000">      default:</font></strong>
+<a name="line589">589: </a>        <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONG,<font color="#666666">"Unknown column permutation"</font>);
+<a name="line590">590: </a>      }
+<a name="line591">591: </a>    }
+
+<a name="line593">593: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-mat_superlu_dist_replacetinypivot"</font>,<font color="#666666">"Replace tiny pivots"</font>,<font color="#666666">"None"</font>,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;flg,0);
+<a name="line594">594: </a>    <font color="#4169E1">if</font> (!flg) {
+<a name="line595">595: </a>      options.ReplaceTinyPivot = NO;
+<a name="line596">596: </a>    }
+
+<a name="line598">598: </a>    options.ParSymbFact = NO;
+<a name="line599">599: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-mat_superlu_dist_parsymbfact"</font>,<font color="#666666">"Parallel symbolic factorization"</font>,<font color="#666666">"None"</font>,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>,&amp;flg,0);
+<a name="line600">600: </a>    <font color="#4169E1">if</font> (flg){
+<a name="line601">601: </a><font color="#A020F0">#ifdef PETSC_HAVE_PARMETIS</font>
+<a name="line602">602: </a>      options.ParSymbFact = YES;
+<a name="line603">603: </a>      options.ColPerm     = PARMETIS; <font color="#B22222">/* in v2.2, PARMETIS is forced for ParSymbFact regardless of user ordering setting */</font>
+<a name="line604">604: </a><font color="#A020F0">#else</font>
+<a name="line605">605: </a>      printf(<font color="#666666">"parsymbfact needs PARMETIS"</font>);
+<a name="line606">606: </a><font color="#A020F0">#endif</font>
+<a name="line607">607: </a>    }
+
+<a name="line609">609: </a>    lu-&gt;FactPattern = SamePattern_SameRowPerm;
+<a name="line610">610: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-mat_superlu_dist_fact"</font>,<font color="#666666">"Sparsity pattern for repeated matrix factorization"</font>,<font color="#666666">"None"</font>,factPattern,2,factPattern[1],&amp;indx,&amp;flg);
+<a name="line611">611: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line612">612: </a>      <font color="#4169E1">switch</font> (indx) {
+<a name="line613">613: </a>      <font color="#4169E1">case</font> 0:
+<a name="line614">614: </a>        lu-&gt;FactPattern = SamePattern;
+<a name="line615">615: </a>        <font color="#4169E1">break</font>;
+<a name="line616">616: </a>      <font color="#4169E1">case</font> 1:
+<a name="line617">617: </a>        lu-&gt;FactPattern = SamePattern_SameRowPerm;
+<a name="line618">618: </a>        <font color="#4169E1">break</font>;
+<a name="line619">619: </a>      }
+<a name="line620">620: </a>    }
+<a name="line621">621: </a>
+<a name="line622">622: </a>    options.IterRefine = NOREFINE;
+<a name="line623">623: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-mat_superlu_dist_iterrefine"</font>,<font color="#666666">"Use iterative refinement"</font>,<font color="#666666">"None"</font>,<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>,&amp;flg,0);
+<a name="line624">624: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line625">625: </a>      options.IterRefine = SLU_DOUBLE;
+<a name="line626">626: </a>    }
+
+<a name="line628">628: </a>    <font color="#4169E1">if</font> (PetscLogPrintInfo) {
+<a name="line629">629: </a>      options.PrintStat = YES;
+<a name="line630">630: </a>    } <font color="#4169E1">else</font> {
+<a name="line631">631: </a>      options.PrintStat = NO;
+<a name="line632">632: </a>    }
+<a name="line633">633: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-mat_superlu_dist_statprint"</font>,<font color="#666666">"Print factorization information"</font>,<font color="#666666">"None"</font>,
+<a name="line634">634: </a>                              (<A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>)options.PrintStat,(<A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>*)&amp;options.PrintStat,0);
+<a name="line635">635: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscOptionsEnd.html#PetscOptionsEnd">PetscOptionsEnd</A>();
+
+<a name="line637">637: </a>  lu-&gt;options              = options;
+<a name="line638">638: </a>  lu-&gt;options.Fact         = DOFACT;
+<a name="line639">639: </a>  lu-&gt;matsolve_iscalled    = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line640">640: </a>  lu-&gt;matmatsolve_iscalled = <A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line641">641: </a>  *F = B;
+<a name="line642">642: </a>  <font color="#4169E1">return</font>(0);
+<a name="line643">643: </a>}
+
+<a name="line645">645: </a>EXTERN_C_BEGIN
+<a name="line648">648: </a><strong><font color="#4169E1"><a name="MatGetFactor_seqaij_superlu_dist"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatGetFactor_seqaij_superlu_dist(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorType.html#MatFactorType">MatFactorType</A> ftype,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *F)</font></strong>
+<a name="line649">649: </a>{
+
+<a name="line653">653: </a>  MatGetFactor_aij_superlu_dist(A,ftype,F);
+<a name="line654">654: </a>  <font color="#4169E1">return</font>(0);
+<a name="line655">655: </a>}
+<a name="line656">656: </a>EXTERN_C_END
+
+<a name="line658">658: </a>EXTERN_C_BEGIN
+<a name="line661">661: </a><strong><font color="#4169E1"><a name="MatGetFactor_mpiaij_superlu_dist"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatGetFactor_mpiaij_superlu_dist(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Mat/MatFactorType.html#MatFactorType">MatFactorType</A> ftype,<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *F)</font></strong>
+<a name="line662">662: </a>{
+
+<a name="line666">666: </a>  MatGetFactor_aij_superlu_dist(A,ftype,F);
+<a name="line667">667: </a>  <font color="#4169E1">return</font>(0);
+<a name="line668">668: </a>}
+<a name="line669">669: </a>EXTERN_C_END
+
+<a name="line673">673: </a><strong><font color="#4169E1"><a name="MatFactorInfo_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatFactorInfo_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line674">674: </a>{
+<a name="line675">675: </a>  Mat_SuperLU_DIST  *lu=(Mat_SuperLU_DIST*)A-&gt;spptr;
+<a name="line676">676: </a>  superlu_options_t options;
+<a name="line677">677: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+
+<a name="line680">680: </a>  <font color="#B22222">/* check if matrix is superlu_dist type */</font>
+<a name="line681">681: </a>  <font color="#4169E1">if</font> (A-&gt;ops-&gt;solve != MatSolve_SuperLU_DIST) <font color="#4169E1">return</font>(0);
+
+<a name="line683">683: </a>  options = lu-&gt;options;
+<a name="line684">684: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"SuperLU_DIST run parameters:\n"</font>);
+<a name="line685">685: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Process grid nprow %D x npcol %D \n"</font>,lu-&gt;nprow,lu-&gt;npcol);
+<a name="line686">686: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Equilibrate matrix %s \n"</font>,PetscBools[options.Equil != NO]);
+<a name="line687">687: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Matrix input mode %d \n"</font>,lu-&gt;MatInputMode);
+<a name="line688">688: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Replace tiny pivots %s \n"</font>,PetscBools[options.ReplaceTinyPivot != NO]);
+<a name="line689">689: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Use iterative refinement %s \n"</font>,PetscBools[options.IterRefine == SLU_DOUBLE]);
+<a name="line690">690: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Processors in row %d col partition %d \n"</font>,lu-&gt;nprow,lu-&gt;npcol);
+<a name="line691">691: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Row permutation %s \n"</font>,(options.RowPerm == NOROWPERM) ? <font color="#666666">"NATURAL"</font>: <font color="#666666">"LargeDiag"</font>);
+<a name="line692">692: </a>
+<a name="line693">693: </a>  <font color="#4169E1">switch</font>(options.ColPerm){
+<a name="line694">694: </a>  <font color="#4169E1">case</font> NATURAL:
+<a name="line695">695: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Column permutation NATURAL\n"</font>);
+<a name="line696">696: </a>    <font color="#4169E1">break</font>;
+<a name="line697">697: </a>  <font color="#4169E1">case</font> MMD_AT_PLUS_A:
+<a name="line698">698: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Column permutation MMD_AT_PLUS_A\n"</font>);
+<a name="line699">699: </a>    <font color="#4169E1">break</font>;
+<a name="line700">700: </a>  <font color="#4169E1">case</font> MMD_ATA:
+<a name="line701">701: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Column permutation MMD_ATA\n"</font>);
+<a name="line702">702: </a>    <font color="#4169E1">break</font>;
+<a name="line703">703: </a>  <font color="#4169E1">case</font> METIS_AT_PLUS_A:
+<a name="line704">704: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Column permutation METIS_AT_PLUS_A\n"</font>);
+<a name="line705">705: </a>    <font color="#4169E1">break</font>;
+<a name="line706">706: </a>  <font color="#4169E1">case</font> PARMETIS:
+<a name="line707">707: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Column permutation PARMETIS\n"</font>);
+<a name="line708">708: </a>    <font color="#4169E1">break</font>;
+<a name="line709">709: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line710">710: </a>    <A href="../../../../.._dist/../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../.._dist/../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONG,<font color="#666666">"Unknown column permutation"</font>);
+<a name="line711">711: </a>  }
+
+<a name="line713">713: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Parallel symbolic factorization %s \n"</font>,PetscBools[options.ParSymbFact != NO]);
+<a name="line714">714: </a>
+<a name="line715">715: </a>  <font color="#4169E1">if</font> (lu-&gt;FactPattern == SamePattern){
+<a name="line716">716: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Repeated factorization SamePattern\n"</font>);
+<a name="line717">717: </a>  } <font color="#4169E1">else</font> {
+<a name="line718">718: </a>    <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Repeated factorization SamePattern_SameRowPerm\n"</font>);
+<a name="line719">719: </a>  }
+<a name="line720">720: </a>  <font color="#4169E1">return</font>(0);
+<a name="line721">721: </a>}
+
+<a name="line725">725: </a><strong><font color="#4169E1"><a name="MatView_SuperLU_DIST"></a><A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatView_SuperLU_DIST(<A href="../../../../.._dist/../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line726">726: </a>{
+<a name="line727">727: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line728">728: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>         iascii;
+<a name="line729">729: </a>  <A href="../../../../.._dist/../docs/manualpages/Viewer/PetscViewerFormat.html#PetscViewerFormat">PetscViewerFormat</A> format;
+
+<a name="line732">732: </a>  <A href="../../../../.._dist/../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../.._dist/../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERASCII,&amp;iascii);
+<a name="line733">733: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line734">734: </a>    PetscViewerGetFormat(viewer,&amp;format);
+<a name="line735">735: </a>    <font color="#4169E1">if</font> (format == PETSC_VIEWER_ASCII_INFO) {
+<a name="line736">736: </a>      MatFactorInfo_SuperLU_DIST(A,viewer);
+<a name="line737">737: </a>    }
+<a name="line738">738: </a>  }
+<a name="line739">739: </a>  <font color="#4169E1">return</font>(0);
+<a name="line740">740: </a>}
+
+
+<a name="line743">743: </a><font color="#B22222">/*MC</font>
+<a name="line744">744: </a><font color="#B22222">  <A href="../../../../.._dist/../docs/manualpages/Mat/MATSOLVERSUPERLU_DIST.html#MATSOLVERSUPERLU_DIST">MATSOLVERSUPERLU_DIST</A> - Parallel direct solver package for LU factorization</font>
+
+<a name="line746">746: </a><font color="#B22222">   Works with AIJ matrices  </font>
+
+<a name="line748">748: </a><font color="#B22222">  Options Database Keys:</font>
+<a name="line749">749: </a><font color="#B22222">+ -mat_superlu_dist_r &lt;n&gt; - number of rows in processor partition</font>
+<a name="line750">750: </a><font color="#B22222">. -mat_superlu_dist_c &lt;n&gt; - number of columns in processor partition</font>
+<a name="line751">751: </a><font color="#B22222">. -mat_superlu_dist_matinput &lt;0,1&gt; - matrix input mode; 0=global, 1=distributed</font>
+<a name="line752">752: </a><font color="#B22222">. -mat_superlu_dist_equil - equilibrate the matrix</font>
+<a name="line753">753: </a><font color="#B22222">. -mat_superlu_dist_rowperm &lt;LargeDiag,NATURAL&gt; - row permutation</font>
+<a name="line754">754: </a><font color="#B22222">. -mat_superlu_dist_colperm &lt;MMD_AT_PLUS_A,MMD_ATA,NATURAL&gt; - column permutation</font>
+<a name="line755">755: </a><font color="#B22222">. -mat_superlu_dist_replacetinypivot - replace tiny pivots</font>
+<a name="line756">756: </a><font color="#B22222">. -mat_superlu_dist_fact &lt;SamePattern&gt; - (choose one of) SamePattern SamePattern_SameRowPerm</font>
+<a name="line757">757: </a><font color="#B22222">. -mat_superlu_dist_iterrefine - use iterative refinement</font>
+<a name="line758">758: </a><font color="#B22222">- -mat_superlu_dist_statprint - print factorization information</font>
+
+<a name="line760">760: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line762">762: </a><font color="#B22222">.seealso: <A href="../../../../.._dist/../docs/manualpages/PC/PCLU.html#PCLU">PCLU</A></font>
+
+<a name="line764">764: </a><font color="#B22222">.seealso: <A href="../../../../.._dist/../docs/manualpages/PC/PCFactorSetMatSolverPackage.html#PCFactorSetMatSolverPackage">PCFactorSetMatSolverPackage</A>(), <A href="../../../../.._dist/../docs/manualpages/Mat/MatSolverPackage.html#MatSolverPackage">MatSolverPackage</A></font>
+
+<a name="line766">766: </a><font color="#B22222">M*/</font>
+
+</pre>
+</body>
+
+</html>

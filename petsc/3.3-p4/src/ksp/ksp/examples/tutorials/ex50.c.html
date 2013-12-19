@@ -1,0 +1,190 @@
+<center><a href="ex50.c">Actual source code: ex50.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/ksp/examples/tutorials/ex50.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:19:53+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a><font color="#B22222">/*   DM/<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> solving a system of linear equations.</font>
+<a name="line2">  2: </a><font color="#B22222">     Poisson equation in 2D: </font>
+
+<a name="line4">  4: </a><font color="#B22222">     div(grad p) = f,  0 &lt; x,y &lt; 1</font>
+<a name="line5">  5: </a><font color="#B22222">     with</font>
+<a name="line6">  6: </a><font color="#B22222">       forcing function f = -cos(m*pi*x)*cos(n*pi*y),</font>
+<a name="line7">  7: </a><font color="#B22222">       Neuman boundary conditions</font>
+<a name="line8">  8: </a><font color="#B22222">        dp/dx = 0 for x = 0, x = 1.</font>
+<a name="line9">  9: </a><font color="#B22222">        dp/dy = 0 for y = 0, y = 1.</font>
+
+<a name="line11"> 11: </a><font color="#B22222">     Contributed by Michael Boghosian &lt;boghmic@iit.edu&gt;, 2008,</font>
+<a name="line12"> 12: </a><font color="#B22222">         based on petsc/src/ksp/ksp/examples/tutorials/ex29.c and ex32.c</font>
+
+<a name="line14"> 14: </a><font color="#B22222">     Example of Usage: </font>
+<a name="line15"> 15: </a><font color="#B22222">          ./ex50 -mglevels 3 -ksp_monitor -M 3 -N 3 -ksp_view -da_view_draw -draw_pause -1 </font>
+<a name="line16"> 16: </a><font color="#B22222">          ./ex50 -M 100 -N 100 -mglevels 1 -mg_levels_0_pc_factor_levels &lt;ilu_levels&gt; -ksp_monitor -cmp_solu</font>
+<a name="line17"> 17: </a><font color="#B22222">          ./ex50 -M 100 -N 100 -mglevels 1 -mg_levels_0_pc_type lu -mg_levels_0_pc_factor_shift_type NONZERO -ksp_monitor -cmp_solu</font>
+<a name="line18"> 18: </a><font color="#B22222">          mpiexec -n 4 ./ex50 -M 3 -N 3 -ksp_monitor -ksp_view -mglevels 10 -log_summary</font>
+<a name="line19"> 19: </a><font color="#B22222">*/</font>
+
+<a name="line21"> 21: </a>static char help[] = <font color="#666666">"Solves 2D Poisson equation using multigrid.\n\n"</font>;
+
+<a name="line23"> 23: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+<a name="line24"> 24: </a><font color="#A020F0">#include &lt;petscksp.h&gt;</font>
+<a name="line25"> 25: </a><font color="#A020F0">#include &lt;petscpcmg.h&gt;</font>
+<a name="line26"> 26: </a><font color="#A020F0">#include &lt;petscsys.h&gt;</font>
+<a name="line27"> 27: </a><font color="#A020F0">#include &lt;petscvec.h&gt;</font>
+
+<a name="line29"> 29: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeJacobian(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>*,void*)</font></strong>;
+<a name="line30"> 30: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeRHS(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line31"> 31: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeTrueSolution(DM, <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line32"> 32: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> VecView_VTK(<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>, const char [], const char [])</font></strong>;
+
+<a name="line34"> 34: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {DIRICHLET, NEUMANN} BCType;
+
+<a name="line36"> 36: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line37"> 37: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  uu, tt;
+<a name="line38"> 38: </a>  BCType       bcType;
+<a name="line39"> 39: </a>} UserContext;
+
+<a name="line43"> 43: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line44"> 44: </a>{
+<a name="line45"> 45: </a>  <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>            ksp;
+<a name="line46"> 46: </a>  DM             da;
+<a name="line47"> 47: </a>  UserContext    user;
+<a name="line48"> 48: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       bc;
+<a name="line50"> 50: </a>
+<a name="line51"> 51: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,(char *)0,help);
+<a name="line52"> 52: </a>  <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;ksp);
+<a name="line53"> 53: </a>  <A href="../../../../../docs/manualpages/DM/DMDACreate2d.html#DMDACreate2d">DMDACreate2d</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>, DMDA_BOUNDARY_NONE, DMDA_BOUNDARY_NONE,<A href="../../../../../docs/manualpages/DM/DMDA_STENCIL_STAR.html#DMDA_STENCIL_STAR">DMDA_STENCIL_STAR</A>,-11,-11,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,1,1,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;da);
+<a name="line54"> 54: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetDM.html#KSPSetDM">KSPSetDM</A>(ksp,(DM)da);
+<a name="line55"> 55: </a>  <A href="../../../../../docs/manualpages/DM/DMSetApplicationContext.html#DMSetApplicationContext">DMSetApplicationContext</A>(da,&amp;user);
+
+<a name="line57"> 57: </a>  user.uu = 1.0;
+<a name="line58"> 58: </a>  user.tt = 1.0;
+<a name="line59"> 59: </a>  bc   = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)NEUMANN; // Use Neumann Boundary Conditions
+<a name="line60"> 60: </a>  user.bcType = (BCType)bc;
+
+<a name="line62"> 62: </a>
+<a name="line63"> 63: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetComputeRHS.html#KSPSetComputeRHS">KSPSetComputeRHS</A>(ksp,ComputeRHS,&amp;user);
+<a name="line64"> 64: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetComputeOperators.html#KSPSetComputeOperators">KSPSetComputeOperators</A>(ksp,ComputeJacobian,&amp;user);
+<a name="line65"> 65: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>(ksp);
+<a name="line66"> 66: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(ksp,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line68"> 68: </a>  <A href="../../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;da);
+<a name="line69"> 69: </a>  <A href="../../../../../docs/manualpages/KSP/KSPDestroy.html#KSPDestroy">KSPDestroy</A>(&amp;ksp);
+<a name="line70"> 70: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line71"> 71: </a>  <font color="#4169E1">return</font> 0;
+<a name="line72"> 72: </a>}
+
+<a name="line76"> 76: </a><strong><font color="#4169E1"><a name="ComputeRHS"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeRHS(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> b,void *ctx)</font></strong>
+<a name="line77"> 77: </a>{
+<a name="line78"> 78: </a>  UserContext    *user = (UserContext*)ctx;
+<a name="line80"> 80: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i, j, M, N, xm ,ym ,xs, ys;
+<a name="line81"> 81: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Hx, Hy, pi, uu, tt;
+<a name="line82"> 82: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    **array;
+<a name="line83"> 83: </a>  DM             da;
+
+<a name="line86"> 86: </a>  <A href="../../../../../docs/manualpages/KSP/KSPGetDM.html#KSPGetDM">KSPGetDM</A>(ksp,&amp;da);
+<a name="line87"> 87: </a>  <A href="../../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da, 0, &amp;M, &amp;N, 0,0,0,0,0,0,0,0,0,0);
+<a name="line88"> 88: </a>  uu = user-&gt;uu; tt = user-&gt;tt;
+<a name="line89"> 89: </a>  pi = 4*atan(1.0);
+<a name="line90"> 90: </a>  Hx   = 1.0/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(M);
+<a name="line91"> 91: </a>  Hy   = 1.0/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(N);
+
+<a name="line93"> 93: </a>  <A href="../../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,0,&amp;xm,&amp;ym,0);  // Fine grid
+<a name="line94"> 94: </a>  //printf(<font color="#666666">" M N: %d %d; xm ym: %d %d; xs ys: %d %d\n"</font>,M,N,xm,ym,xs,ys);
+<a name="line95"> 95: </a>  <A href="../../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da, b, &amp;array);
+<a name="line96"> 96: </a>  <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++){
+<a name="line97"> 97: </a>    <font color="#4169E1">for</font>(i=xs; i&lt;xs+xm; i++){
+<a name="line98"> 98: </a>      array[j][i] = -PetscCosScalar(uu*pi*((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)i+0.5)*Hx)*cos(tt*pi*((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)j+0.5)*Hy)*Hx*Hy;
+<a name="line99"> 99: </a>    }
+<a name="line100">100: </a>  }
+<a name="line101">101: </a>  <A href="../../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da, b, &amp;array);
+<a name="line102">102: </a>  <A href="../../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(b);
+<a name="line103">103: </a>  <A href="../../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(b);
+
+<a name="line105">105: </a>  <font color="#B22222">/* force right hand side to be consistent for singular matrix */</font>
+<a name="line106">106: </a>  <font color="#B22222">/* note this is really a hack, normally the model would provide you with a consistent right handside */</font>
+<a name="line107">107: </a>  <font color="#4169E1">if</font> (user-&gt;bcType == NEUMANN) {
+<a name="line108">108: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpace.html#MatNullSpace">MatNullSpace</A> nullspace;
+
+<a name="line110">110: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpaceCreate.html#MatNullSpaceCreate">MatNullSpaceCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,0,0,&amp;nullspace);
+<a name="line111">111: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpaceRemove.html#MatNullSpaceRemove">MatNullSpaceRemove</A>(nullspace,b,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line112">112: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpaceDestroy.html#MatNullSpaceDestroy">MatNullSpaceDestroy</A>(&amp;nullspace);
+<a name="line113">113: </a>  }
+<a name="line114">114: </a>  <font color="#4169E1">return</font>(0);
+<a name="line115">115: </a>}
+
+<a name="line119">119: </a><strong><font color="#4169E1"><a name="ComputeJacobian"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeJacobian(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> J, <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> jac,<A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *str,void *ctx)</font></strong>
+<a name="line120">120: </a>{
+<a name="line121">121: </a>  UserContext    *user = (UserContext*)ctx;
+<a name="line123">123: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i, j, M, N, xm, ym, xs, ys, num, numi, numj;
+<a name="line124">124: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    v[5], Hx, Hy, HydHx, HxdHy;
+<a name="line125">125: </a>  <A href="../../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A>     row, col[5];
+<a name="line126">126: </a>  DM             da;
+
+<a name="line129">129: </a>  <A href="../../../../../docs/manualpages/KSP/KSPGetDM.html#KSPGetDM">KSPGetDM</A>(ksp,&amp;da);
+<a name="line130">130: </a>  <A href="../../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,0,&amp;M,&amp;N,0,0,0,0,0,0,0,0,0,0);
+<a name="line131">131: </a>  Hx    = 1.0 / (<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(M);
+<a name="line132">132: </a>  Hy    = 1.0 / (<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(N);
+<a name="line133">133: </a>  HxdHy = Hx/Hy;
+<a name="line134">134: </a>  HydHx = Hy/Hx;
+<a name="line135">135: </a>  <A href="../../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,0,&amp;xm,&amp;ym,0);
+<a name="line136">136: </a>  <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++){
+<a name="line137">137: </a>    <font color="#4169E1">for</font>(i=xs; i&lt;xs+xm; i++){
+<a name="line138">138: </a>      row.i = i; row.j = j;
+<a name="line139">139: </a>
+<a name="line140">140: </a>      <font color="#4169E1">if</font> (i==0 || j==0 || i==M-1 || j==N-1) {
+<a name="line141">141: </a>        <font color="#4169E1">if</font> (user-&gt;bcType == DIRICHLET){
+<a name="line142">142: </a>          <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Dirichlet boundary conditions not supported !\n"</font>);
+<a name="line143">143: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (user-&gt;bcType == NEUMANN){
+<a name="line144">144: </a>          num=0; numi=0; numj=0;
+<a name="line145">145: </a>          <font color="#4169E1">if</font> (j!=0) {
+<a name="line146">146: </a>            v[num] = -HxdHy;              col[num].i = i;   col[num].j = j-1;
+<a name="line147">147: </a>            num++; numj++;
+<a name="line148">148: </a>          }
+<a name="line149">149: </a>          <font color="#4169E1">if</font> (i!=0) {
+<a name="line150">150: </a>            v[num] = -HydHx;              col[num].i = i-1; col[num].j = j;
+<a name="line151">151: </a>            num++; numi++;
+<a name="line152">152: </a>          }
+<a name="line153">153: </a>          <font color="#4169E1">if</font> (i!=M-1) {
+<a name="line154">154: </a>            v[num] = -HydHx;              col[num].i = i+1; col[num].j = j;
+<a name="line155">155: </a>            num++; numi++;
+<a name="line156">156: </a>          }
+<a name="line157">157: </a>          <font color="#4169E1">if</font> (j!=N-1) {
+<a name="line158">158: </a>            v[num] = -HxdHy;              col[num].i = i;   col[num].j = j+1;
+<a name="line159">159: </a>            num++; numj++;
+<a name="line160">160: </a>          }
+<a name="line161">161: </a>          v[num] = ( (<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(numj)*HxdHy + (<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(numi)*HydHx ); col[num].i = i;   col[num].j = j;
+<a name="line162">162: </a>          num++;
+<a name="line163">163: </a>          <A href="../../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,num,col,v,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line164">164: </a>        }
+<a name="line165">165: </a>      } <font color="#4169E1">else</font> {
+<a name="line166">166: </a>        v[0] = -HxdHy;              col[0].i = i;   col[0].j = j-1;
+<a name="line167">167: </a>        v[1] = -HydHx;              col[1].i = i-1; col[1].j = j;
+<a name="line168">168: </a>        v[2] = 2.0*(HxdHy + HydHx); col[2].i = i;   col[2].j = j;
+<a name="line169">169: </a>        v[3] = -HydHx;              col[3].i = i+1; col[3].j = j;
+<a name="line170">170: </a>        v[4] = -HxdHy;              col[4].i = i;   col[4].j = j+1;
+<a name="line171">171: </a>        <A href="../../../../../docs/manualpages/Mat/MatSetValuesStencil.html#MatSetValuesStencil">MatSetValuesStencil</A>(jac,1,&amp;row,5,col,v,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line172">172: </a>      }
+<a name="line173">173: </a>    }
+<a name="line174">174: </a>  }
+<a name="line175">175: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(jac,MAT_FINAL_ASSEMBLY);
+<a name="line176">176: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(jac,MAT_FINAL_ASSEMBLY);
+<a name="line177">177: </a>  <font color="#4169E1">if</font> (user-&gt;bcType == NEUMANN) {
+<a name="line178">178: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpace.html#MatNullSpace">MatNullSpace</A> nullspace;
+
+<a name="line180">180: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpaceCreate.html#MatNullSpaceCreate">MatNullSpaceCreate</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,0,0,&amp;nullspace);
+<a name="line181">181: </a>    <A href="../../../../../docs/manualpages/Mat/MatSetNullSpace.html#MatSetNullSpace">MatSetNullSpace</A>(jac,nullspace);
+<a name="line182">182: </a>    <A href="../../../../../docs/manualpages/Mat/MatNullSpaceDestroy.html#MatNullSpaceDestroy">MatNullSpaceDestroy</A>(&amp;nullspace);
+<a name="line183">183: </a>  }
+<a name="line184">184: </a>  <font color="#4169E1">return</font>(0);
+<a name="line185">185: </a>}
+
+</pre>
+</body>
+
+</html>

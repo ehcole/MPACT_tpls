@@ -1,0 +1,303 @@
+<center><a href="ex22.c">Actual source code: ex22.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/examples/tutorials/ex22.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:22:23+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a>static const char help[] = <font color="#666666">"Solves PDE optimization problem using full-space method, interlaces state and adjoint variables.\n\n"</font>;
+
+<a name="line4">  4: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+<a name="line5">  5: </a><font color="#A020F0">#include &lt;petscdmredundant.h&gt;</font>
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;petscdmcomposite.h&gt;</font>
+<a name="line7">  7: </a><font color="#A020F0">#include &lt;petscpf.h&gt;</font>
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;petscsnes.h&gt;</font>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;petsc-private/dmimpl.h&gt;</font>
+
+<a name="line11"> 11: </a><font color="#B22222">/*</font>
+
+<a name="line13"> 13: </a><font color="#B22222">       w - design variables (what we change to get an optimal solution)</font>
+<a name="line14"> 14: </a><font color="#B22222">       u - state variables (i.e. the PDE solution)</font>
+<a name="line15"> 15: </a><font color="#B22222">       lambda - the Lagrange multipliers</font>
+
+<a name="line17"> 17: </a><font color="#B22222">            U = (w [u_0 lambda_0 u_1 lambda_1 .....])</font>
+
+<a name="line19"> 19: </a><font color="#B22222">       fu, fw, flambda contain the gradient of L(w,u,lambda)</font>
+
+<a name="line21"> 21: </a><font color="#B22222">            FU = (fw [fu_0 flambda_0 .....])</font>
+
+<a name="line23"> 23: </a><font color="#B22222">       In this example the PDE is </font>
+<a name="line24"> 24: </a><font color="#B22222">                             Uxx = 2, </font>
+<a name="line25"> 25: </a><font color="#B22222">                            u(0) = w(0), thus this is the free parameter</font>
+<a name="line26"> 26: </a><font color="#B22222">                            u(1) = 0</font>
+<a name="line27"> 27: </a><font color="#B22222">       the function we wish to minimize is </font>
+<a name="line28"> 28: </a><font color="#B22222">                            \integral u^{2}</font>
+
+<a name="line30"> 30: </a><font color="#B22222">       The exact solution for u is given by u(x) = x*x - 1.25*x + .25</font>
+
+<a name="line32"> 32: </a><font color="#B22222">       Use the usual centered finite differences.</font>
+
+<a name="line34"> 34: </a><font color="#B22222">       Note we treat the problem as non-linear though it happens to be linear</font>
+
+<a name="line36"> 36: </a><font color="#B22222">       See ex21.c for the same code, but that does NOT interlaces the u and the lambda</font>
+
+<a name="line38"> 38: </a><font color="#B22222">       The vectors u_lambda and fu_lambda contain the u and the lambda interlaced</font>
+<a name="line39"> 39: </a><font color="#B22222">*/</font>
+
+<a name="line41"> 41: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line42"> 42: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>  u_lambda_viewer;
+<a name="line43"> 43: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>  fu_lambda_viewer;
+<a name="line44"> 44: </a>} UserCtx;
+
+<a name="line46"> 46: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line47"> 47: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeJacobian_MF(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A>*,void*)</font></strong>;
+<a name="line48"> 48: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,void*)</font></strong>;
+
+<a name="line50"> 50: </a><font color="#B22222">/*</font>
+<a name="line51"> 51: </a><font color="#B22222">    Uses full multigrid preconditioner with GMRES (with no preconditioner inside the GMRES) as the </font>
+<a name="line52"> 52: </a><font color="#B22222">  smoother on all levels. This is because (1) in the matrix free case no matrix entries are </font>
+<a name="line53"> 53: </a><font color="#B22222">  available for doing Jacobi or SOR preconditioning and (2) the explicit matrix case the diagonal</font>
+<a name="line54"> 54: </a><font color="#B22222">  entry for the control variable is zero which means default SOR will not work.</font>
+
+<a name="line56"> 56: </a><font color="#B22222">*/</font>
+<a name="line57"> 57: </a>char  common_options[]      = <font color="#666666">"-ksp_type fgmres\</font>
+<a name="line58"> 58: </a><font color="#666666">                               -snes_grid_sequence 4 \</font>
+<a name="line59"> 59: </a><font color="#666666">                               -pc_type mg\</font>
+<a name="line60"> 60: </a><font color="#666666">                               -mg_levels_pc_type none \</font>
+<a name="line61"> 61: </a><font color="#666666">                               -mg_coarse_pc_type none \</font>
+<a name="line62"> 62: </a><font color="#666666">                               -pc_mg_type full \</font>
+<a name="line63"> 63: </a><font color="#666666">                               -mg_coarse_ksp_type gmres \</font>
+<a name="line64"> 64: </a><font color="#666666">                               -mg_levels_ksp_type gmres \</font>
+<a name="line65"> 65: </a><font color="#666666">                               -mg_coarse_ksp_max_it 6 \</font>
+<a name="line66"> 66: </a><font color="#666666">                               -mg_levels_ksp_max_it 3"</font>;
+
+<a name="line68"> 68: </a>char  matrix_free_options[] = <font color="#666666">"-mat_mffd_compute_normu no \</font>
+<a name="line69"> 69: </a><font color="#666666">                               -mat_mffd_type wp"</font>;
+
+<a name="line71"> 71: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCreateMatrix_MF(DM,const <A href="../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*)</font></strong>;
+
+<a name="line75"> 75: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line76"> 76: </a>{
+<a name="line78"> 78: </a>  UserCtx        user;
+<a name="line79"> 79: </a>  DM             red,da;
+<a name="line80"> 80: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes;
+<a name="line81"> 81: </a>  DM             packer;
+<a name="line82"> 82: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      use_monitor = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line84"> 84: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,help);
+<a name="line85"> 85: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsSetFromOptions.html#PetscOptionsSetFromOptions">PetscOptionsSetFromOptions</A>();
+
+<a name="line87"> 87: </a>  <font color="#B22222">/* Hardwire several options; can be changed at command line */</font>
+<a name="line88"> 88: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsInsertString.html#PetscOptionsInsertString">PetscOptionsInsertString</A>(common_options);
+<a name="line89"> 89: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsInsertString.html#PetscOptionsInsertString">PetscOptionsInsertString</A>(matrix_free_options);
+<a name="line90"> 90: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsInsert.html#PetscOptionsInsert">PetscOptionsInsert</A>(&amp;argc,&amp;argv,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetBool.html#PetscOptionsGetBool">PetscOptionsGetBool</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-use_monitor"</font>,&amp;use_monitor,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>);
+
+<a name="line93"> 93: </a>  <font color="#B22222">/* Create a global vector that includes a single redundant array and two da arrays */</font>
+<a name="line94"> 94: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeCreate.html#DMCompositeCreate">DMCompositeCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;packer);
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/DM/DMRedundantCreate.html#DMRedundantCreate">DMRedundantCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,0,1,&amp;red);
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/DM/DMSetOptionsPrefix.html#DMSetOptionsPrefix">DMSetOptionsPrefix</A>(red,<font color="#666666">"red_"</font>);
+<a name="line97"> 97: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeAddDM.html#DMCompositeAddDM">DMCompositeAddDM</A>(packer,red);
+<a name="line98"> 98: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate1d.html#DMDACreate1d">DMDACreate1d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DMDA_BOUNDARY_NONE,-5,2,1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;da);
+<a name="line99"> 99: </a>  <A href="../../../../docs/manualpages/DM/DMSetOptionsPrefix.html#DMSetOptionsPrefix">DMSetOptionsPrefix</A>(red,<font color="#666666">"da_"</font>);
+<a name="line100">100: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeAddDM.html#DMCompositeAddDM">DMCompositeAddDM</A>(packer,(DM)da);
+<a name="line101">101: </a>  <A href="../../../../docs/manualpages/DM/DMSetApplicationContext.html#DMSetApplicationContext">DMSetApplicationContext</A>(packer,&amp;user);
+<a name="line102">102: </a>  <A href="../../../../docs/manualpages/SNES/DMSNESSetFunction.html#DMSNESSetFunction">DMSNESSetFunction</A>(packer,ComputeFunction,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line103">103: </a>  <A href="../../../../docs/manualpages/SNES/DMSNESSetJacobian.html#DMSNESSetJacobian">DMSNESSetJacobian</A>(packer,ComputeJacobian_MF,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line104">104: </a>  packer-&gt;ops-&gt;creatematrix = DMCreateMatrix_MF;
+
+<a name="line106">106: </a>  <font color="#B22222">/* create nonlinear multi-level solver */</font>
+<a name="line107">107: </a>  <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;snes);
+<a name="line108">108: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetDM.html#SNESSetDM">SNESSetDM</A>(snes,packer);
+<a name="line109">109: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(snes);
+
+<a name="line111">111: </a>  <font color="#4169E1">if</font> (use_monitor) {
+<a name="line112">112: </a>    <font color="#B22222">/* create graphics windows */</font>
+<a name="line113">113: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawOpen.html#PetscViewerDrawOpen">PetscViewerDrawOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,0,<font color="#666666">"u_lambda - state variables and Lagrange multipliers"</font>,-1,-1,-1,-1,&amp;user.u_lambda_viewer);
+<a name="line114">114: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawOpen.html#PetscViewerDrawOpen">PetscViewerDrawOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,0,<font color="#666666">"fu_lambda - derivate w.r.t. state variables and Lagrange multipliers"</font>,-1,-1,-1,-1,&amp;user.fu_lambda_viewer);
+<a name="line115">115: </a>    <A href="../../../../docs/manualpages/SNES/SNESMonitorSet.html#SNESMonitorSet">SNESMonitorSet</A>(snes,Monitor,0,0);
+<a name="line116">116: </a>  }
+
+<a name="line118">118: </a>  <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line119">119: </a>  <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(&amp;snes);
+
+<a name="line121">121: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;red);
+<a name="line122">122: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;da);
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;packer);
+<a name="line124">124: </a>  <font color="#4169E1">if</font> (use_monitor) {
+<a name="line125">125: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;user.u_lambda_viewer);
+<a name="line126">126: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;user.fu_lambda_viewer);
+<a name="line127">127: </a>  }
+<a name="line128">128: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line129">129: </a>  <font color="#4169E1">return</font> 0;
+<a name="line130">130: </a>}
+
+<a name="line132">132: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line133">133: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> u;
+<a name="line134">134: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> lambda;
+<a name="line135">135: </a>} ULambda;
+
+<a name="line139">139: </a><font color="#B22222">/*</font>
+<a name="line140">140: </a><font color="#B22222">      Evaluates FU = Gradiant(L(w,u,lambda))</font>
+
+<a name="line142">142: </a><font color="#B22222">     This local function acts on the ghosted version of U (accessed via <A href="../../../../docs/manualpages/DM/DMCompositeGetLocalVectors.html#DMCompositeGetLocalVectors">DMCompositeGetLocalVectors</A>() and</font>
+<a name="line143">143: </a><font color="#B22222">   <A href="../../../../docs/manualpages/DM/DMCompositeScatter.html#DMCompositeScatter">DMCompositeScatter</A>()) BUT the global, nonghosted version of FU (via <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>()).</font>
+
+<a name="line145">145: </a><font color="#B22222">*/</font>
+<a name="line146">146: </a><strong><font color="#4169E1"><a name="ComputeFunction"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> U,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> FU,void *ctx)</font></strong>
+<a name="line147">147: </a>{
+<a name="line149">149: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       xs,xm,i,N;
+<a name="line150">150: </a>  ULambda        *u_lambda,*fu_lambda;
+<a name="line151">151: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    d,h,*w,*fw;
+<a name="line152">152: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            vw,vfw,vu_lambda,vfu_lambda;
+<a name="line153">153: </a>  DM             packer,red,da;
+
+<a name="line156">156: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQuery.html#PetscObjectQuery">PetscObjectQuery</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)U,<font color="#666666">"DM"</font>,(<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>*)&amp;packer); <font color="#B22222">/* Ugly way to get context */</font>
+<a name="line157">157: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetEntries.html#DMCompositeGetEntries">DMCompositeGetEntries</A>(packer,&amp;red,&amp;da);
+<a name="line158">158: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetLocalVectors.html#DMCompositeGetLocalVectors">DMCompositeGetLocalVectors</A>(packer,&amp;vw,&amp;vu_lambda);
+<a name="line159">159: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeScatter.html#DMCompositeScatter">DMCompositeScatter</A>(packer,U,vw,vu_lambda);
+<a name="line160">160: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>(packer,FU,&amp;vfw,&amp;vfu_lambda);
+
+<a name="line162">162: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;xm,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line163">163: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,0,&amp;N,0,0,0,0,0,0,0,0,0,0,0);
+<a name="line164">164: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(vw,&amp;w);
+<a name="line165">165: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(vfw,&amp;fw);
+<a name="line166">166: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,vu_lambda,&amp;u_lambda);
+<a name="line167">167: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,vfu_lambda,&amp;fu_lambda);
+<a name="line168">168: </a>  d    = N-1.0;
+<a name="line169">169: </a>  h    = 1.0/d;
+
+<a name="line171">171: </a>  <font color="#B22222">/* derivative of L() w.r.t. w */</font>
+<a name="line172">172: </a>  <font color="#4169E1">if</font> (xs == 0) { <font color="#B22222">/* only first processor computes this */</font>
+<a name="line173">173: </a>    fw[0] = -2.0*d*u_lambda[0].lambda;
+<a name="line174">174: </a>  }
+
+<a name="line176">176: </a>  <font color="#B22222">/* derivative of L() w.r.t. u */</font>
+<a name="line177">177: </a>  <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line178">178: </a>    <font color="#4169E1">if</font>      (i == 0)   fu_lambda[0].lambda   =    h*u_lambda[0].u   + 2.*d*u_lambda[0].lambda   - d*u_lambda[1].lambda;
+<a name="line179">179: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == 1)   fu_lambda[1].lambda   = 2.*h*u_lambda[1].u   + 2.*d*u_lambda[1].lambda   - d*u_lambda[2].lambda;
+<a name="line180">180: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == N-1) fu_lambda[N-1].lambda =    h*u_lambda[N-1].u + 2.*d*u_lambda[N-1].lambda - d*u_lambda[N-2].lambda;
+<a name="line181">181: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == N-2) fu_lambda[N-2].lambda = 2.*h*u_lambda[N-2].u + 2.*d*u_lambda[N-2].lambda - d*u_lambda[N-3].lambda;
+<a name="line182">182: </a>    <font color="#4169E1">else</font>               fu_lambda[i].lambda   = 2.*h*u_lambda[i].u   - d*(u_lambda[i+1].lambda - 2.0*u_lambda[i].lambda + u_lambda[i-1].lambda);
+<a name="line183">183: </a>  }
+
+<a name="line185">185: </a>  <font color="#B22222">/* derivative of L() w.r.t. lambda */</font>
+<a name="line186">186: </a>  <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line187">187: </a>    <font color="#4169E1">if</font>      (i == 0)   fu_lambda[0].u   = 2.0*d*(u_lambda[0].u - w[0]);
+<a name="line188">188: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == N-1) fu_lambda[N-1].u = 2.0*d*u_lambda[N-1].u;
+<a name="line189">189: </a>    <font color="#4169E1">else</font>               fu_lambda[i].u   = -(d*(u_lambda[i+1].u - 2.0*u_lambda[i].u + u_lambda[i-1].u) - 2.0*h);
+<a name="line190">190: </a>  }
+
+<a name="line192">192: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(vw,&amp;w);
+<a name="line193">193: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(vfw,&amp;fw);
+<a name="line194">194: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,vu_lambda,&amp;u_lambda);
+<a name="line195">195: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,vfu_lambda,&amp;fu_lambda);
+<a name="line196">196: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreLocalVectors.html#DMCompositeRestoreLocalVectors">DMCompositeRestoreLocalVectors</A>(packer,&amp;vw,&amp;vu_lambda);
+<a name="line197">197: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreAccess.html#DMCompositeRestoreAccess">DMCompositeRestoreAccess</A>(packer,FU,&amp;vfw,&amp;vfu_lambda);
+<a name="line198">198: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(13.0*N);
+<a name="line199">199: </a>  <font color="#4169E1">return</font>(0);
+<a name="line200">200: </a>}
+
+<a name="line204">204: </a><font color="#B22222">/* </font>
+<a name="line205">205: </a><font color="#B22222">    Computes the exact solution</font>
+<a name="line206">206: </a><font color="#B22222">*/</font>
+<a name="line207">207: </a><strong><font color="#4169E1"><a name="u_solution"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> u_solution(void *dummy,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n,const <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *x,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *u)</font></strong>
+<a name="line208">208: </a>{
+<a name="line209">209: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i;
+<a name="line211">211: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line212">212: </a>    u[2*i] = x[i]*x[i] - 1.25*x[i] + .25;
+<a name="line213">213: </a>  }
+<a name="line214">214: </a>  <font color="#4169E1">return</font>(0);
+<a name="line215">215: </a>}
+
+<a name="line219">219: </a><strong><font color="#4169E1"><a name="ExactSolution"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ExactSolution(DM packer,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> U)</font></strong>
+<a name="line220">220: </a>{
+<a name="line221">221: </a>  <A href="../../../../docs/manualpages/PF/PF.html#PF">PF</A>             pf;
+<a name="line222">222: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            x,u_global;
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *w;
+<a name="line224">224: </a>  DM             da;
+<a name="line226">226: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m;
+
+<a name="line229">229: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetEntries.html#DMCompositeGetEntries">DMCompositeGetEntries</A>(packer,&amp;m,&amp;da);
+
+<a name="line231">231: </a>  <A href="../../../../docs/manualpages/PF/PFCreate.html#PFCreate">PFCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,1,2,&amp;pf);
+<a name="line232">232: </a>  <A href="../../../../docs/manualpages/PF/PFSetType.html#PFSetType">PFSetType</A>(pf,PFQUICK,(void*)u_solution);
+<a name="line233">233: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCoordinates.html#DMDAGetCoordinates">DMDAGetCoordinates</A>(da,&amp;x);
+<a name="line234">234: </a>  <font color="#4169E1">if</font> (!x) {
+<a name="line235">235: </a>    <A href="../../../../docs/manualpages/DM/DMDASetUniformCoordinates.html#DMDASetUniformCoordinates">DMDASetUniformCoordinates</A>(da,0.0,1.0,0.0,1.0,0.0,1.0);
+<a name="line236">236: </a>    <A href="../../../../docs/manualpages/DM/DMDAGetCoordinates.html#DMDAGetCoordinates">DMDAGetCoordinates</A>(da,&amp;x);
+<a name="line237">237: </a>  }
+<a name="line238">238: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>(packer,U,&amp;w,&amp;u_global,0);
+<a name="line239">239: </a>  <font color="#4169E1">if</font> (w) w[0] = .25;
+<a name="line240">240: </a>  <A href="../../../../docs/manualpages/PF/PFApplyVec.html#PFApplyVec">PFApplyVec</A>(pf,x,u_global);
+<a name="line241">241: </a>  <A href="../../../../docs/manualpages/PF/PFDestroy.html#PFDestroy">PFDestroy</A>(&amp;pf);
+<a name="line242">242: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreAccess.html#DMCompositeRestoreAccess">DMCompositeRestoreAccess</A>(packer,U,&amp;w,&amp;u_global,0);
+<a name="line243">243: </a>  <font color="#4169E1">return</font>(0);
+<a name="line244">244: </a>}
+
+<a name="line248">248: </a><strong><font color="#4169E1"><a name="Monitor"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> its,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rnorm,void *dummy)</font></strong>
+<a name="line249">249: </a>{
+<a name="line250">250: </a>  UserCtx        *user;
+<a name="line252">252: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m,N;
+<a name="line253">253: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *w,*dw;
+<a name="line254">254: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            u_lambda,U,F,Uexact;
+<a name="line255">255: </a>  DM             packer;
+<a name="line256">256: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      norm;
+<a name="line257">257: </a>  DM             da;
+
+<a name="line260">260: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;packer);
+<a name="line261">261: </a>  <A href="../../../../docs/manualpages/DM/DMGetApplicationContext.html#DMGetApplicationContext">DMGetApplicationContext</A>(packer,&amp;user);
+<a name="line262">262: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetSolution.html#SNESGetSolution">SNESGetSolution</A>(snes,&amp;U);
+<a name="line263">263: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>(packer,U,&amp;w,&amp;u_lambda);
+<a name="line264">264: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u_lambda,user-&gt;u_lambda_viewer);
+<a name="line265">265: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreAccess.html#DMCompositeRestoreAccess">DMCompositeRestoreAccess</A>(packer,U,&amp;w,&amp;u_lambda);
+
+<a name="line267">267: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetFunction.html#SNESGetFunction">SNESGetFunction</A>(snes,&amp;F,0,0);
+<a name="line268">268: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>(packer,F,&amp;w,&amp;u_lambda);
+<a name="line269">269: </a>  <font color="#B22222">/* <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u_lambda,user-&gt;fu_lambda_viewer); */</font>
+<a name="line270">270: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreAccess.html#DMCompositeRestoreAccess">DMCompositeRestoreAccess</A>(packer,U,&amp;w,&amp;u_lambda);
+
+<a name="line272">272: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetEntries.html#DMCompositeGetEntries">DMCompositeGetEntries</A>(packer,&amp;m,&amp;da);
+<a name="line273">273: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,0,&amp;N,0,0,0,0,0,0,0,0,0,0,0);
+<a name="line274">274: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(U,&amp;Uexact);
+<a name="line275">275: </a>  ExactSolution(packer,Uexact);
+<a name="line276">276: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(Uexact,-1.0,U);
+<a name="line277">277: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeGetAccess.html#DMCompositeGetAccess">DMCompositeGetAccess</A>(packer,Uexact,&amp;dw,&amp;u_lambda);
+<a name="line278">278: </a>  <A href="../../../../docs/manualpages/Vec/VecStrideNorm.html#VecStrideNorm">VecStrideNorm</A>(u_lambda,0,<A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;norm);
+<a name="line279">279: </a>  norm = norm/sqrt(N-1.);
+<a name="line280">280: </a>  <font color="#4169E1">if</font> (dw) <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Norm of error %G Error at x = 0 %G\n"</font>,norm,PetscRealPart(dw[0]));
+<a name="line281">281: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(u_lambda,user-&gt;fu_lambda_viewer);
+<a name="line282">282: </a>  <A href="../../../../docs/manualpages/DM/DMCompositeRestoreAccess.html#DMCompositeRestoreAccess">DMCompositeRestoreAccess</A>(packer,Uexact,&amp;dw,&amp;u_lambda);
+<a name="line283">283: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;Uexact);
+<a name="line284">284: </a>  <font color="#4169E1">return</font>(0);
+<a name="line285">285: </a>}
+
+<a name="line289">289: </a><strong><font color="#4169E1"><a name="DMCreateMatrix_MF"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCreateMatrix_MF(DM packer,const <A href="../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A> stype,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A)</font></strong>
+<a name="line290">290: </a>{
+<a name="line292">292: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            t;
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m;
+
+<a name="line296">296: </a>  <A href="../../../../docs/manualpages/DM/DMGetGlobalVector.html#DMGetGlobalVector">DMGetGlobalVector</A>(packer,&amp;t);
+<a name="line297">297: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(t,&amp;m);
+<a name="line298">298: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreGlobalVector.html#DMRestoreGlobalVector">DMRestoreGlobalVector</A>(packer,&amp;t);
+<a name="line299">299: </a>  <A href="../../../../docs/manualpages/Mat/MatCreateMFFD.html#MatCreateMFFD">MatCreateMFFD</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,m,m,<A href="../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>,A);
+<a name="line300">300: </a>  <A href="../../../../docs/manualpages/Mat/MatSetUp.html#MatSetUp">MatSetUp</A>(*A);
+<a name="line301">301: </a>  <font color="#4169E1">return</font>(0);
+<a name="line302">302: </a>}
+
+<a name="line306">306: </a><strong><font color="#4169E1"><a name="ComputeJacobian_MF"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ComputeJacobian_MF(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *B,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *str,void *ctx)</font></strong>
+<a name="line307">307: </a>{
+
+<a name="line311">311: </a>  <A href="../../../../docs/manualpages/Mat/MatMFFDSetFunction.html#MatMFFDSetFunction">MatMFFDSetFunction</A>(*A,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(void*,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>))<A href="../../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>,snes);
+<a name="line312">312: </a>  <A href="../../../../docs/manualpages/Mat/MatMFFDSetBase.html#MatMFFDSetBase">MatMFFDSetBase</A>(*A,x,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line313">313: </a>  <font color="#4169E1">return</font>(0);
+<a name="line314">314: </a>}
+</pre>
+</body>
+
+</html>

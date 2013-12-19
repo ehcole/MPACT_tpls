@@ -1,0 +1,745 @@
+<center><a href="scotch.c">Actual source code: scotch.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T18:56:47+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCMAT_DLL</font></strong>
+
+<a name="line3"> 3: </a> #include <A href="../../../../../include/../src/mat/impls/adj/mpi/mpiadj.h.html">../src/mat/impls/adj/mpi/mpiadj.h</A>
+
+<a name="line5">  5: </a><font color="#A020F0">#ifdef PETSC_HAVE_UNISTD_H</font>
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;unistd.h&gt;</font>
+<a name="line7">  7: </a><font color="#A020F0">#endif</font>
+
+<a name="line9">  9: </a><font color="#A020F0">#ifdef PETSC_HAVE_STDLIB_H</font>
+<a name="line10"> 10: </a><font color="#A020F0">#include &lt;stdlib.h&gt;</font>
+<a name="line11"> 11: </a><font color="#A020F0">#endif</font>
+
+<a name="line13"> 13: </a><font color="#B22222">/* </font>
+<a name="line14"> 14: </a><font color="#B22222">   Currently using Scotch-3.4</font>
+<a name="line15"> 15: </a><font color="#B22222">*/</font>
+<a name="line17"> 17: </a><font color="#A020F0">#include </font><font color="#666666">"scotch.h"</font><font color="#A020F0"></font>
+
+<a name="line20"> 20: </a><font color="#B22222">/*************************************</font>
+<a name="line21"> 21: </a><font color="#B22222"> *                                      *</font>
+<a name="line22"> 22: </a><font color="#B22222"> * Note:                             *</font>
+<a name="line23"> 23: </a><font color="#B22222"> *                                      *</font>
+<a name="line24"> 24: </a><font color="#B22222"> * To make scotch compile I              *</font>
+<a name="line25"> 25: </a><font color="#B22222"> * modified all old mat-&gt;m/M into    *</font>
+<a name="line26"> 26: </a><font color="#B22222"> * mat-&gt;rmap-&gt;n/N                     *</font>
+<a name="line27"> 27: </a><font color="#B22222"> *                                     *</font>
+<a name="line28"> 28: </a><font color="#B22222"> * Hope I was right                     *</font>
+<a name="line29"> 29: </a><font color="#B22222"> *                                     *</font>
+<a name="line30"> 30: </a><font color="#B22222"> *************************************/</font>
+<a name="line31"> 31: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line32"> 32: </a>    char arch[PETSC_MAX_PATH_LEN];
+<a name="line33"> 33: </a>    int multilevel;
+<a name="line34"> 34: </a>    char strategy[30];
+<a name="line35"> 35: </a>    int global_method;          <font color="#B22222">/* global method */</font>
+<a name="line36"> 36: </a>    int local_method;           <font color="#B22222">/* local method */</font>
+<a name="line37"> 37: </a>    int nbvtxcoarsed;           <font color="#B22222">/* number of vertices for the coarse graph */</font>
+<a name="line38"> 38: </a>    int map;                    <font color="#B22222">/* to know if we map on archptr or just partionate the graph */</font>
+<a name="line39"> 39: </a>    char *mesg_log;
+<a name="line40"> 40: </a>    char host_list[PETSC_MAX_PATH_LEN];
+<a name="line41"> 41: </a>} MatPartitioning_Scotch;
+
+<a name="line43"> 43: </a><strong><font color="#228B22">#define SIZE_LOG 10000          </font><font color="#B22222">/* size of buffer for msg_log */</font><font color="#228B22"></font></strong>
+
+<a name="line47"> 47: </a><strong><font color="#4169E1"><a name="MatPartitioningApply_Scotch"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningApply_Scotch(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> * partitioning)</font></strong>
+<a name="line48"> 48: </a>{
+<a name="line50"> 50: </a>    int  *parttab, *locals = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, rank, i, size;
+<a name="line51"> 51: </a>    size_t                 j;
+<a name="line52"> 52: </a>    <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>                    mat = part-&gt;adj, matMPI, matSeq;
+<a name="line53"> 53: </a>    int                    nb_locals = mat-&gt;rmap-&gt;n;
+<a name="line54"> 54: </a>    Mat_MPIAdj             *adj = (Mat_MPIAdj *) mat-&gt;data;
+<a name="line55"> 55: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+<a name="line56"> 56: </a>    <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>             flg;
+<a name="line57"> 57: </a><font color="#A020F0">#ifdef PETSC_HAVE_UNISTD_H</font>
+<a name="line58"> 58: </a>    int                    fd_stdout, fd_pipe[2], count,err;
+<a name="line59"> 59: </a><font color="#A020F0">#endif</font>
+
+
+<a name="line63"> 63: </a>    <font color="#B22222">/* check if the matrix is sequential, use <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrices.html#MatGetSubMatrices">MatGetSubMatrices</A> if necessary */</font>
+<a name="line64"> 64: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat)-&gt;comm, &amp;size);
+<a name="line65"> 65: </a>    <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) mat, <A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>, &amp;flg);
+<a name="line66"> 66: </a>    <font color="#4169E1">if</font> (size &gt; 1) {
+<a name="line67"> 67: </a>        int M, N;
+<a name="line68"> 68: </a>        <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> isrow, iscol;
+<a name="line69"> 69: </a>        <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A;
+
+<a name="line71"> 71: </a>        <font color="#4169E1">if</font> (flg) {
+<a name="line72"> 72: </a>            <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(0, <font color="#666666">"Distributed matrix format MPIAdj is not supported for sequential partitioners"</font>);
+<a name="line73"> 73: </a>        }
+<a name="line74"> 74: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, <font color="#666666">"Converting distributed matrix to sequential: this could be a performance loss\n"</font>);
+
+<a name="line76"> 76: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(mat, &amp;M, &amp;N);
+<a name="line77"> 77: </a>        <A href="../../../../../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, M, 0, 1, &amp;isrow);
+<a name="line78"> 78: </a>        <A href="../../../../../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, N, 0, 1, &amp;iscol);
+<a name="line79"> 79: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrices.html#MatGetSubMatrices">MatGetSubMatrices</A>(mat, 1, &amp;isrow, &amp;iscol, MAT_INITIAL_MATRIX, &amp;A);
+<a name="line80"> 80: </a>        matSeq = *A;
+<a name="line81"> 81: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(A);
+<a name="line82"> 82: </a>        <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(isrow);
+<a name="line83"> 83: </a>        <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(iscol);
+<a name="line84"> 84: </a>    } <font color="#4169E1">else</font>
+<a name="line85"> 85: </a>        matSeq = mat;
+
+<a name="line87"> 87: </a>    <font color="#B22222">/* convert the the matrix to MPIADJ type if necessary */</font>
+<a name="line88"> 88: </a>    <font color="#4169E1">if</font> (!flg) {
+<a name="line89"> 89: </a>        <A href="../../../../../docs/manualpages/Mat/MatConvert.html#MatConvert">MatConvert</A>(matSeq, <A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>, MAT_INITIAL_MATRIX, &amp;matMPI);
+<a name="line90"> 90: </a>    } <font color="#4169E1">else</font> {
+<a name="line91"> 91: </a>        matMPI = matSeq;
+<a name="line92"> 92: </a>    }
+
+<a name="line94"> 94: </a>    adj = (Mat_MPIAdj *) matMPI-&gt;data;  <font color="#B22222">/* finaly adj contains adjacency graph */</font>
+
+<a name="line96"> 96: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, &amp;rank);
+
+<a name="line98"> 98: </a>    {
+<a name="line99"> 99: </a>        <font color="#B22222">/* definition of Scotch library arguments */</font>
+<a name="line100">100: </a>        SCOTCH_Strat stratptr;      <font color="#B22222">/* scotch strategy */</font>
+<a name="line101">101: </a>        SCOTCH_Graph grafptr;       <font color="#B22222">/* scotch graph */</font>
+<a name="line102">102: </a><font color="#A020F0">#if defined(DOES_NOT_COMPILE_DUE_TO_BROKEN_INTERFACE)</font>
+<a name="line103">103: </a>        int vertnbr = mat-&gt;rmap-&gt;N; <font color="#B22222">/* number of vertices in full graph */</font>
+<a name="line104">104: </a>        int *verttab = adj-&gt;i;      <font color="#B22222">/* start of edge list for each vertex */</font>
+<a name="line105">105: </a>        int *edgetab = adj-&gt;j;      <font color="#B22222">/* edge list data */</font>
+<a name="line106">106: </a>        int edgenbr = adj-&gt;nz;      <font color="#B22222">/* number of edges */</font>
+<a name="line107">107: </a>        int *velotab = NULL;        <font color="#B22222">/* not used by petsc interface */</font>
+<a name="line108">108: </a>        int *vlbltab = NULL;
+<a name="line109">109: </a>        int *edlotab = NULL;
+<a name="line110">110: </a>        int flagval = 3;            <font color="#B22222">/* (cf doc scotch no weight edge &amp; vertices) */</font>
+<a name="line111">111: </a><font color="#A020F0">#endif  </font>
+<a name="line112">112: </a>        int baseval = 0;            <font color="#B22222">/* 0 for C array indexing */</font>
+<a name="line113">113: </a>        char strategy[256];
+
+<a name="line115">115: </a>        <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((mat-&gt;rmap-&gt;N) * <font color="#4169E1">sizeof</font>(int), &amp;parttab);
+
+<a name="line117">117: </a>        <font color="#B22222">/* redirect output to buffer scotch -&gt; mesg_log */</font>
+<a name="line118">118: </a><font color="#A020F0">#ifdef PETSC_HAVE_UNISTD_H</font>
+<a name="line119">119: </a>        fd_stdout = dup(1);
+<a name="line120">120: </a>        pipe(fd_pipe);
+<a name="line121">121: </a>        close(1);
+<a name="line122">122: </a>        dup2(fd_pipe[1], 1);
+<a name="line123">123: </a>        <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(SIZE_LOG * <font color="#4169E1">sizeof</font>(char), &amp;(scotch-&gt;mesg_log));
+<a name="line124">124: </a><font color="#A020F0">#endif</font>
+
+<a name="line126">126: </a>        <font color="#B22222">/* library call */</font>
+
+<a name="line128">128: </a>        <font color="#B22222">/* Construction of the scotch graph object */</font>
+<a name="line129">129: </a>        SCOTCH_graphInit(&amp;grafptr);
+<a name="line130">130: </a><font color="#A020F0">#if defined(DOES_NOT_COMPILE_DUE_TO_BROKEN_INTERFACE)</font>
+<a name="line131">131: </a>        SCOTCH_graphBuild((SCOTCH_Graph *)   &amp;grafptr,
+<a name="line132">132: </a>                                 (const SCOTCH_Num)  vertnbr,
+<a name="line133">133: </a>                                 (const SCOTCH_Num)  verttab,
+<a name="line134">134: </a>                                 (const SCOTCH_Num *)velotab,
+<a name="line135">135: </a>                                 (const SCOTCH_Num *)vlbltab,
+<a name="line136">136: </a>                                 (const SCOTCH_Num *)edgenbr,
+<a name="line137">137: </a>                                 (const SCOTCH_Num *)edgetab,
+<a name="line138">138: </a>                                 (const SCOTCH_Num)  edlotab,
+<a name="line139">139: </a>                                 (const SCOTCH_Num *)baseval,
+<a name="line140">140: </a>                                 (const SCOTCH_Num *)flagval);
+<a name="line141">141: </a><font color="#A020F0">#else</font>
+<a name="line142">142: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Scotch interface currently broken"</font>);
+<a name="line143">143: </a><font color="#A020F0">#endif</font>
+<a name="line144">144: </a>        SCOTCH_graphCheck(&amp;grafptr);
+
+<a name="line146">146: </a>        <font color="#B22222">/* Construction of the strategy */</font>
+<a name="line147">147: </a>        <font color="#4169E1">if</font> (scotch-&gt;strategy[0] != 0) {
+<a name="line148">148: </a>            <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(strategy, scotch-&gt;strategy);
+<a name="line149">149: </a>        } <font color="#4169E1">else</font> {
+<a name="line150">150: </a>            <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(strategy, <font color="#666666">"b{strat="</font>);
+
+<a name="line152">152: </a>            <font color="#4169E1">if</font> (scotch-&gt;multilevel) {
+<a name="line153">153: </a>                <font color="#B22222">/* <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy,"m{vert=");</font>
+<a name="line154">154: </a><font color="#B22222">                   sprintf(strategy+strlen(strategy),"%d",scotch-&gt;nbvtxcoarsed);</font>
+<a name="line155">155: </a><font color="#B22222">                   <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy,",asc="); */</font>
+<a name="line156">156: </a>                sprintf(strategy, <font color="#666666">"b{strat=m{vert=%d,asc="</font>,
+<a name="line157">157: </a>                    scotch-&gt;nbvtxcoarsed);
+<a name="line158">158: </a>            } <font color="#4169E1">else</font>
+<a name="line159">159: </a>                <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(strategy, <font color="#666666">"b{strat="</font>);
+
+<a name="line161">161: </a>            <font color="#4169E1">switch</font> (scotch-&gt;global_method) {
+<a name="line162">162: </a>            <font color="#4169E1">case</font> MP_SCOTCH_GREEDY:
+<a name="line163">163: </a>                <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">"h"</font>);
+<a name="line164">164: </a>                <font color="#4169E1">break</font>;
+<a name="line165">165: </a>            <font color="#4169E1">case</font> MP_SCOTCH_GPS:
+<a name="line166">166: </a>                <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">"g"</font>);
+<a name="line167">167: </a>                <font color="#4169E1">break</font>;
+<a name="line168">168: </a>            <font color="#4169E1">case</font> MP_SCOTCH_GR_GPS:
+<a name="line169">169: </a>                <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">"g|h"</font>);
+<a name="line170">170: </a>            }
+
+<a name="line172">172: </a>            <font color="#4169E1">switch</font> (scotch-&gt;local_method) {
+<a name="line173">173: </a>            <font color="#4169E1">case</font> MP_SCOTCH_KERNIGHAN_LIN:
+<a name="line174">174: </a>                <font color="#4169E1">if</font> (scotch-&gt;multilevel)
+<a name="line175">175: </a>                    <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">",low=f}"</font>);
+<a name="line176">176: </a>                <font color="#4169E1">else</font>
+<a name="line177">177: </a>                    <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">" f"</font>);
+<a name="line178">178: </a>                <font color="#4169E1">break</font>;
+<a name="line179">179: </a>            <font color="#4169E1">case</font> MP_SCOTCH_NONE:
+<a name="line180">180: </a>                <font color="#4169E1">if</font> (scotch-&gt;multilevel)
+<a name="line181">181: </a>                    <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">",asc=x}"</font>);
+<a name="line182">182: </a><strong><font color="#FF0000">            default:</font></strong>
+<a name="line183">183: </a>                <font color="#4169E1">break</font>;
+<a name="line184">184: </a>            }
+
+<a name="line186">186: </a>            <A href="../../../../../docs/manualpages/Sys/PetscStrcat.html#PetscStrcat">PetscStrcat</A>(strategy, <font color="#666666">" x}"</font>);
+<a name="line187">187: </a>        }
+
+<a name="line189">189: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, <font color="#666666">"strategy=[%s]\n"</font>, strategy);
+
+<a name="line191">191: </a>        SCOTCH_stratInit(&amp;stratptr);
+<a name="line192">192: </a>        <font color="#B22222">/*</font>
+
+<a name="line194">194: </a><font color="#B22222">          TODO: Correct this part</font>
+
+<a name="line196">196: </a><font color="#B22222">          Commented because this doesn't exists anymore </font>
+
+<a name="line198">198: </a><font color="#B22222">          </font>
+<a name="line199">199: </a><font color="#B22222">          SCOTCH_stratMap(&amp;stratptr, strategy);</font>
+<a name="line200">200: </a><font color="#B22222">        */</font>
+<a name="line201">201: </a>        <font color="#B22222">/* check for option mapping */</font>
+<a name="line202">202: </a>        <font color="#4169E1">if</font> (!scotch-&gt;map) {
+<a name="line203">203: </a>          <font color="#B22222">/* ********************************************</font>
+<a name="line204">204: </a><font color="#B22222">           *                                                *</font>
+<a name="line205">205: </a><font color="#B22222">           *        TODO: Correct this part                *</font>
+<a name="line206">206: </a><font color="#B22222">           *                                                *</font>
+<a name="line207">207: </a><font color="#B22222">           * Won't work with this tmp SCOTCH_Strat...        *</font>
+<a name="line208">208: </a><font color="#B22222">           *                                                *</font>
+<a name="line209">209: </a><font color="#B22222">           * I just modified it to make scotch compile, *</font>
+<a name="line210">210: </a><font color="#B22222">           * to be able to use PaStiX...                *</font>
+<a name="line211">211: </a><font color="#B22222">           *                                                *</font>
+<a name="line212">212: </a><font color="#B22222">           **********************************************/</font>
+<a name="line213">213: </a><font color="#A020F0">#if defined (DOES_NOT_COMPILE_DUE_TO_BROKEN_INTERFACE)</font>
+<a name="line214">214: </a>          SCOTCH_Strat tmp;
+<a name="line215">215: </a>          SCOTCH_graphPart((const SCOTCH_Graph *)&amp;grafptr,
+<a name="line216">216: </a>                                  (const SCOTCH_Num)    &amp;stratptr,
+<a name="line217">217: </a>                                  (const SCOTCH_Strat *)&amp;tmp,        <font color="#B22222">/* The Argument changed from scotch 3.04 it was part-&gt;n, */</font>
+<a name="line218">218: </a>                                  (SCOTCH_Num *)        parttab);
+<a name="line219">219: </a><font color="#A020F0">#else</font>
+<a name="line220">220: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Scotch interface currently broken"</font>);
+<a name="line221">221: </a><font color="#A020F0">#endif</font>
+<a name="line222">222: </a>            <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, <font color="#666666">"Partition simple without mapping\n"</font>);
+<a name="line223">223: </a>        } <font color="#4169E1">else</font> {
+<a name="line224">224: </a>            SCOTCH_Graph grafarch;
+<a name="line225">225: </a>            SCOTCH_Num *listtab;
+<a name="line226">226: </a>            SCOTCH_Num listnbr = 0;
+<a name="line227">227: </a>            SCOTCH_Arch archptr;        <font color="#B22222">/* file in scotch architecture format */</font>
+<a name="line228">228: </a>            SCOTCH_Strat archstrat;
+<a name="line229">229: </a>            int arch_total_size, *parttab_tmp,err;
+<a name="line230">230: </a>            int cpt;
+<a name="line231">231: </a>            char buf[256];
+<a name="line232">232: </a>            FILE *file1, *file2;
+<a name="line233">233: </a>            char host_buf[256];
+
+<a name="line235">235: </a>            <font color="#B22222">/* generate the graph that represents the arch */</font>
+<a name="line236">236: </a>            file1 = fopen(scotch-&gt;arch, <font color="#666666">"r"</font>);
+<a name="line237">237: </a>            <font color="#4169E1">if</font> (!file1) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_FILE_OPEN, <font color="#666666">"Scotch: unable to open architecture file %s"</font>, scotch-&gt;arch);
+
+<a name="line239">239: </a>            SCOTCH_graphInit(&amp;grafarch);
+<a name="line240">240: </a>            SCOTCH_graphLoad(&amp;grafarch, file1, baseval, 3);
+
+<a name="line242">242: </a>            SCOTCH_graphCheck(&amp;grafarch);
+<a name="line243">243: </a>            SCOTCH_graphSize(&amp;grafarch, &amp;arch_total_size, &amp;cpt);
+
+<a name="line245">245: </a>            err = fclose(file1);
+<a name="line246">246: </a>            <font color="#4169E1">if</font> (err) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SYS,<font color="#666666">"fclose() failed on file"</font>);
+
+<a name="line248">248: </a>            printf(<font color="#666666">"total size = %d\n"</font>, arch_total_size);
+
+<a name="line250">250: </a>            <font color="#B22222">/* generate the list of nodes currently working */</font>
+<a name="line251">251: </a>            <A href="../../../../../docs/manualpages/Sys/PetscGetHostName.html#PetscGetHostName">PetscGetHostName</A>(host_buf, 256);
+<a name="line252">252: </a>            <A href="../../../../../docs/manualpages/Sys/PetscStrlen.html#PetscStrlen">PetscStrlen</A>(host_buf, &amp;j);
+
+<a name="line254">254: </a>            file2 = fopen(scotch-&gt;host_list, <font color="#666666">"r"</font>);
+<a name="line255">255: </a>            <font color="#4169E1">if</font> (!file2) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_FILE_OPEN, <font color="#666666">"Scotch: unable to open host list file %s"</font>, scotch-&gt;host_list);
+
+<a name="line257">257: </a>            i = -1;
+<a name="line258">258: </a>            flg = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line259">259: </a>            <font color="#4169E1">while</font> (!feof(file2) &amp;&amp; !flg) {
+<a name="line260">260: </a>                i++;
+<a name="line261">261: </a>                fgets(buf, 256, file2);
+<a name="line262">262: </a>                <A href="../../../../../docs/manualpages/Sys/PetscStrncmp.html#PetscStrncmp">PetscStrncmp</A>(buf, host_buf, j, &amp;flg);
+<a name="line263">263: </a>            }
+<a name="line264">264: </a>            err = fclose(file2);
+<a name="line265">265: </a>            <font color="#4169E1">if</font> (err) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SYS,<font color="#666666">"fclose() failed on file"</font>);
+<a name="line266">266: </a>            <font color="#4169E1">if</font> (!flg) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_LIB, <font color="#666666">"Scotch: unable to find '%s' in host list file"</font>, host_buf);
+
+<a name="line268">268: </a>            listnbr = size;
+<a name="line269">269: </a>            <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(<font color="#4169E1">sizeof</font>(SCOTCH_Num) * listnbr, &amp;listtab);
+
+<a name="line271">271: </a>            <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allgather.html#MPI_Allgather">MPI_Allgather</A>(&amp;i, 1, MPI_INT, listtab, 1, MPI_INT, ((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm);
+
+<a name="line273">273: </a>            printf(<font color="#666666">"listnbr = %d, listtab = "</font>, listnbr);
+<a name="line274">274: </a>            <font color="#4169E1">for</font> (i = 0; i &lt; listnbr; i++)
+<a name="line275">275: </a>                printf(<font color="#666666">"%d "</font>, listtab[i]);
+
+<a name="line277">277: </a>            printf(<font color="#666666">"\n"</font>);
+<a name="line278">278: </a>            err = fflush(stdout);
+<a name="line279">279: </a>            <font color="#4169E1">if</font> (err) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SYS,<font color="#666666">"fflush() failed on file"</font>);
+
+<a name="line281">281: </a>            SCOTCH_stratInit(&amp;archstrat);
+<a name="line282">282: </a>            <font color="#B22222">/**************************************************************</font>
+<a name="line283">283: </a><font color="#B22222">             *                                                                  *</font>
+<a name="line284">284: </a><font color="#B22222">             * TODO: Correct this part                                          *</font>
+<a name="line285">285: </a><font color="#B22222">             *                                                                   *</font>
+<a name="line286">286: </a><font color="#B22222">             * Commented because this doesn't exists anymore                   *</font>
+<a name="line287">287: </a><font color="#B22222">             *                                                                   *</font>
+<a name="line288">288: </a><font color="#B22222">             * SCOTCH_stratBipart(&amp;archstrat, "fx"); *</font>
+<a name="line289">289: </a><font color="#B22222">             **************************************************************/</font>
+<a name="line290">290: </a>            SCOTCH_archInit(&amp;archptr);
+<a name="line291">291: </a>            SCOTCH_archBuild(&amp;archptr, &amp;grafarch, listnbr, listtab,
+<a name="line292">292: </a>                &amp;archstrat);
+
+<a name="line294">294: </a>            <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((mat-&gt;rmap-&gt;N) * <font color="#4169E1">sizeof</font>(int), &amp;parttab_tmp);
+<a name="line295">295: </a>            <font color="#B22222">/************************************************************************************</font>
+<a name="line296">296: </a><font color="#B22222">             *                                                                                        *</font>
+<a name="line297">297: </a><font color="#B22222">             * TODO: Correct this part                                                                *</font>
+<a name="line298">298: </a><font color="#B22222">             *                                                                                        *</font>
+<a name="line299">299: </a><font color="#B22222">             * Commented because this doesn't exists anymore                                         *</font>
+<a name="line300">300: </a><font color="#B22222">             *                                                                                        *</font>
+<a name="line301">301: </a><font color="#B22222">             * SCOTCH_mapInit(&amp;mappptr, &amp;grafptr, &amp;archptr, parttab_tmp);        *</font>
+<a name="line302">302: </a><font color="#B22222">             *                                                                                        *</font>
+<a name="line303">303: </a><font color="#B22222">             * SCOTCH_mapCompute(&amp;mappptr, &amp;stratptr);                        *</font>
+<a name="line304">304: </a><font color="#B22222">             *                                                                                         *</font>
+<a name="line305">305: </a><font color="#B22222">             * SCOTCH_mapView(&amp;mappptr, stdout);                                *</font>
+<a name="line306">306: </a><font color="#B22222">             ************************************************************************************/</font>
+<a name="line307">307: </a>            <font color="#B22222">/* now we have to set in the real parttab at the good place */</font>
+<a name="line308">308: </a>            <font color="#B22222">/* because the ranks order are different than position in */</font>
+<a name="line309">309: </a>            <font color="#B22222">/* the arch graph */</font>
+<a name="line310">310: </a>            <font color="#4169E1">for</font> (i = 0; i &lt; mat-&gt;rmap-&gt;N; i++) {
+<a name="line311">311: </a>                parttab[i] = parttab_tmp[i];
+<a name="line312">312: </a>            }
+
+<a name="line314">314: </a>            <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(listtab);
+<a name="line315">315: </a>            SCOTCH_archExit(&amp;archptr);
+<a name="line316">316: </a>            <font color="#B22222">/*************************************************</font>
+<a name="line317">317: </a><font color="#B22222">                * TODO: Correct this part                             *</font>
+<a name="line318">318: </a><font color="#B22222">             *                                                      *</font>
+<a name="line319">319: </a><font color="#B22222">             * Commented because this doesn't exists anymore *</font>
+<a name="line320">320: </a><font color="#B22222">             * SCOTCH_mapExit(&amp;mappptr);                     *</font>
+<a name="line321">321: </a><font color="#B22222">             *************************************************/</font>
+<a name="line322">322: </a>            SCOTCH_stratExit(&amp;archstrat);
+<a name="line323">323: </a>        }
+
+<a name="line325">325: </a>        <font color="#B22222">/* dump to mesg_log... */</font>
+<a name="line326">326: </a><font color="#A020F0">#ifdef PETSC_HAVE_UNISTD_H</font>
+<a name="line327">327: </a>        err = fflush(stdout);
+<a name="line328">328: </a>        <font color="#4169E1">if</font> (err) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SYS,<font color="#666666">"fflush() failed on stdout"</font>);
+
+<a name="line330">330: </a>        count = read(fd_pipe[0], scotch-&gt;mesg_log, (SIZE_LOG - 1) * <font color="#4169E1">sizeof</font>(char));
+<a name="line331">331: </a>        <font color="#4169E1">if</font> (count &lt; 0)
+<a name="line332">332: </a>            count = 0;
+<a name="line333">333: </a>        scotch-&gt;mesg_log[count] = 0;
+<a name="line334">334: </a>        close(1);
+<a name="line335">335: </a>        dup2(fd_stdout, 1);
+<a name="line336">336: </a>        close(fd_stdout);
+<a name="line337">337: </a>        close(fd_pipe[0]);
+<a name="line338">338: </a>        close(fd_pipe[1]);
+<a name="line339">339: </a><font color="#A020F0">#endif</font>
+
+<a name="line341">341: </a>        SCOTCH_graphExit(&amp;grafptr);
+<a name="line342">342: </a>        SCOTCH_stratExit(&amp;stratptr);
+<a name="line343">343: </a>    }
+
+<a name="line345">345: </a>    <font color="#4169E1">if</font> (ierr)
+<a name="line346">346: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_LIB, scotch-&gt;mesg_log);
+
+<a name="line348">348: </a>    <font color="#B22222">/* Creation of the index set */</font>
+
+<a name="line350">350: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, &amp;rank);
+<a name="line351">351: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, &amp;size);
+<a name="line352">352: </a>    nb_locals = mat-&gt;rmap-&gt;N / size;
+<a name="line353">353: </a>    locals = parttab + rank * nb_locals;
+<a name="line354">354: </a>    <font color="#4169E1">if</font> (rank &lt; mat-&gt;rmap-&gt;N % size) {
+<a name="line355">355: </a>        nb_locals++;
+<a name="line356">356: </a>        locals += rank;
+<a name="line357">357: </a>    } <font color="#4169E1">else</font>
+<a name="line358">358: </a>        locals += mat-&gt;rmap-&gt;N % size;
+<a name="line359">359: </a>    <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, nb_locals, locals, partitioning);
+
+<a name="line361">361: </a>    <font color="#B22222">/* destroying old objects */</font>
+<a name="line362">362: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(parttab);
+<a name="line363">363: </a>    <font color="#4169E1">if</font> (matSeq != mat) {
+<a name="line364">364: </a>        <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(matSeq);
+<a name="line365">365: </a>    }
+<a name="line366">366: </a>    <font color="#4169E1">if</font> (matMPI != mat) {
+<a name="line367">367: </a>        <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(matMPI);
+<a name="line368">368: </a>    }
+
+<a name="line370">370: </a>    <font color="#4169E1">return</font>(0);
+<a name="line371">371: </a>}
+
+
+<a name="line376">376: </a><strong><font color="#4169E1"><a name="MatPartitioningView_Scotch"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningView_Scotch(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, <A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line377">377: </a>{
+<a name="line378">378: </a>  MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+<a name="line379">379: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>         ierr;
+<a name="line380">380: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>            rank;
+<a name="line381">381: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>             iascii;
+<a name="line382">382: </a>
+<a name="line384">384: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)part)-&gt;comm, &amp;rank);
+<a name="line385">385: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) viewer, PETSC_VIEWER_ASCII, &amp;iascii);
+<a name="line386">386: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line387">387: </a>    <font color="#4169E1">if</font> (!rank &amp;&amp; scotch-&gt;mesg_log) {
+<a name="line388">388: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"%s\n"</font>, scotch-&gt;mesg_log);
+<a name="line389">389: </a>    }
+<a name="line390">390: </a>  } <font color="#4169E1">else</font> {
+<a name="line391">391: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(PETSC_ERR_SUP, <font color="#666666">"Viewer type %s not supported for this Scotch partitioner"</font>,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer)-&gt;type_name);
+<a name="line392">392: </a>  }
+<a name="line393">393: </a>  <font color="#4169E1">return</font>(0);
+<a name="line394">394: </a>}
+
+<a name="line398">398: </a><font color="#B22222">/*@</font>
+<a name="line399">399: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetGlobal.html#MatPartitioningScotchSetGlobal">MatPartitioningScotchSetGlobal</A> - Set method for global partitioning.</font>
+
+<a name="line401">401: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line402">402: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line403">403: </a><font color="#B22222">.  method - MP_SCOTCH_GREED, MP_SCOTCH_GIBBS or MP_SCOTCH_GR_GI (the combination of two)</font>
+<a name="line404">404: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line406">406: </a><font color="#B22222">@*/</font>
+<a name="line407">407: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetGlobal"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetGlobal.html#MatPartitioningScotchSetGlobal">MatPartitioningScotchSetGlobal</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part,</font></strong>
+<a name="line408">408: </a><strong><font color="#4169E1">    MPScotchGlobalType global)</font></strong>
+<a name="line409">409: </a>{
+<a name="line410">410: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line414">414: </a>    <font color="#4169E1">switch</font> (global) {
+<a name="line415">415: </a>    <font color="#4169E1">case</font> MP_SCOTCH_GREEDY:
+<a name="line416">416: </a>    <font color="#4169E1">case</font> MP_SCOTCH_GPS:
+<a name="line417">417: </a>    <font color="#4169E1">case</font> MP_SCOTCH_GR_GPS:
+<a name="line418">418: </a>        scotch-&gt;global_method = global;
+<a name="line419">419: </a>        <font color="#4169E1">break</font>;
+<a name="line420">420: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line421">421: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP, <font color="#666666">"Scotch: Unknown or unsupported option"</font>);
+<a name="line422">422: </a>    }
+
+<a name="line424">424: </a>    <font color="#4169E1">return</font>(0);
+<a name="line425">425: </a>}
+
+<a name="line429">429: </a><font color="#B22222">/*@</font>
+<a name="line430">430: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A> - Set the coarse level </font>
+<a name="line431">431: </a><font color="#B22222">    </font>
+<a name="line432">432: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line433">433: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line434">434: </a><font color="#B22222">.  level - the coarse level in range [0.0,1.0]</font>
+
+<a name="line436">436: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line438">438: </a><font color="#B22222">@*/</font>
+<a name="line439">439: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetCoarseLevel"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> level)</font></strong>
+<a name="line440">440: </a>{
+<a name="line441">441: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line445">445: </a>    <font color="#4169E1">if</font> (level &lt; 0 || level &gt; 1.0) {
+<a name="line446">446: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_OUTOFRANGE,
+<a name="line447">447: </a>            <font color="#666666">"Scocth: level of coarsening out of range [0.0-1.0]"</font>);
+<a name="line448">448: </a>    } <font color="#4169E1">else</font> {
+<a name="line449">449: </a>      <font color="#B22222">/* ********************************************</font>
+<a name="line450">450: </a><font color="#B22222">       *                                            *</font>
+<a name="line451">451: </a><font color="#B22222">       *        TODO: Correct this part                    *</font>
+<a name="line452">452: </a><font color="#B22222">       *                                            *</font>
+<a name="line453">453: </a><font color="#B22222">       * Won't work with this nbvxtcoarsed          *</font>
+<a name="line454">454: </a><font color="#B22222">       *                                            *</font>
+<a name="line455">455: </a><font color="#B22222">       * I just modified it to make scotch compile, *</font>
+<a name="line456">456: </a><font color="#B22222">       * to be able to use PaStiX...                    *</font>
+<a name="line457">457: </a><font color="#B22222">       *                                            *</font>
+<a name="line458">458: </a><font color="#B22222">       **********************************************/</font>
+<a name="line459">459: </a>      scotch-&gt;nbvtxcoarsed = 0;
+<a name="line460">460: </a>      <font color="#B22222">/* with scotch 3.0.4 it was : scotch-&gt;nbvtxcoarsed = (int)(part-&gt;adj-&gt;N * level); */</font>
+<a name="line461">461: </a>    }
+<a name="line462">462: </a>    <font color="#4169E1">if</font> (scotch-&gt;nbvtxcoarsed &lt; 20)
+<a name="line463">463: </a>        scotch-&gt;nbvtxcoarsed = 20;
+
+<a name="line465">465: </a>    <font color="#4169E1">return</font>(0);
+<a name="line466">466: </a>}
+
+<a name="line470">470: </a><font color="#B22222">/*@C</font>
+<a name="line471">471: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetStrategy.html#MatPartitioningScotchSetStrategy">MatPartitioningScotchSetStrategy</A> - Set the strategy to be used by Scotch.</font>
+<a name="line472">472: </a><font color="#B22222">    This is an alternative way of specifying the global method, the local</font>
+<a name="line473">473: </a><font color="#B22222">    method, the coarse level and the multilevel option.</font>
+<a name="line474">474: </a><font color="#B22222">    </font>
+<a name="line475">475: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line476">476: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line477">477: </a><font color="#B22222">.  level - the strategy in Scotch format. Check Scotch documentation.</font>
+
+<a name="line479">479: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line481">481: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetGlobal.html#MatPartitioningScotchSetGlobal">MatPartitioningScotchSetGlobal</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetLocal.html#MatPartitioningScotchSetLocal">MatPartitioningScotchSetLocal</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A>(), </font>
+<a name="line482">482: </a><font color="#B22222">@*/</font>
+<a name="line483">483: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetStrategy"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetStrategy.html#MatPartitioningScotchSetStrategy">MatPartitioningScotchSetStrategy</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, char *strat)</font></strong>
+<a name="line484">484: </a>{
+<a name="line485">485: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line489">489: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;strategy, strat);
+<a name="line490">490: </a>    <font color="#4169E1">return</font>(0);
+<a name="line491">491: </a>}
+
+
+<a name="line496">496: </a><font color="#B22222">/*@</font>
+<a name="line497">497: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetLocal.html#MatPartitioningScotchSetLocal">MatPartitioningScotchSetLocal</A> - Set method for local partitioning.</font>
+
+<a name="line499">499: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line500">500: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line501">501: </a><font color="#B22222">.  method - MP_SCOTCH_KERNIGHAN_LIN or MP_SCOTCH_NONE</font>
+
+<a name="line503">503: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line505">505: </a><font color="#B22222">@*/</font>
+<a name="line506">506: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetLocal"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetLocal.html#MatPartitioningScotchSetLocal">MatPartitioningScotchSetLocal</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, MPScotchLocalType local)</font></strong>
+<a name="line507">507: </a>{
+<a name="line508">508: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line512">512: </a>    <font color="#4169E1">switch</font> (local) {
+<a name="line513">513: </a>    <font color="#4169E1">case</font> MP_SCOTCH_KERNIGHAN_LIN:
+<a name="line514">514: </a>    <font color="#4169E1">case</font> MP_SCOTCH_NONE:
+<a name="line515">515: </a>        scotch-&gt;local_method = local;
+<a name="line516">516: </a>        <font color="#4169E1">break</font>;
+<a name="line517">517: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line518">518: </a>        <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_ARG_CORRUPT, <font color="#666666">"Scotch: Unknown or unsupported option"</font>);
+<a name="line519">519: </a>    }
+
+<a name="line521">521: </a>    <font color="#4169E1">return</font>(0);
+<a name="line522">522: </a>}
+
+<a name="line526">526: </a><font color="#B22222">/*@C</font>
+<a name="line527">527: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A> - Specify the file that describes the</font>
+<a name="line528">528: </a><font color="#B22222">     architecture used for mapping. The format of this file is documented in</font>
+<a name="line529">529: </a><font color="#B22222">     the Scotch manual.</font>
+
+<a name="line531">531: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line532">532: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line533">533: </a><font color="#B22222">.  file - the name of file</font>
+<a name="line534">534: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line536">536: </a><font color="#B22222">  Note:</font>
+<a name="line537">537: </a><font color="#B22222">  If the name is not set, then the default "archgraph.src" is used.</font>
+
+<a name="line539">539: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>(),<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>()</font>
+<a name="line540">540: </a><font color="#B22222">@*/</font>
+<a name="line541">541: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetArch"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, const char *filename)</font></strong>
+<a name="line542">542: </a>{
+<a name="line543">543: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line547">547: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;arch, filename);
+
+<a name="line549">549: </a>    <font color="#4169E1">return</font>(0);
+<a name="line550">550: </a>}
+
+<a name="line554">554: </a><font color="#B22222">/*@C</font>
+<a name="line555">555: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A> - Specify host list file for mapping.</font>
+
+<a name="line557">557: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line558">558: </a><font color="#B22222">.  part - the partitioning context</font>
+<a name="line559">559: </a><font color="#B22222">.  file - the name of file</font>
+
+<a name="line561">561: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line563">563: </a><font color="#B22222">  Notes:</font>
+<a name="line564">564: </a><font color="#B22222">  The file must consist in a list of hostnames (one per line). These hosts</font>
+<a name="line565">565: </a><font color="#B22222">  are the ones referred to in the architecture file (see </font>
+<a name="line566">566: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>()): the first host corresponds to index 0,</font>
+<a name="line567">567: </a><font color="#B22222">  the second one to index 1, and so on.</font>
+<a name="line568">568: </a><font color="#B22222">  </font>
+<a name="line569">569: </a><font color="#B22222">  If the name is not set, then the default "host_list" is used.</font>
+<a name="line570">570: </a><font color="#B22222">  </font>
+<a name="line571">571: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>(), <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>()</font>
+<a name="line572">572: </a><font color="#B22222">@*/</font>
+<a name="line573">573: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetHostList"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part, const char *filename)</font></strong>
+<a name="line574">574: </a>{
+<a name="line575">575: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line579">579: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;host_list, filename);
+
+<a name="line581">581: </a>    <font color="#4169E1">return</font>(0);
+<a name="line582">582: </a>}
+
+<a name="line586">586: </a><font color="#B22222">/*@</font>
+<a name="line587">587: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A> - Activates multilevel partitioning.</font>
+
+<a name="line589">589: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line590">590: </a><font color="#B22222">.  part - the partitioning context</font>
+
+<a name="line592">592: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line594">594: </a><font color="#B22222">@*/</font>
+<a name="line595">595: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetMultilevel"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line596">596: </a>{
+<a name="line597">597: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line601">601: </a>    scotch-&gt;multilevel = 1;
+
+<a name="line603">603: </a>    <font color="#4169E1">return</font>(0);
+<a name="line604">604: </a>}
+
+
+<a name="line609">609: </a><font color="#B22222">/*@</font>
+<a name="line610">610: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A> - Activates architecture mapping for the </font>
+<a name="line611">611: </a><font color="#B22222">     partitioning algorithm. Architecture mapping tries to enhance the quality</font>
+<a name="line612">612: </a><font color="#B22222">     of partitioning by using network topology information. </font>
+
+<a name="line614">614: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line615">615: </a><font color="#B22222">.  part - the partitioning context</font>
+
+<a name="line617">617: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line619">619: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>(),<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>()</font>
+<a name="line620">620: </a><font color="#B22222">@*/</font>
+<a name="line621">621: </a><strong><font color="#4169E1"><a name="MatPartitioningScotchSetMapping"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line622">622: </a>{
+<a name="line623">623: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+
+
+<a name="line627">627: </a>    scotch-&gt;map = 1;
+
+<a name="line629">629: </a>    <font color="#4169E1">return</font>(0);
+<a name="line630">630: </a>}
+
+<a name="line634">634: </a><strong><font color="#4169E1"><a name="MatPartitioningSetFromOptions_Scotch"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningSetFromOptions_Scotch(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line635">635: </a>{
+<a name="line637">637: </a>    <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A> flag;
+<a name="line638">638: </a>    char name[PETSC_MAX_PATH_LEN];
+<a name="line639">639: </a>    int i;
+<a name="line640">640: </a>    <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> r;
+
+<a name="line642">642: </a>    const char *global[] = { <font color="#666666">"greedy"</font>, <font color="#666666">"gps"</font>, <font color="#666666">"gr_gps"</font> };
+<a name="line643">643: </a>    const char *local[] = { <font color="#666666">"kernighan-lin"</font>, <font color="#666666">"none"</font> };
+
+<a name="line646">646: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"Set Scotch partitioning options"</font>);
+
+<a name="line648">648: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-mat_partitioning_scotch_global"</font>,
+<a name="line649">649: </a>        <font color="#666666">"Global method to use"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetGlobal.html#MatPartitioningScotchSetGlobal">MatPartitioningScotchSetGlobal</A>"</font>, global, 3,
+<a name="line650">650: </a>        global[0], &amp;i, &amp;flag);
+<a name="line651">651: </a>    <font color="#4169E1">if</font> (flag) {
+<a name="line652">652: </a>      <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetGlobal.html#MatPartitioningScotchSetGlobal">MatPartitioningScotchSetGlobal</A>(part, (MPScotchGlobalType)i);
+<a name="line653">653: </a>    }
+
+<a name="line655">655: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-mat_partitioning_scotch_local"</font>,
+<a name="line656">656: </a>        <font color="#666666">"Local method to use"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetLocal.html#MatPartitioningScotchSetLocal">MatPartitioningScotchSetLocal</A>"</font>, local, 2,
+<a name="line657">657: </a>        local[0], &amp;i, &amp;flag);
+<a name="line658">658: </a>    <font color="#4169E1">if</font> (flag) {
+<a name="line659">659: </a>      <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetLocal.html#MatPartitioningScotchSetLocal">MatPartitioningScotchSetLocal</A>(part, (MPScotchLocalType)i);
+<a name="line660">660: </a>    }
+
+<a name="line662">662: </a>    flag = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line663">663: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsTruth.html#PetscOptionsTruth">PetscOptionsTruth</A>(<font color="#666666">"-mat_partitioning_scotch_mapping"</font>, <font color="#666666">"Use mapping"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>"</font>, flag,&amp;flag,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line664">664: </a>    <font color="#4169E1">if</font> (flag) {
+<a name="line665">665: </a>      <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>(part);
+<a name="line666">666: </a>    }
+
+<a name="line668">668: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsString.html#PetscOptionsString">PetscOptionsString</A>(<font color="#666666">"-mat_partitioning_scotch_arch"</font>,
+<a name="line669">669: </a>        <font color="#666666">"architecture file in scotch format"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>"</font>,
+<a name="line670">670: </a>        <font color="#666666">"archgraph.src"</font>, name, PETSC_MAX_PATH_LEN, &amp;flag);
+<a name="line671">671: </a>    <font color="#4169E1">if</font> (flag)
+<a name="line672">672: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>(part, name);
+
+<a name="line674">674: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsString.html#PetscOptionsString">PetscOptionsString</A>(<font color="#666666">"-mat_partitioning_scotch_hosts"</font>,
+<a name="line675">675: </a>        <font color="#666666">"host list filename"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>"</font>,
+<a name="line676">676: </a>        <font color="#666666">"host_list"</font>, name, PETSC_MAX_PATH_LEN, &amp;flag);
+<a name="line677">677: </a>    <font color="#4169E1">if</font> (flag)
+<a name="line678">678: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>(part, name);
+
+<a name="line680">680: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-mat_partitioning_scotch_coarse_level"</font>,
+<a name="line681">681: </a>        <font color="#666666">"coarse level"</font>, <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A>"</font>, 0, &amp;r,
+<a name="line682">682: </a>        &amp;flag);
+<a name="line683">683: </a>    <font color="#4169E1">if</font> (flag)
+<a name="line684">684: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A>(part, r);
+
+<a name="line686">686: </a>    flag = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line687">687: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsTruth.html#PetscOptionsTruth">PetscOptionsTruth</A>(<font color="#666666">"-mat_partitioning_scotch_mul"</font>, <font color="#666666">"Use coarse level"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A>"</font>, flag,&amp;flag,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line688">688: </a>    <font color="#4169E1">if</font> (flag) {
+<a name="line689">689: </a>      <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A>(part);
+<a name="line690">690: </a>    }
+
+<a name="line692">692: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsString.html#PetscOptionsString">PetscOptionsString</A>(<font color="#666666">"-mat_partitioning_scotch_strategy"</font>,
+<a name="line693">693: </a>        <font color="#666666">"Scotch strategy string"</font>,
+<a name="line694">694: </a>        <font color="#666666">"<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetStrategy.html#MatPartitioningScotchSetStrategy">MatPartitioningScotchSetStrategy</A>"</font>, <font color="#666666">""</font>, name, PETSC_MAX_PATH_LEN,
+<a name="line695">695: </a>        &amp;flag);
+<a name="line696">696: </a>    <font color="#4169E1">if</font> (flag)
+<a name="line697">697: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetStrategy.html#MatPartitioningScotchSetStrategy">MatPartitioningScotchSetStrategy</A>(part, name);
+
+<a name="line699">699: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line700">700: </a>    <font color="#4169E1">return</font>(0);
+<a name="line701">701: </a>}
+
+<a name="line705">705: </a><strong><font color="#4169E1"><a name="MatPartitioningDestroy_Scotch"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatPartitioningDestroy_Scotch(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line706">706: </a>{
+<a name="line707">707: </a>    MatPartitioning_Scotch *scotch = (MatPartitioning_Scotch *) part-&gt;data;
+<a name="line708">708: </a>    <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>         ierr;
+
+<a name="line711">711: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(scotch-&gt;mesg_log);
+<a name="line712">712: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(scotch);
+<a name="line713">713: </a>    <font color="#4169E1">return</font>(0);
+<a name="line714">714: </a>}
+
+
+<a name="line717">717: </a><font color="#B22222">/*MC</font>
+<a name="line718">718: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/MatOrderings/MAT_PARTITIONING_SCOTCH.html#MAT_PARTITIONING_SCOTCH">MAT_PARTITIONING_SCOTCH</A> - Creates a partitioning context via the external package SCOTCH.</font>
+
+<a name="line720">720: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A></font>
+
+<a name="line722">722: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line723">723: </a><font color="#B22222">.  part - the partitioning context</font>
+
+<a name="line725">725: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line726">726: </a><font color="#B22222">+  -mat_partitioning_scotch_global &lt;greedy&gt; (one of) greedy gps gr_gps</font>
+<a name="line727">727: </a><font color="#B22222">.  -mat_partitioning_scotch_local &lt;kernighan-lin&gt; (one of) kernighan-lin none</font>
+<a name="line728">728: </a><font color="#B22222">.  -mat_partitioning_scotch_mapping: Use mapping (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMapping.html#MatPartitioningScotchSetMapping">MatPartitioningScotchSetMapping</A>)</font>
+<a name="line729">729: </a><font color="#B22222">.  -mat_partitioning_scotch_arch &lt;archgraph.src&gt;: architecture file in scotch format (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetArch.html#MatPartitioningScotchSetArch">MatPartitioningScotchSetArch</A>)</font>
+<a name="line730">730: </a><font color="#B22222">.  -mat_partitioning_scotch_hosts &lt;host_list&gt;: host list filename (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetHostList.html#MatPartitioningScotchSetHostList">MatPartitioningScotchSetHostList</A>)</font>
+<a name="line731">731: </a><font color="#B22222">.  -mat_partitioning_scotch_coarse_level &lt;0&gt;: coarse level (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetCoarseLevel.html#MatPartitioningScotchSetCoarseLevel">MatPartitioningScotchSetCoarseLevel</A>)</font>
+<a name="line732">732: </a><font color="#B22222">.  -mat_partitioning_scotch_mul: Use coarse level (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetMultilevel.html#MatPartitioningScotchSetMultilevel">MatPartitioningScotchSetMultilevel</A>)</font>
+<a name="line733">733: </a><font color="#B22222">-  -mat_partitioning_scotch_strategy &lt;&gt;: Scotch strategy string (<A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningScotchSetStrategy.html#MatPartitioningScotchSetStrategy">MatPartitioningScotchSetStrategy</A>)</font>
+
+<a name="line735">735: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line737">737: </a><font color="#B22222">   Notes: See http://www.labri.fr/Perso/~pelegrin/scotch/</font>
+
+<a name="line739">739: </a><font color="#B22222">.keywords: Partitioning, create, context</font>
+
+<a name="line741">741: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningSetType.html#MatPartitioningSetType">MatPartitioningSetType</A>(), <A href="../../../../../docs/manualpages/Mat/MatPartitioningType.html#MatPartitioningType">MatPartitioningType</A></font>
+
+<a name="line743">743: </a><font color="#B22222">M*/</font>
+
+<a name="line748">748: </a><strong><font color="#4169E1"><a name="MatPartitioningCreate_Scotch"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  MatPartitioningCreate_Scotch(<A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A> part)</font></strong>
+<a name="line749">749: </a>{
+<a name="line751">751: </a>    MatPartitioning_Scotch *scotch;
+
+<a name="line754">754: </a>    <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(PETSC_ERR_SUP,<font color="#666666">"Sorry, the PETSc interface to scotch has not been updated to the latest Scotch version"</font>);
+<a name="line755">755: </a>    PetscNewLog(part,MatPartitioning_Scotch, &amp;scotch);
+<a name="line756">756: </a>    part-&gt;data = (void*) scotch;
+
+<a name="line758">758: </a>    scotch-&gt;map = 0;
+<a name="line759">759: </a>    scotch-&gt;global_method = MP_SCOTCH_GR_GPS;
+<a name="line760">760: </a>    scotch-&gt;local_method = MP_SCOTCH_KERNIGHAN_LIN;
+<a name="line761">761: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;arch, <font color="#666666">"archgraph.src"</font>);
+<a name="line762">762: </a>    scotch-&gt;nbvtxcoarsed = 200;
+<a name="line763">763: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;strategy, <font color="#666666">""</font>);
+<a name="line764">764: </a>    scotch-&gt;multilevel = 0;
+<a name="line765">765: </a>    scotch-&gt;mesg_log = NULL;
+
+<a name="line767">767: </a>    <A href="../../../../../docs/manualpages/Sys/PetscStrcpy.html#PetscStrcpy">PetscStrcpy</A>(scotch-&gt;host_list, <font color="#666666">"host_list"</font>);
+
+<a name="line769">769: </a>    part-&gt;ops-&gt;apply = MatPartitioningApply_Scotch;
+<a name="line770">770: </a>    part-&gt;ops-&gt;view = MatPartitioningView_Scotch;
+<a name="line771">771: </a>    part-&gt;ops-&gt;destroy = MatPartitioningDestroy_Scotch;
+<a name="line772">772: </a>    part-&gt;ops-&gt;setfromoptions = MatPartitioningSetFromOptions_Scotch;
+
+<a name="line774">774: </a>    <font color="#4169E1">return</font>(0);
+<a name="line775">775: </a>}
+
+</pre>
+</body>
+
+</html>

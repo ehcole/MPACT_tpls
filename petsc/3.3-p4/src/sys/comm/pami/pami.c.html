@@ -1,0 +1,330 @@
+<center><a href="pami.c">Actual source code: pami.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/sys/comm/pami/pami.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T15:53:09+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a><font color="#A020F0">#include &lt;petscsys.h&gt;</font>
+<a name="line2">  2: </a><font color="#A020F0">#include &lt;stdlib.h&gt;</font>
+<a name="line3">  3: </a><font color="#A020F0">#include &lt;string.h&gt;</font>
+<a name="line4">  4: </a><font color="#A020F0">#include &lt;unistd.h&gt;</font>
+<a name="line5">  5: </a><font color="#A020F0">#include &lt;pthread.h&gt;</font>
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;pami.h&gt;</font>
+<a name="line7">  7: </a><font color="#A020F0">#if defined(PETSC_HAVE_PTHREAD_H)</font>
+<a name="line8">  8: </a><font color="#A020F0">#  include &lt;pthread.h&gt;</font>
+<a name="line9">  9: </a><font color="#A020F0">#elif defined(PETSC_HAVE_WINPTHREADS_H)</font>
+<a name="line10"> 10: </a><font color="#A020F0">#  include </font><font color="#666666">"winpthreads.h"</font><font color="#A020F0">       </font><font color="#B22222">/* http://locklessinc.com/downloads/winpthreads.h */</font><font color="#A020F0"></font>
+<a name="line11"> 11: </a><font color="#A020F0">#else</font>
+<a name="line12"> 12: </a><font color="#A020F0">#  error Need pthreads to use this PAMI interface</font>
+<a name="line13"> 13: </a><font color="#A020F0">#endif</font>
+
+<a name="line15"> 15: </a><font color="#B22222">/* a useful link for PPC memory ordering issues:</font>
+<a name="line16"> 16: </a><font color="#B22222"> *   http://www.rdrop.com/users/paulmck/scalability/paper/N2745r.2009.02.22a.html</font>
+<a name="line17"> 17: </a><font color="#B22222"> *</font>
+<a name="line18"> 18: </a><font color="#B22222"> * lwsync: orders L-L, S-S, L-S, but *not* S-L (i.e. gives x86-ish ordering)</font>
+<a name="line19"> 19: </a><font color="#B22222"> * eieio: orders S-S (but only for cacheable memory, not for MMIO)</font>
+<a name="line20"> 20: </a><font color="#B22222"> * sync: totally orders memops</font>
+<a name="line21"> 21: </a><font color="#B22222"> * isync: force all preceeding insns to appear complete before starting</font>
+<a name="line22"> 22: </a><font color="#B22222"> *        subsequent insns, but w/o cumulativity (very confusing)</font>
+<a name="line23"> 23: </a><font color="#B22222"> */</font>
+<a name="line24"> 24: </a><strong><font color="#228B22">#define PetscReadOnce(type,val) (*(volatile type *)&amp;val)</font></strong>
+<a name="line25"> 25: </a><strong><font color="#228B22">#define PetscCompilerBarrier()   __asm__ __volatile__  ( </font><font color="#666666">""</font><font color="#228B22">  ::: </font><font color="#666666">"memory"</font><font color="#228B22"> )</font></strong>
+<a name="line26"> 26: </a><strong><font color="#228B22">#define PetscMemoryBarrierWrite() __asm__ __volatile__  ( </font><font color="#666666">"eieio"</font><font color="#228B22">  ::: </font><font color="#666666">"memory"</font><font color="#228B22"> )</font></strong>
+<a name="line27"> 27: </a><strong><font color="#228B22">#define PetscMemoryBarrierReadWrite() __asm__ __volatile__  ( </font><font color="#666666">"sync"</font><font color="#228B22">  ::: </font><font color="#666666">"memory"</font><font color="#228B22"> )</font></strong>
+<a name="line28"> 28: </a><strong><font color="#228B22">#define PetscMemoryBarrierRead() __asm__ __volatile__  ( </font><font color="#666666">"lwsync"</font><font color="#228B22"> ::: </font><font color="#666666">"memory"</font><font color="#228B22"> )</font></strong>
+
+<a name="line30"> 30: </a><font color="#4169E1">typedef int PetscPAMIInt;</font>
+<a name="line31"> 31: </a><font color="#B22222">/* The context for the MPI generalized request and the PAMI callback */</font>
+<a name="line32"> 32: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line33"> 33: </a>  pami_context_t pamictx;       <font color="#B22222">/* only valid if not using comm threads, in which case the Grequest_poll_function will advance the context */</font>
+<a name="line34"> 34: </a>  MPI_Request request;
+<a name="line35"> 35: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> done;
+<a name="line36"> 36: </a>} PetscPAMIReqCtx;
+<a name="line37"> 37: </a><strong><font color="#4169E1">typedef <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*PetscThreadFunction)(pami_context_t,PetscPAMIReqCtx*)</font></strong>;
+<a name="line38"> 38: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line39"> 39: </a>  PetscThreadFunction func;
+<a name="line40"> 40: </a>  pami_context_t pamictx;
+<a name="line41"> 41: </a>  PetscPAMIReqCtx *reqctx;
+<a name="line42"> 42: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> active;               <font color="#B22222">/* FALSE when available to compute thread to add a task */</font>
+<a name="line43"> 43: </a>} PetscPAMIThreadContext;
+
+<a name="line45"> 45: </a>static <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> pami_initialized;
+<a name="line46"> 46: </a>static pami_client_t pami_client;
+<a name="line47"> 47: </a>static pami_geometry_t pami_geom_world;
+<a name="line48"> 48: </a><font color="#4169E1"><a name="PetscPAMI"></a>struct PetscPAMI </font>{
+<a name="line49"> 49: </a>  PetscPAMIInt num_contexts;
+<a name="line50"> 50: </a>  pami_context_t *contexts;
+<a name="line51"> 51: </a>  pthread_t thread;
+<a name="line52"> 52: </a>  PetscPAMIThreadContext threadctx;
+<a name="line53"> 53: </a>  pami_algorithm_t allreduce_alg;
+<a name="line54"> 54: </a>} pami;
+
+<a name="line56"> 56: </a>static MPIX_Grequest_class grequest_class; <font color="#B22222">/* no way to free an MPIX_Grequest_class */</font>
+
+<a name="line58"> 58: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMITypeFromMPI(MPI_Datatype,pami_type_t*)</font></strong>;
+<a name="line59"> 59: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIOpFromMPI(MPI_Op,pami_data_function*)</font></strong>;
+<a name="line60"> 60: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIInitialize(void)</font></strong>;
+<a name="line61"> 61: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIFinalize(void)</font></strong>;
+
+
+<a name="line64"> 64: </a><strong><font color="#228B22">#define PAMICHK(perr,func) do {                 \</font></strong>
+<a name="line65"> 65: </a><strong><font color="#228B22">    if ((perr) != PAMI_SUCCESS) <A href="../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,PETSC_ERR_LIB,</font><font color="#666666">"%s failed with error code %d"</font><font color="#228B22">,#func,(int)(perr)); \</font></strong>
+<a name="line66"> 66: </a><strong><font color="#228B22">  } while (0)</font></strong>
+
+<a name="line68"> 68: </a><strong><font color="#4169E1"><a name="Spin"></a>static void Spin(void)</font></strong> { <font color="#4169E1">return</font>; }
+
+<a name="line72"> 72: </a><strong><font color="#4169E1"><a name="PetscPAMIGetAlgorithm"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIGetAlgorithm(pami_geometry_t world,pami_xfer_type_t xfertype,pami_algorithm_t *alg,pami_metadata_t *meta)</font></strong>
+<a name="line73"> 73: </a>{
+<a name="line75"> 75: </a>  pami_result_t perr;
+<a name="line76"> 76: </a>  size_t numalgs[2];
+<a name="line77"> 77: </a>  pami_algorithm_t safealgs[3],fastalgs[1];
+<a name="line78"> 78: </a>  pami_metadata_t safemeta[3],fastmeta[1];
+
+<a name="line81"> 81: </a>  perr = PAMI_Geometry_algorithms_num(world,xfertype,numalgs);PAMICHK(perr,PAMI_Geometry_algorithms_num);
+<a name="line82"> 82: </a>  numalgs[0] = PetscMin(3,numalgs[0]); <font color="#B22222">/* Query the first few safe algorithms */</font>
+<a name="line83"> 83: </a>  numalgs[1] = PetscMin(1,numalgs[1]); <font color="#B22222">/* I don't actually care about unsafe algorithms, but query one anyway just for giggles */</font>
+<a name="line84"> 84: </a>  perr = PAMI_Geometry_algorithms_query(world,xfertype,safealgs,safemeta,numalgs[0],fastalgs,fastmeta,numalgs[1]);PAMICHK(perr,PAMI_Geometry_algorithms_query);
+<a name="line85"> 85: </a>  <font color="#4169E1">if</font> (alg) *alg = safealgs[0];
+<a name="line86"> 86: </a>  <font color="#4169E1">if</font> (meta) *meta = safemeta[0];
+<a name="line87"> 87: </a>  <font color="#4169E1">return</font>(0);
+<a name="line88"> 88: </a>}
+
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="PetscPAMIThreadExit"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIThreadExit(pami_context_t pctx,PetscPAMIReqCtx *reqctx)</font></strong>
+<a name="line91"> 91: </a>{
+<a name="line92"> 92: </a>  pthread_exit(0);
+<a name="line93"> 93: </a>  <font color="#4169E1">return</font> 0;                     <font color="#B22222">/* not actually reached */</font>
+<a name="line94"> 94: </a>}
+<a name="line95"> 95: </a><strong><font color="#4169E1"><a name="PetscPAMIThreadPoll"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIThreadPoll(pami_context_t pctx,PetscPAMIReqCtx *reqctx)</font></strong>
+<a name="line96"> 96: </a>{
+<a name="line97"> 97: </a>  pami_result_t perr;
+<a name="line98"> 98: </a>  <font color="#4169E1">while</font> (!PetscReadOnce(<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>,reqctx-&gt;done)) {
+<a name="line99"> 99: </a>    perr = PAMI_Context_advance(pctx,1);PAMICHK(perr,PAMI_Context_advance);
+<a name="line100">100: </a>  }
+<a name="line101">101: </a>  <font color="#4169E1">return</font> 0;
+<a name="line102">102: </a>}
+
+<a name="line104">104: </a><strong><font color="#4169E1"><a name="PetscPAMIPthread"></a>static void *PetscPAMIPthread(void *args)</font></strong>
+<a name="line105">105: </a>{
+<a name="line106">106: </a>  PetscPAMIThreadContext *threadctx = (PetscPAMIThreadContext*)args;
+<a name="line107">107: </a>  <font color="#4169E1">while</font> (1) {
+<a name="line109">109: </a>    <font color="#4169E1">while</font> (!PetscReadOnce(<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>,threadctx-&gt;active)) Spin();
+<a name="line110">110: </a>    threadctx-&gt;func(threadctx-&gt;pamictx,threadctx-&gt;reqctx);CHKERRABORT(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,ierr);
+<a name="line111">111: </a>    threadctx-&gt;active = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line112">112: </a>  }
+<a name="line113">113: </a>}
+<a name="line116">116: </a><strong><font color="#4169E1"><a name="PetscPAMIThreadSend"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIThreadSend(PetscPAMIThreadContext *threadctx,PetscThreadFunction func,pami_context_t pamictx,PetscPAMIReqCtx *reqctx)</font></strong>
+<a name="line117">117: </a>{
+
+<a name="line121">121: </a>  <font color="#4169E1">while</font> (PetscReadOnce(<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>,threadctx-&gt;active)) Spin();
+<a name="line122">122: </a>  threadctx-&gt;func = func;
+<a name="line123">123: </a>  threadctx-&gt;pamictx = pamictx;
+<a name="line124">124: </a>  threadctx-&gt;reqctx = reqctx;
+<a name="line125">125: </a>  PetscMemoryBarrierWrite();
+<a name="line126">126: </a>  threadctx-&gt;active = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line127">127: </a>  <font color="#4169E1">return</font>(0);
+<a name="line128">128: </a>}
+
+<a name="line132">132: </a><strong><font color="#4169E1"><a name="PetscPAMIInitialize"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIInitialize(void)</font></strong>
+<a name="line133">133: </a>{
+<a name="line134">134: </a>  pami_result_t        perr;
+<a name="line135">135: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>       ierr;
+<a name="line136">136: </a>  pami_configuration_t config;
+<a name="line137">137: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>            thread;
+<a name="line138">138: </a>  const char           *clientname = <font color="#666666">"PETSC"</font>; <font color="#B22222">/* --env PAMI_NUMCLIENTS=2:PAMI_CLIENTNAMES=MPI,PETSC */</font>
+
+<a name="line141">141: </a>  <font color="#4169E1">if</font> (pami_initialized) <font color="#4169E1">return</font>(0);
+<a name="line142">142: </a>  perr = PAMI_Client_create(clientname,&amp;pami_client,0,0);PAMICHK(perr,PAMI_Client_create);
+
+<a name="line144">144: </a>  config.name = PAMI_CLIENT_NUM_CONTEXTS;
+<a name="line145">145: </a>  perr = PAMI_Client_query(pami_client,&amp;config,1);PAMICHK(perr,PAMI_Client_query);
+<a name="line146">146: </a>  pami.num_contexts = PetscMin(10,config.value.intval); <font color="#B22222">/* Only need one or perhaps a few contexts */</font>
+
+<a name="line148">148: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(pami.num_contexts*<font color="#4169E1">sizeof</font>(pami_context_t),&amp;pami.contexts);
+<a name="line149">149: </a>  perr = PAMI_Context_createv(pami_client,&amp;config,0,pami.contexts,pami.num_contexts);PAMICHK(perr,PAMI_Context_createv);
+
+<a name="line151">151: </a>  perr = PAMI_Geometry_world(pami_client,&amp;pami_geom_world);PAMICHK(perr,PAMI_Geometry_world);
+<a name="line152">152: </a>  <font color="#B22222">/* Jeff says that I have to query the barrier before I can query something else */</font>
+<a name="line153">153: </a>  PetscPAMIGetAlgorithm(pami_geom_world,PAMI_XFER_BARRIER,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line154">154: </a>  PetscPAMIGetAlgorithm(pami_geom_world,PAMI_XFER_ALLREDUCE,&amp;pami.allreduce_alg,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line156">156: </a>  thread = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line157">157: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetBool.html#PetscOptionsGetBool">PetscOptionsGetBool</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-pami_thread"</font>,&amp;thread,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line158">158: </a>  <font color="#4169E1">if</font> (thread) {
+<a name="line159">159: </a>    pthread_create(&amp;pami.thread,0,PetscPAMIPthread,&amp;pami.threadctx);
+<a name="line160">160: </a>    <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(0,<font color="#666666">"PAMI initialized with communication thread\n"</font>);
+<a name="line161">161: </a>  } <font color="#4169E1">else</font> {
+<a name="line162">162: </a>    <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(0,<font color="#666666">"PAMI initialized without communication thread\n"</font>);
+<a name="line163">163: </a>  }
+
+<a name="line165">165: </a>  pami_initialized = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line166">166: </a>  <A href="../../../../docs/manualpages/Sys/PetscRegisterFinalize.html#PetscRegisterFinalize">PetscRegisterFinalize</A>(PetscPAMIFinalize);
+<a name="line167">167: </a>  <font color="#4169E1">return</font>(0);
+<a name="line168">168: </a>}
+
+<a name="line172">172: </a><strong><font color="#4169E1"><a name="PetscPAMIFinalize"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIFinalize(void)</font></strong>
+<a name="line173">173: </a>{
+<a name="line175">175: </a>  pami_result_t perr;
+
+<a name="line178">178: </a>  PetscPAMIThreadSend(&amp;pami.threadctx,PetscPAMIThreadExit,PAMI_CONTEXT_NULL,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line179">179: </a>  pthread_join(pami.thread,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line180">180: </a>  pami.thread = <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+
+<a name="line182">182: </a>  perr = PAMI_Context_destroyv(pami.contexts,pami.num_contexts);PAMICHK(perr,PAMI_Context_destroyv);
+<a name="line183">183: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(pami.contexts);
+<a name="line184">184: </a>  perr = PAMI_Client_destroy(&amp;pami_client);PAMICHK(perr,PAMI_Client_destroy);
+
+<a name="line186">186: </a>  pami.num_contexts = 0;
+<a name="line187">187: </a>  pami.contexts = <A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line188">188: </a>  pami_client = 0;
+<a name="line189">189: </a>  pami_initialized = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line190">190: </a>  <font color="#4169E1">return</font>(0);
+<a name="line191">191: </a>}
+
+<a name="line193">193: </a><font color="#B22222">/* PAMI calls this from a different thread when the task is done */</font>
+<a name="line194">194: </a><strong><font color="#4169E1"><a name="PetscPAMICallbackDone"></a>static void PetscPAMICallbackDone(void *vctx,void *clientdata,pami_result_t err)</font></strong>
+<a name="line195">195: </a>{
+<a name="line196">196: </a>  PetscPAMIReqCtx *ctx = (PetscPAMIReqCtx*)vctx;
+<a name="line197">197: </a>  ctx-&gt;done = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line198">198: </a>  MPI_Grequest_complete(ctx-&gt;request);
+<a name="line199">199: </a>}
+
+<a name="line201">201: </a><font color="#B22222">/* MPI_Grequest_query_function */</font>
+<a name="line202">202: </a><strong><font color="#4169E1"><a name="PetscMPIGrequestQuery_Default"></a>static <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> PetscMPIGrequestQuery_Default(void *state,MPI_Status *status)</font></strong>
+<a name="line203">203: </a>{
+<a name="line204">204: </a>  PetscPAMIReqCtx *ctx = (PetscPAMIReqCtx*)state;
+
+<a name="line206">206: </a>  <font color="#4169E1">if</font> (ctx) {                    <font color="#B22222">/* We could put meaningful values here */</font>
+<a name="line207">207: </a>    MPI_Status_set_elements(status,MPI_INT,0);
+<a name="line208">208: </a>    MPI_Status_set_cancelled(status,0);
+<a name="line209">209: </a>    status-&gt;MPI_SOURCE = MPI_UNDEFINED;
+<a name="line210">210: </a>    status-&gt;MPI_TAG = MPI_UNDEFINED;
+<a name="line211">211: </a>  } <font color="#4169E1">else</font> {
+<a name="line212">212: </a>    MPI_Status_set_elements(status,MPI_INT,0);
+<a name="line213">213: </a>    MPI_Status_set_cancelled(status,0);
+<a name="line214">214: </a>    status-&gt;MPI_SOURCE = MPI_UNDEFINED;
+<a name="line215">215: </a>    status-&gt;MPI_TAG = MPI_UNDEFINED;
+<a name="line216">216: </a>  }
+<a name="line217">217: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line218">218: </a>}
+<a name="line219">219: </a><font color="#B22222">/* MPI_Grequest_free_function */</font>
+<a name="line220">220: </a><strong><font color="#4169E1"><a name="PetscMPIGrequestFree_Default"></a>static <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> PetscMPIGrequestFree_Default(void *state)</font></strong>
+<a name="line221">221: </a>{
+<a name="line222">222: </a>  <font color="#4169E1">return</font> <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(state);
+<a name="line223">223: </a>}
+<a name="line224">224: </a><font color="#B22222">/* MPI_Grequest_cancel_function */</font>
+<a name="line225">225: </a><strong><font color="#4169E1"><a name="PetscMPIGrequestCancel_Nothing"></a>static <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> PetscMPIGrequestCancel_Nothing(void *state,int complete)</font></strong>
+<a name="line226">226: </a>{
+<a name="line227">227: </a>  <font color="#4169E1">if</font> (!complete) MPI_ERR_UNSUPPORTED_OPERATION;
+<a name="line228">228: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line229">229: </a>}
+<a name="line230">230: </a><font color="#B22222">/* MPIX_Grequest_poll_function */</font>
+<a name="line231">231: </a><strong><font color="#4169E1"><a name="PetscMPIGrequestPoll_PAMI"></a>static <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> PetscMPIGrequestPoll_PAMI(void *state,MPI_Status *status)</font></strong>
+<a name="line232">232: </a>{
+<a name="line233">233: </a>  PetscPAMIReqCtx *ctx = (PetscPAMIReqCtx*)state;
+<a name="line234">234: </a>  <font color="#4169E1">if</font> (ctx-&gt;pamictx == PAMI_CONTEXT_NULL) {
+<a name="line235">235: </a>    <font color="#B22222">/* separate comm thread, so nothing for th poll function to do */</font>
+<a name="line236">236: </a>  } <font color="#4169E1">else</font> {                      <font color="#B22222">/* no comm thread, so advance the context */</font>
+<a name="line237">237: </a>    PetscPAMIInt ierr;
+<a name="line238">238: </a>    PAMI_Context_advance(ctx-&gt;pamictx,1);
+<a name="line239">239: </a>    <font color="#4169E1">if</font> (ierr != PAMI_SUCCESS) <font color="#4169E1">return</font> MPI_ERR_OTHER;
+<a name="line240">240: </a>  }
+<a name="line241">241: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line242">242: </a>}
+<a name="line243">243: </a><font color="#B22222">/* MPIX_Grequest_wait_function */</font>
+<a name="line244">244: </a><strong><font color="#228B22">#define PetscMPIGrequestWait_PAMI ((MPIX_Grequest_wait_function*)0)</font></strong>
+
+<a name="line248">248: </a><strong><font color="#4169E1"><a name="MPIPetsc_Iallreduce_PAMI"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MPIPetsc_Iallreduce_PAMI(void *sendbuf,void *recvbuf,<A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> count,MPI_Datatype datatype,MPI_Op op,<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,MPI_Request *request)</font></strong>
+<a name="line249">249: </a>{
+<a name="line251">251: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> match;
+
+<a name="line254">254: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_compare.html#MPI_Comm_compare">MPI_Comm_compare</A>(comm,MPI_COMM_WORLD,&amp;match);
+<a name="line255">255: </a>  <font color="#4169E1">if</font> (match == MPI_UNEQUAL) {   <font color="#B22222">/* safe mode, just use MPI */</font>
+<a name="line256">256: </a>    <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(0,<font color="#666666">"Communicators do not match, using synchronous <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>\n"</font>);
+<a name="line257">257: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(sendbuf,recvbuf,count,datatype,op,comm);
+<a name="line258">258: </a>    <font color="#B22222">/* create a dummy request so the external interface does not need to know */</font>
+<a name="line259">259: </a>    MPI_Grequest_start(PetscMPIGrequestQuery_Default,PetscMPIGrequestFree_Default,PetscMPIGrequestCancel_Nothing,0,request);
+<a name="line260">260: </a>    MPI_Grequest_complete(*request);
+<a name="line261">261: </a>  } <font color="#4169E1">else</font> {                      <font color="#B22222">/* set up a PAMI request */</font>
+<a name="line262">262: </a>    pami_xfer_t allreduce;
+<a name="line263">263: </a>    <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> *done;
+<a name="line264">264: </a>    pami_type_t pamitype;
+<a name="line265">265: </a>    pami_data_function pamiop;
+<a name="line266">266: </a>    PetscPAMIReqCtx *reqctx;
+<a name="line267">267: </a>    pami_result_t perr;
+
+<a name="line269">269: </a>    <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(0,<font color="#666666">"Using PAMI Iallreduce\n"</font>);
+<a name="line270">270: </a>    PetscPAMIInitialize();
+
+<a name="line272">272: </a>    PetscPAMITypeFromMPI(datatype,&amp;pamitype);
+<a name="line273">273: </a>    PetscPAMIOpFromMPI(op,&amp;pamiop);
+
+<a name="line275">275: </a>    <font color="#4169E1">if</font> (!grequest_class) {
+<a name="line276">276: </a>      MPIX_Grequest_class_create(PetscMPIGrequestQuery_Default,
+<a name="line277">277: </a>                                        PetscMPIGrequestFree_Default,
+<a name="line278">278: </a>                                        PetscMPIGrequestCancel_Nothing,
+<a name="line279">279: </a>                                        PetscMPIGrequestPoll_PAMI,
+<a name="line280">280: </a>                                        PetscMPIGrequestWait_PAMI,
+<a name="line281">281: </a>                                        &amp;grequest_class);
+<a name="line282">282: </a>    }
+<a name="line283">283: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(<font color="#4169E1">sizeof</font>(PetscPAMIReqCtx),&amp;reqctx);
+
+<a name="line285">285: </a>    <font color="#B22222">/* Create a generalized request to wait/poke PAMI */</font>
+<a name="line286">286: </a>    MPIX_Grequest_class_allocate(grequest_class,reqctx,request);
+<a name="line287">287: </a>    reqctx-&gt;done = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line288">288: </a>    reqctx-&gt;request = *request;  <font color="#B22222">/* The PAMI callback will call MPI_Grequest_complete() */</font>
+<a name="line289">289: </a>    <font color="#4169E1">if</font> (pami.thread) {           <font color="#B22222">/* The PAMI thread will advance progress */</font>
+<a name="line290">290: </a>      reqctx-&gt;pamictx = PAMI_CONTEXT_NULL;
+<a name="line291">291: </a>    } <font color="#4169E1">else</font> {                    <font color="#B22222">/* The MPI Grequest_poll_function will advance progress */</font>
+<a name="line292">292: </a>      reqctx-&gt;pamictx = pami.contexts[0];
+<a name="line293">293: </a>    }
+
+<a name="line295">295: </a>    allreduce.cb_done = PetscPAMICallbackDone;
+<a name="line296">296: </a>    allreduce.cookie = (void*)reqctx;
+<a name="line297">297: </a>    allreduce.algorithm = pami.allreduce_alg;
+<a name="line298">298: </a>    allreduce.cmd.xfer_allreduce.op         = pamiop;
+<a name="line299">299: </a>    allreduce.cmd.xfer_allreduce.sndbuf     = sendbuf;
+<a name="line300">300: </a>    allreduce.cmd.xfer_allreduce.stype      = pamitype;
+<a name="line301">301: </a>    allreduce.cmd.xfer_allreduce.stypecount = count;
+<a name="line302">302: </a>    allreduce.cmd.xfer_allreduce.rcvbuf     = recvbuf;
+<a name="line303">303: </a>    allreduce.cmd.xfer_allreduce.rtype      = pamitype;
+<a name="line304">304: </a>    allreduce.cmd.xfer_allreduce.rtypecount = count;
+
+<a name="line306">306: </a>    <font color="#B22222">/* Start the collective on the context, should confirm that the context is available */</font>
+<a name="line307">307: </a>    perr = PAMI_Collective(pami.contexts[0],&amp;allreduce);PAMICHK(perr,PAMI_Collective);
+
+<a name="line309">309: </a>    <font color="#4169E1">if</font> (pami.thread) {
+<a name="line310">310: </a>      PetscPAMIThreadSend(&amp;pami.threadctx,PetscPAMIThreadPoll,pami.contexts[0],reqctx);
+<a name="line311">311: </a>    }
+<a name="line312">312: </a>  }
+<a name="line313">313: </a>  <font color="#4169E1">return</font>(0);
+<a name="line314">314: </a>}
+
+<a name="line318">318: </a><strong><font color="#4169E1"><a name="PetscPAMITypeFromMPI"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMITypeFromMPI(MPI_Datatype datatype,pami_type_t *pamitype)</font></strong>
+<a name="line319">319: </a>{
+
+<a name="line323">323: </a>  <font color="#4169E1">if</font> (datatype == MPI_INT) *pamitype = PAMI_TYPE_SIGNED_INT;
+<a name="line324">324: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (datatype == MPI_LONG) *pamitype = PAMI_TYPE_SIGNED_LONG;
+<a name="line325">325: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (datatype == MPI_LONG_LONG_INT) *pamitype = PAMI_TYPE_SIGNED_LONG_LONG;
+<a name="line326">326: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (datatype == MPI_DOUBLE) *pamitype = PAMI_TYPE_DOUBLE;
+<a name="line327">327: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (datatype == MPI_FLOAT)  *pamitype = PAMI_TYPE_FLOAT;
+<a name="line328">328: </a>  <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Unsupported MPI_Datatype"</font>);
+<a name="line329">329: </a>  <font color="#4169E1">return</font>(0);
+<a name="line330">330: </a>}
+
+<a name="line334">334: </a><strong><font color="#4169E1"><a name="PetscPAMIOpFromMPI"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PetscPAMIOpFromMPI(MPI_Op op,pami_data_function *pamiop)</font></strong>
+<a name="line335">335: </a>{
+
+<a name="line338">338: </a>  <font color="#4169E1">if</font> (op == MPI_SUM) *pamiop = PAMI_DATA_SUM;
+<a name="line339">339: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (op == MPI_MAX) *pamiop = PAMI_DATA_MAX;
+<a name="line340">340: </a>  <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Unsupported MPI_Op"</font>);
+<a name="line341">341: </a>  <font color="#4169E1">return</font>(0);
+<a name="line342">342: </a>}
+</pre>
+</body>
+
+</html>

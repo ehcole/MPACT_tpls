@@ -1,0 +1,268 @@
+<center><a href="hpc.c">Actual source code: hpc.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/pc/impls/openmp/hpc.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:15:55+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#A020F0">#include &lt;petsc-private/pcimpl.h&gt;     </font><font color="#B22222">/*I "petscpc.h" I*/</font><font color="#A020F0"></font>
+<a name="line3">  3: </a><font color="#A020F0">#include &lt;petscksp.h&gt;</font>
+
+<a name="line5">  5: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line6">  6: </a>  <A href="../../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> flag;               <font color="#B22222">/* pc-&gt;flag */</font>
+<a name="line7">  7: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     setupcalled;        <font color="#B22222">/* pc-&gt;setupcalled */</font>
+<a name="line8">  8: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     n;
+<a name="line9">  9: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>     comm;                 <font color="#B22222">/* local world used by this preconditioner */</font>
+<a name="line10"> 10: </a>  <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>          ksp;                  <font color="#B22222">/* actual solver used across local world */</font>
+<a name="line11"> 11: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>          mat;                  <font color="#B22222">/* matrix in local world */</font>
+<a name="line12"> 12: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>          gmat;                 <font color="#B22222">/* matrix known only to process 0 in the local world */</font>
+<a name="line13"> 13: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          x,y,xdummy,ydummy;
+<a name="line14"> 14: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>   scatter;
+<a name="line15"> 15: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>    nonzero_guess;
+<a name="line16"> 16: </a>} PC_HMPI;
+
+
+<a name="line21"> 21: </a><font color="#B22222">/*</font>
+<a name="line22"> 22: </a><font color="#B22222">    Would like to have this simply call <A href="../../../../../docs/manualpages/PC/PCView.html#PCView">PCView</A>() on the inner <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>. The problem is</font>
+<a name="line23"> 23: </a><font color="#B22222">  that the outer comm does not live on the inside so cannot do this. Instead </font>
+<a name="line24"> 24: </a><font color="#B22222">  handle the special case when the viewer is stdout, construct a new one just</font>
+<a name="line25"> 25: </a><font color="#B22222">  for this call.</font>
+<a name="line26"> 26: </a><font color="#B22222">*/</font>
+
+<a name="line28"> 28: </a><strong><font color="#4169E1"><a name="PCView_HMPI_MP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCView_HMPI_MP(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,void *ctx)</font></strong>
+<a name="line29"> 29: </a>{
+<a name="line30"> 30: </a>  PC_HMPI      *red = (PC_HMPI*)ctx;
+<a name="line32"> 32: </a>  <A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    viewer;
+
+<a name="line35"> 35: </a>  <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIGetStdout.html#PetscViewerASCIIGetStdout">PetscViewerASCIIGetStdout</A>(comm,&amp;viewer);
+<a name="line36"> 36: </a>  <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPushTab.html#PetscViewerASCIIPushTab">PetscViewerASCIIPushTab</A>(viewer);         <font color="#B22222">/* this is bogus in general */</font>
+<a name="line37"> 37: </a>  <A href="../../../../../docs/manualpages/KSP/KSPView.html#KSPView">KSPView</A>(red-&gt;ksp,viewer);
+<a name="line38"> 38: </a>  <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPopTab.html#PetscViewerASCIIPopTab">PetscViewerASCIIPopTab</A>(viewer);
+<a name="line39"> 39: </a>  <font color="#4169E1">return</font>(0);
+<a name="line40"> 40: </a>}
+
+<a name="line44"> 44: </a><strong><font color="#4169E1"><a name="PCView_HMPI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCView_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line45"> 45: </a>{
+<a name="line46"> 46: </a>  PC_HMPI      *red = (PC_HMPI*)pc-&gt;data;
+<a name="line47"> 47: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+<a name="line49"> 49: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      iascii;
+
+
+<a name="line54"> 54: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(red-&gt;comm,&amp;size);
+<a name="line55"> 55: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERASCII,&amp;iascii);
+<a name="line56"> 56: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line57"> 57: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Size of solver nodes %d\n"</font>,size);
+<a name="line58"> 58: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Parallel sub-solver given next\n"</font>,size);
+<a name="line59"> 59: </a>    <font color="#B22222">/* should only make the next call if the viewer is associated with stdout */</font>
+<a name="line60"> 60: </a>    <A href="../../../../../docs/manualpages/Sys/PetscHMPIRun.html#PetscHMPIRun">PetscHMPIRun</A>(red-&gt;comm,PCView_HMPI_MP,red);
+<a name="line61"> 61: </a>  }
+<a name="line62"> 62: </a>  <font color="#4169E1">return</font>(0);
+<a name="line63"> 63: </a>}
+
+<a name="line65"> 65: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDistribute_MPIAIJ(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*)</font></strong>;
+
+<a name="line69"> 69: </a><strong><font color="#4169E1"><a name="PCApply_HMPI_1"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCApply_HMPI_1(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line70"> 70: </a>{
+<a name="line71"> 71: </a>  PC_HMPI      *red = (PC_HMPI*)pc-&gt;data;
+
+<a name="line75"> 75: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetInitialGuessNonzero.html#KSPSetInitialGuessNonzero">KSPSetInitialGuessNonzero</A>(red-&gt;ksp,pc-&gt;nonzero_guess);
+<a name="line76"> 76: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(red-&gt;ksp,x,y);
+<a name="line77"> 77: </a>  <font color="#4169E1">return</font>(0);
+<a name="line78"> 78: </a>}
+
+<a name="line82"> 82: </a><strong><font color="#4169E1"><a name="PCSetUp_HMPI_MP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_HMPI_MP(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,void *ctx)</font></strong>
+<a name="line83"> 83: </a>{
+<a name="line84"> 84: </a>  PC_HMPI      *red = (PC_HMPI*)ctx;
+<a name="line86"> 86: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       m;
+<a name="line87"> 87: </a>  <A href="../../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A>       scal;
+<a name="line88"> 88: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank;
+
+<a name="line91"> 91: </a>  red-&gt;comm = comm;
+<a name="line92"> 92: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</A>(&amp;red-&gt;setupcalled,1,MPIU_INT,0,comm);
+<a name="line93"> 93: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</A>(&amp;red-&gt;flag,1,MPIU_INT,0,comm);
+<a name="line94"> 94: </a>  <font color="#4169E1">if</font> (!red-&gt;setupcalled) {
+<a name="line95"> 95: </a>    <font color="#B22222">/* setup vector communication */</font>
+<a name="line96"> 96: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</A>(&amp;red-&gt;n,1,MPIU_INT,0,comm);
+<a name="line97"> 97: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreateMPI.html#VecCreateMPI">VecCreateMPI</A>(comm,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,red-&gt;n,&amp;red-&gt;x);
+<a name="line98"> 98: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreateMPI.html#VecCreateMPI">VecCreateMPI</A>(comm,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,red-&gt;n,&amp;red-&gt;y);
+<a name="line99"> 99: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterCreateToZero.html#VecScatterCreateToZero">VecScatterCreateToZero</A>(red-&gt;x,&amp;red-&gt;scatter,&amp;red-&gt;xdummy);
+<a name="line100">100: </a>    <A href="../../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(red-&gt;xdummy,&amp;red-&gt;ydummy);
+<a name="line101">101: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line102">102: </a>    <font color="#4169E1">if</font> (!rank) {
+<a name="line103">103: </a>      <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;xdummy);
+<a name="line104">104: </a>      <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;ydummy);
+<a name="line105">105: </a>    }
+<a name="line106">106: </a>    scal = MAT_INITIAL_MATRIX;
+<a name="line107">107: </a>  } <font color="#4169E1">else</font> {
+<a name="line108">108: </a>    <font color="#4169E1">if</font> (red-&gt;flag == DIFFERENT_NONZERO_PATTERN) {
+<a name="line109">109: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;red-&gt;mat);
+<a name="line110">110: </a>      scal = MAT_INITIAL_MATRIX;
+<a name="line111">111: </a>      <A href="../../../../../docs/manualpages/Sys/CHKMEMQ.html#CHKMEMQ">CHKMEMQ</A>;
+<a name="line112">112: </a>    } <font color="#4169E1">else</font> {
+<a name="line113">113: </a>      scal = MAT_REUSE_MATRIX;
+<a name="line114">114: </a>    }
+<a name="line115">115: </a>  }
+
+<a name="line117">117: </a>  <font color="#B22222">/* copy matrix out onto processes */</font>
+<a name="line118">118: </a>  <A href="../../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(red-&gt;x,&amp;m);
+<a name="line119">119: </a>  MatDistribute_MPIAIJ(comm,red-&gt;gmat,m,scal,&amp;red-&gt;mat);
+<a name="line120">120: </a>  <font color="#4169E1">if</font> (!red-&gt;setupcalled) {
+<a name="line121">121: </a>    <font color="#B22222">/* create the solver */</font>
+<a name="line122">122: </a>    <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(comm,&amp;red-&gt;ksp);
+<a name="line123">123: </a>    <font color="#B22222">/* would like to set proper tablevel for <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>, but do not have direct access to parent pc */</font>
+<a name="line124">124: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOptionsPrefix.html#KSPSetOptionsPrefix">KSPSetOptionsPrefix</A>(red-&gt;ksp,<font color="#666666">"hmpi_"</font>); <font color="#B22222">/* should actually append with global pc prefix */</font>
+<a name="line125">125: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(red-&gt;ksp,red-&gt;mat,red-&gt;mat,red-&gt;flag);
+<a name="line126">126: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>(red-&gt;ksp);
+<a name="line127">127: </a>  } <font color="#4169E1">else</font> {
+<a name="line128">128: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(red-&gt;ksp,red-&gt;mat,red-&gt;mat,red-&gt;flag);
+<a name="line129">129: </a>  }
+<a name="line130">130: </a>  <font color="#4169E1">return</font>(0);
+<a name="line131">131: </a>}
+
+<a name="line135">135: </a><strong><font color="#4169E1"><a name="PCSetUp_HMPI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line136">136: </a>{
+<a name="line137">137: </a>  PC_HMPI      *red = (PC_HMPI*)pc-&gt;data;
+<a name="line139">139: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+
+<a name="line142">142: </a>  red-&gt;gmat        = pc-&gt;mat;
+<a name="line143">143: </a>  red-&gt;flag        = pc-&gt;flag;
+<a name="line144">144: </a>  red-&gt;setupcalled = pc-&gt;setupcalled;
+
+<a name="line146">146: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(red-&gt;comm,&amp;size);
+<a name="line147">147: </a>  <font color="#4169E1">if</font> (size == 1) {  <font color="#B22222">/* special case where copy of matrix is not needed */</font>
+<a name="line148">148: </a>    <font color="#4169E1">if</font> (!red-&gt;setupcalled) {
+<a name="line149">149: </a>      <font color="#B22222">/* create the solver */</font>
+<a name="line150">150: </a>      <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,&amp;red-&gt;ksp);
+<a name="line151">151: </a>      <A href="../../../../../docs/manualpages/Sys/PetscObjectIncrementTabLevel.html#PetscObjectIncrementTabLevel">PetscObjectIncrementTabLevel</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)red-&gt;ksp,(<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,1);
+<a name="line152">152: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOptionsPrefix.html#KSPSetOptionsPrefix">KSPSetOptionsPrefix</A>(red-&gt;ksp,<font color="#666666">"hmpi_"</font>); <font color="#B22222">/* should actually append with global pc prefix */</font>
+<a name="line153">153: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(red-&gt;ksp,red-&gt;gmat,red-&gt;gmat,red-&gt;flag);
+<a name="line154">154: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>(red-&gt;ksp);
+<a name="line155">155: </a>    } <font color="#4169E1">else</font> {
+<a name="line156">156: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(red-&gt;ksp,red-&gt;gmat,red-&gt;gmat,red-&gt;flag);
+<a name="line157">157: </a>    }
+<a name="line158">158: </a>    pc-&gt;ops-&gt;apply = PCApply_HMPI_1;
+<a name="line159">159: </a>    <font color="#4169E1">return</font>(0);
+<a name="line160">160: </a>  } <font color="#4169E1">else</font> {
+<a name="line161">161: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(pc-&gt;mat,&amp;red-&gt;n,<A href="../../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>);
+<a name="line162">162: </a>    <A href="../../../../../docs/manualpages/Sys/PetscHMPIRun.html#PetscHMPIRun">PetscHMPIRun</A>(red-&gt;comm,PCSetUp_HMPI_MP,red);
+<a name="line163">163: </a>  }
+<a name="line164">164: </a>  <font color="#4169E1">return</font>(0);
+<a name="line165">165: </a>}
+
+<a name="line169">169: </a><strong><font color="#4169E1"><a name="PCApply_HMPI_MP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCApply_HMPI_MP(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,void *ctx)</font></strong>
+<a name="line170">170: </a>{
+<a name="line171">171: </a>  PC_HMPI      *red = (PC_HMPI*)ctx;
+
+<a name="line175">175: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(red-&gt;scatter,red-&gt;xdummy,red-&gt;x,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line176">176: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(red-&gt;scatter,red-&gt;xdummy,red-&gt;x,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line177">177: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</A>(&amp;red-&gt;nonzero_guess,1,MPIU_INT,0,red-&gt;comm);
+<a name="line178">178: </a>  <font color="#4169E1">if</font> (red-&gt;nonzero_guess) {
+<a name="line179">179: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(red-&gt;scatter,red-&gt;ydummy,red-&gt;y,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line180">180: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(red-&gt;scatter,red-&gt;ydummy,red-&gt;y,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line181">181: </a>  }
+<a name="line182">182: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetInitialGuessNonzero.html#KSPSetInitialGuessNonzero">KSPSetInitialGuessNonzero</A>(red-&gt;ksp,red-&gt;nonzero_guess);
+
+<a name="line184">184: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(red-&gt;ksp,red-&gt;x,red-&gt;y);
+
+<a name="line186">186: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(red-&gt;scatter,red-&gt;y,red-&gt;ydummy,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line187">187: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(red-&gt;scatter,red-&gt;y,red-&gt;ydummy,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line188">188: </a>  <font color="#4169E1">return</font>(0);
+<a name="line189">189: </a>}
+
+<a name="line193">193: </a><strong><font color="#4169E1"><a name="PCApply_HMPI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCApply_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line194">194: </a>{
+<a name="line195">195: </a>  PC_HMPI      *red = (PC_HMPI*)pc-&gt;data;
+
+<a name="line199">199: </a>  red-&gt;xdummy        = x;
+<a name="line200">200: </a>  red-&gt;ydummy        = y;
+<a name="line201">201: </a>  red-&gt;nonzero_guess = pc-&gt;nonzero_guess;
+<a name="line202">202: </a>  <A href="../../../../../docs/manualpages/Sys/PetscHMPIRun.html#PetscHMPIRun">PetscHMPIRun</A>(red-&gt;comm,PCApply_HMPI_MP,red);
+<a name="line203">203: </a>  <font color="#4169E1">return</font>(0);
+<a name="line204">204: </a>}
+
+<a name="line208">208: </a><strong><font color="#4169E1"><a name="PCDestroy_HMPI_MP"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_HMPI_MP(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,void *ctx)</font></strong>
+<a name="line209">209: </a>{
+<a name="line210">210: </a>  PC_HMPI      *red = (PC_HMPI*)ctx;
+<a name="line211">211: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank;
+
+<a name="line215">215: </a>  <A href="../../../../../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>(&amp;red-&gt;scatter);
+<a name="line216">216: </a>  <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;x);
+<a name="line217">217: </a>  <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;y);
+<a name="line218">218: </a>  <A href="../../../../../docs/manualpages/KSP/KSPDestroy.html#KSPDestroy">KSPDestroy</A>(&amp;red-&gt;ksp);
+<a name="line219">219: </a>  <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;red-&gt;mat);
+<a name="line220">220: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line221">221: </a>  <font color="#4169E1">if</font> (rank) {
+<a name="line222">222: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;xdummy);
+<a name="line223">223: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;red-&gt;ydummy);
+<a name="line224">224: </a>  }
+<a name="line225">225: </a>  <font color="#4169E1">return</font>(0);
+<a name="line226">226: </a>}
+
+<a name="line230">230: </a><strong><font color="#4169E1"><a name="PCDestroy_HMPI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line231">231: </a>{
+<a name="line232">232: </a>  PC_HMPI      *red = (PC_HMPI*)pc-&gt;data;
+
+<a name="line236">236: </a>  <A href="../../../../../docs/manualpages/Sys/PetscHMPIRun.html#PetscHMPIRun">PetscHMPIRun</A>(red-&gt;comm,PCDestroy_HMPI_MP,red);
+<a name="line237">237: </a>  <A href="../../../../../docs/manualpages/Sys/PetscHMPIFree.html#PetscHMPIFree">PetscHMPIFree</A>(red-&gt;comm,red);
+<a name="line238">238: </a>  <font color="#4169E1">return</font>(0);
+<a name="line239">239: </a>}
+
+<a name="line243">243: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_HMPI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetFromOptions_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line244">244: </a>{
+<a name="line246">246: </a>  <font color="#4169E1">return</font>(0);
+<a name="line247">247: </a>}
+
+
+<a name="line250">250: </a><font color="#B22222">/* -------------------------------------------------------------------------------------*/</font>
+<a name="line251">251: </a><font color="#B22222">/*MC</font>
+<a name="line252">252: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/PC/PCHMPI.html#PCHMPI">PCHMPI</A> - Runs a preconditioner for a single process matrix across several MPI processes</font>
+
+<a name="line254">254: </a><font color="#B22222">$     This will usually be run with -pc_type hmpi -ksp_type preonly</font>
+<a name="line255">255: </a><font color="#B22222">$     solver options are set with -hmpi_ksp_... and -hmpi_pc_... for example</font>
+<a name="line256">256: </a><font color="#B22222">$     -hmpi_ksp_type cg would use cg as the Krylov method or -hmpi_ksp_monitor or</font>
+<a name="line257">257: </a><font color="#B22222">$     -hmpi_pc_type hypre -hmpi_pc_hypre_type boomeramg</font>
+
+<a name="line259">259: </a><font color="#B22222">       Always run with -ksp_view (or -snes_view) to see what solver is actually being used.</font>
+
+<a name="line261">261: </a><font color="#B22222">       Currently the solver options INSIDE the HMPI preconditioner can ONLY be set via the</font>
+<a name="line262">262: </a><font color="#B22222">      options database.</font>
+
+<a name="line264">264: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line266">266: </a><font color="#B22222">   See <A href="../../../../../docs/manualpages/Sys/PetscHMPIMerge.html#PetscHMPIMerge">PetscHMPIMerge</A>() and <A href="../../../../../docs/manualpages/Sys/PetscHMPISpawn.html#PetscHMPISpawn">PetscHMPISpawn</A>() for two ways to start up MPI for use with this preconditioner</font>
+
+<a name="line268">268: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>(), <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCType.html#PCType">PCType</A> (for list of available types)</font>
+
+<a name="line270">270: </a><font color="#B22222">M*/</font>
+
+<a name="line272">272: </a>EXTERN_C_BEGIN
+<a name="line275">275: </a><strong><font color="#4169E1"><a name="PCCreate_HMPI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCCreate_HMPI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line276">276: </a>{
+<a name="line278">278: </a>  PC_HMPI      *red;
+<a name="line279">279: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+
+<a name="line282">282: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,&amp;size);
+<a name="line283">283: </a>  <font color="#4169E1">if</font> (size &gt; 1) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,PETSC_ERR_ARG_SIZ,<font color="#666666">"HMPI preconditioner only works for sequential solves"</font>);
+<a name="line284">284: </a>  <font color="#B22222">/* caste the struct length to a <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> for easier MPI calls */</font>
+
+<a name="line286">286: </a>  <A href="../../../../../docs/manualpages/Sys/PetscHMPIMalloc.html#PetscHMPIMalloc">PetscHMPIMalloc</A>(PETSC_COMM_LOCAL_WORLD,(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)<font color="#4169E1">sizeof</font>(PC_HMPI),(void**)&amp;red);
+<a name="line287">287: </a>  red-&gt;comm = PETSC_COMM_LOCAL_WORLD;
+<a name="line288">288: </a>  pc-&gt;data  = (void*) red;
+
+<a name="line290">290: </a>  pc-&gt;ops-&gt;apply          = PCApply_HMPI;
+<a name="line291">291: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_HMPI;
+<a name="line292">292: </a>  pc-&gt;ops-&gt;setfromoptions = PCSetFromOptions_HMPI;
+<a name="line293">293: </a>  pc-&gt;ops-&gt;setup          = PCSetUp_HMPI;
+<a name="line294">294: </a>  pc-&gt;ops-&gt;view           = PCView_HMPI;
+<a name="line295">295: </a>  <font color="#4169E1">return</font>(0);
+<a name="line296">296: </a>}
+<a name="line297">297: </a>EXTERN_C_END
+</pre>
+</body>
+
+</html>

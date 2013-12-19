@@ -1,0 +1,884 @@
+<center><a href="ispai.c">Actual source code: ispai.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T19:01:48+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80"><a name="line1">  1: </a><strong><font color="#228B22">#define PETSCKSP_DLL</font></strong>
+
+<a name="line3">  3: </a><font color="#B22222">/* </font>
+<a name="line4">  4: </a><font color="#B22222">   3/99 Modified by Stephen Barnard to support SPAI version 3.0 </font>
+<a name="line5">  5: </a><font color="#B22222">*/</font>
+
+<a name="line7">  7: </a><font color="#B22222">/*</font>
+<a name="line8">  8: </a><font color="#B22222">      Provides an interface to the SPAI Sparse Approximate Inverse Preconditioner</font>
+<a name="line9">  9: </a><font color="#B22222">   Code written by Stephen Barnard.</font>
+
+<a name="line11"> 11: </a><font color="#B22222">      Note: there is some BAD memory bleeding below!</font>
+
+<a name="line13"> 13: </a><font color="#B22222">      This code needs work</font>
+
+<a name="line15"> 15: </a><font color="#B22222">   1) get rid of all memory bleeding</font>
+<a name="line16"> 16: </a><font color="#B22222">   2) fix PETSc/interface so that it gets if the matrix is symmetric from the matrix</font>
+<a name="line17"> 17: </a><font color="#B22222">      rather than having the sp flag for PC_SPAI</font>
+<a name="line18"> 18: </a><font color="#B22222">   3) fix to set the block size based on the matrix block size </font>
+
+<a name="line20"> 20: </a><font color="#B22222">*/</font>
+
+<a name="line22"> 22: </a> #include <A href="../../../../../include/private/pcimpl.h.html">private/pcimpl.h</A>
+<a name="line23"> 23: </a> #include <A href="petscspai.h.html">petscspai.h</A>
+
+<a name="line25"> 25: </a><font color="#B22222">/*</font>
+<a name="line26"> 26: </a><font color="#B22222">    These are the SPAI include files</font>
+<a name="line27"> 27: </a><font color="#B22222">*/</font>
+<a name="line29"> 29: </a><strong><font color="#228B22">#define MPI </font><font color="#B22222">/* required for setting SPAI_Comm correctly in basics.h */</font><font color="#228B22"></font></strong>
+<a name="line30"> 30: </a><font color="#A020F0">#include </font><font color="#666666">"spai.h"</font><font color="#A020F0"></font>
+<a name="line31"> 31: </a><font color="#A020F0">#include </font><font color="#666666">"matrix.h"</font><font color="#A020F0"></font>
+
+<a name="line34"> 34: </a><strong><font color="#4169E1">EXTERN <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertMatToMatrix(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,matrix**)</font></strong>;
+<a name="line35"> 35: </a><strong><font color="#4169E1">EXTERN <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertMatrixToMat(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>,matrix *,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *)</font></strong>;
+<a name="line36"> 36: </a><strong><font color="#4169E1">EXTERN <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertVectorToVec(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>,vector *v,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Pv)</font></strong>;
+<a name="line37"> 37: </a><strong><font color="#4169E1">EXTERN <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MM_to_PETSC(char *,char *,char *)</font></strong>;
+
+<a name="line39"> 39: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+
+<a name="line41"> 41: </a>  matrix   *B;              <font color="#B22222">/* matrix in SPAI format */</font>
+<a name="line42"> 42: </a>  matrix   *BT;             <font color="#B22222">/* transpose of matrix in SPAI format */</font>
+<a name="line43"> 43: </a>  matrix   *M;              <font color="#B22222">/* the approximate inverse in SPAI format */</font>
+
+<a name="line45"> 45: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>      PM;              <font color="#B22222">/* the approximate inverse PETSc format */</font>
+
+<a name="line47"> 47: </a>  double   epsilon;         <font color="#B22222">/* tolerance */</font>
+<a name="line48"> 48: </a>  int      nbsteps;         <font color="#B22222">/* max number of "improvement" steps per line */</font>
+<a name="line49"> 49: </a>  int      max;             <font color="#B22222">/* max dimensions of is_I, q, etc. */</font>
+<a name="line50"> 50: </a>  int      maxnew;          <font color="#B22222">/* max number of new entries per step */</font>
+<a name="line51"> 51: </a>  int      block_size;      <font color="#B22222">/* constant block size */</font>
+<a name="line52"> 52: </a>  int      cache_size;      <font color="#B22222">/* one of (1,2,3,4,5,6) indicting size of cache */</font>
+<a name="line53"> 53: </a>  int      verbose;         <font color="#B22222">/* SPAI prints timing and statistics */</font>
+
+<a name="line55"> 55: </a>  int      sp;              <font color="#B22222">/* symmetric nonzero pattern */</font>
+<a name="line56"> 56: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm_spai;     <font color="#B22222">/* communicator to be used with spai */</font>
+<a name="line57"> 57: </a>} PC_SPAI;
+
+<a name="line59"> 59: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line63"> 63: </a><strong><font color="#4169E1"><a name="PCSetUp_SPAI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line64"> 64: </a>{
+<a name="line65"> 65: </a>  PC_SPAI        *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line67"> 67: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            AT;
+
+
+<a name="line71"> 71: </a>  init_SPAI();
+
+<a name="line73"> 73: </a>  <font color="#4169E1">if</font> (ispai-&gt;sp) {
+<a name="line74"> 74: </a>    ConvertMatToMatrix(ispai-&gt;comm_spai,pc-&gt;pmat,pc-&gt;pmat,&amp;ispai-&gt;B);
+<a name="line75"> 75: </a>  } <font color="#4169E1">else</font> {
+<a name="line76"> 76: </a>    <font color="#B22222">/* Use the transpose to get the column nonzero structure. */</font>
+<a name="line77"> 77: </a>    <A href="../../../../../docs/manualpages/Mat/MatTranspose.html#MatTranspose">MatTranspose</A>(pc-&gt;pmat,MAT_INITIAL_MATRIX,&amp;AT);
+<a name="line78"> 78: </a>    ConvertMatToMatrix(ispai-&gt;comm_spai,pc-&gt;pmat,AT,&amp;ispai-&gt;B);
+<a name="line79"> 79: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(AT);
+<a name="line80"> 80: </a>  }
+
+<a name="line82"> 82: </a>  <font color="#B22222">/* Destroy the transpose */</font>
+<a name="line83"> 83: </a>  <font color="#B22222">/* Don't know how to do it. PETSc developers? */</font>
+<a name="line84"> 84: </a>
+<a name="line85"> 85: </a>  <font color="#B22222">/* construct SPAI preconditioner */</font>
+<a name="line86"> 86: </a>  <font color="#B22222">/* FILE *messages */</font>     <font color="#B22222">/* file for warning messages */</font>
+<a name="line87"> 87: </a>  <font color="#B22222">/* double epsilon */</font>     <font color="#B22222">/* tolerance */</font>
+<a name="line88"> 88: </a>  <font color="#B22222">/* int nbsteps */</font>        <font color="#B22222">/* max number of "improvement" steps per line */</font>
+<a name="line89"> 89: </a>  <font color="#B22222">/* int max */</font>            <font color="#B22222">/* max dimensions of is_I, q, etc. */</font>
+<a name="line90"> 90: </a>  <font color="#B22222">/* int maxnew */</font>         <font color="#B22222">/* max number of new entries per step */</font>
+<a name="line91"> 91: </a>  <font color="#B22222">/* int block_size */</font>     <font color="#B22222">/* block_size == 1 specifies scalar elments</font>
+<a name="line92"> 92: </a><font color="#B22222">                              block_size == n specifies nxn constant-block elements</font>
+<a name="line93"> 93: </a><font color="#B22222">                              block_size == 0 specifies variable-block elements */</font>
+<a name="line94"> 94: </a>  <font color="#B22222">/* int cache_size */</font>     <font color="#B22222">/* one of (1,2,3,4,5,6) indicting size of cache */</font>
+<a name="line95"> 95: </a>                           <font color="#B22222">/* cache_size == 0 indicates no caching */</font>
+<a name="line96"> 96: </a>  <font color="#B22222">/* int    verbose    */</font>  <font color="#B22222">/* verbose == 0 specifies that SPAI is silent</font>
+<a name="line97"> 97: </a><font color="#B22222">                              verbose == 1 prints timing and matrix statistics */</font>
+
+<a name="line99"> 99: </a>  bspai(ispai-&gt;B,&amp;ispai-&gt;M,
+<a name="line100">100: </a>                   stdout,
+<a name="line101">101: </a>                   ispai-&gt;epsilon,
+<a name="line102">102: </a>                   ispai-&gt;nbsteps,
+<a name="line103">103: </a>                   ispai-&gt;max,
+<a name="line104">104: </a>                   ispai-&gt;maxnew,
+<a name="line105">105: </a>                   ispai-&gt;block_size,
+<a name="line106">106: </a>                   ispai-&gt;cache_size,
+<a name="line107">107: </a>               ispai-&gt;verbose);
+
+<a name="line109">109: </a>  ConvertMatrixToMat(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,ispai-&gt;M,&amp;ispai-&gt;PM);
+
+<a name="line111">111: </a>  <font color="#B22222">/* free the SPAI matrices */</font>
+<a name="line112">112: </a>  sp_free_matrix(ispai-&gt;B);
+<a name="line113">113: </a>  sp_free_matrix(ispai-&gt;M);
+
+<a name="line115">115: </a>  <font color="#4169E1">return</font>(0);
+<a name="line116">116: </a>}
+
+<a name="line118">118: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line122">122: </a><strong><font color="#4169E1"><a name="PCApply_SPAI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCApply_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xx,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line123">123: </a>{
+<a name="line124">124: </a>  PC_SPAI        *ispai = (PC_SPAI*)pc-&gt;data;
+
+<a name="line128">128: </a>  <font color="#B22222">/* Now using PETSc's multiply */</font>
+<a name="line129">129: </a>  <A href="../../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(ispai-&gt;PM,xx,y);
+<a name="line130">130: </a>  <font color="#4169E1">return</font>(0);
+<a name="line131">131: </a>}
+
+<a name="line133">133: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line137">137: </a><strong><font color="#4169E1"><a name="PCDestroy_SPAI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line138">138: </a>{
+<a name="line140">140: </a>  PC_SPAI        *ispai = (PC_SPAI*)pc-&gt;data;
+
+<a name="line143">143: </a>  <font color="#4169E1">if</font> (ispai-&gt;PM) {<A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(ispai-&gt;PM);}
+<a name="line144">144: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</A>(&amp;(ispai-&gt;comm_spai));
+<a name="line145">145: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ispai);
+<a name="line146">146: </a>  <font color="#4169E1">return</font>(0);
+<a name="line147">147: </a>}
+
+<a name="line149">149: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line153">153: </a><strong><font color="#4169E1"><a name="PCView_SPAI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCView_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,<A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line154">154: </a>{
+<a name="line155">155: </a>  PC_SPAI        *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line157">157: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     iascii;
+
+<a name="line160">160: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTypeCompare.html#PetscTypeCompare">PetscTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSC_VIEWER_ASCII,&amp;iascii);
+<a name="line161">161: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line162">162: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    SPAI preconditioner\n"</font>);
+<a name="line163">163: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    epsilon %G\n"</font>,   ispai-&gt;epsilon);
+<a name="line164">164: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    nbsteps %d\n"</font>,   ispai-&gt;nbsteps);
+<a name="line165">165: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    max %d\n"</font>,       ispai-&gt;max);
+<a name="line166">166: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    maxnew %d\n"</font>,    ispai-&gt;maxnew);
+<a name="line167">167: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    block_size %d\n"</font>,ispai-&gt;block_size);
+<a name="line168">168: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    cache_size %d\n"</font>,ispai-&gt;cache_size);
+<a name="line169">169: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    verbose %d\n"</font>,   ispai-&gt;verbose);
+<a name="line170">170: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"    sp %d\n"</font>,        ispai-&gt;sp);
+<a name="line171">171: </a>  }
+<a name="line172">172: </a>  <font color="#4169E1">return</font>(0);
+<a name="line173">173: </a>}
+
+<a name="line178">178: </a><strong><font color="#4169E1"><a name="PCSPAISetEpsilon_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetEpsilon_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,double epsilon1)</font></strong>
+<a name="line179">179: </a>{
+<a name="line180">180: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line182">182: </a>  ispai-&gt;epsilon = epsilon1;
+<a name="line183">183: </a>  <font color="#4169E1">return</font>(0);
+<a name="line184">184: </a>}
+<a name="line186">186: </a>
+<a name="line187">187: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line192">192: </a><strong><font color="#4169E1"><a name="PCSPAISetNBSteps_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetNBSteps_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int nbsteps1)</font></strong>
+<a name="line193">193: </a>{
+<a name="line194">194: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line196">196: </a>  ispai-&gt;nbsteps = nbsteps1;
+<a name="line197">197: </a>  <font color="#4169E1">return</font>(0);
+<a name="line198">198: </a>}
+
+<a name="line201">201: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line203">203: </a><font color="#B22222">/* added 1/7/99 g.h. */</font>
+<a name="line207">207: </a><strong><font color="#4169E1"><a name="PCSPAISetMax_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetMax_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int max1)</font></strong>
+<a name="line208">208: </a>{
+<a name="line209">209: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line211">211: </a>  ispai-&gt;max = max1;
+<a name="line212">212: </a>  <font color="#4169E1">return</font>(0);
+<a name="line213">213: </a>}
+
+<a name="line216">216: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line221">221: </a><strong><font color="#4169E1"><a name="PCSPAISetMaxNew_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetMaxNew_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int maxnew1)</font></strong>
+<a name="line222">222: </a>{
+<a name="line223">223: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line225">225: </a>  ispai-&gt;maxnew = maxnew1;
+<a name="line226">226: </a>  <font color="#4169E1">return</font>(0);
+<a name="line227">227: </a>}
+
+<a name="line230">230: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line235">235: </a><strong><font color="#4169E1"><a name="PCSPAISetBlockSize_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetBlockSize_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int block_size1)</font></strong>
+<a name="line236">236: </a>{
+<a name="line237">237: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line239">239: </a>  ispai-&gt;block_size = block_size1;
+<a name="line240">240: </a>  <font color="#4169E1">return</font>(0);
+<a name="line241">241: </a>}
+
+<a name="line244">244: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line249">249: </a><strong><font color="#4169E1"><a name="PCSPAISetCacheSize_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetCacheSize_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int cache_size)</font></strong>
+<a name="line250">250: </a>{
+<a name="line251">251: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line253">253: </a>  ispai-&gt;cache_size = cache_size;
+<a name="line254">254: </a>  <font color="#4169E1">return</font>(0);
+<a name="line255">255: </a>}
+
+<a name="line258">258: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line263">263: </a><strong><font color="#4169E1"><a name="PCSPAISetVerbose_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetVerbose_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int verbose)</font></strong>
+<a name="line264">264: </a>{
+<a name="line265">265: </a>  PC_SPAI    *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line267">267: </a>  ispai-&gt;verbose = verbose;
+<a name="line268">268: </a>  <font color="#4169E1">return</font>(0);
+<a name="line269">269: </a>}
+
+<a name="line272">272: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line277">277: </a><strong><font color="#4169E1"><a name="PCSPAISetSp_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCSPAISetSp_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int sp)</font></strong>
+<a name="line278">278: </a>{
+<a name="line279">279: </a>  PC_SPAI *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line281">281: </a>  ispai-&gt;sp = sp;
+<a name="line282">282: </a>  <font color="#4169E1">return</font>(0);
+<a name="line283">283: </a>}
+
+<a name="line286">286: </a><font color="#B22222">/* -------------------------------------------------------------------*/</font>
+
+<a name="line290">290: </a><font color="#B22222">/*@</font>
+<a name="line291">291: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetEpsilon.html#PCSPAISetEpsilon">PCSPAISetEpsilon</A> -- Set the tolerance for the SPAI preconditioner</font>
+
+<a name="line293">293: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line294">294: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line295">295: </a><font color="#B22222">- eps - epsilon (default .4)</font>
+
+<a name="line297">297: </a><font color="#B22222">  Notes:  Espilon must be between 0 and 1. It controls the</font>
+<a name="line298">298: </a><font color="#B22222">                 quality of the approximation of M to the inverse of</font>
+<a name="line299">299: </a><font color="#B22222">                 A. Higher values of epsilon lead to more work, more</font>
+<a name="line300">300: </a><font color="#B22222">                 fill, and usually better preconditioners. In many</font>
+<a name="line301">301: </a><font color="#B22222">                 cases the best choice of epsilon is the one that</font>
+<a name="line302">302: </a><font color="#B22222">                 divides the total solution time equally between the</font>
+<a name="line303">303: </a><font color="#B22222">                 preconditioner and the solver.</font>
+<a name="line304">304: </a><font color="#B22222">  </font>
+<a name="line305">305: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line307">307: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line308">308: </a><font color="#B22222">  @*/</font>
+<a name="line309">309: </a><strong><font color="#4169E1"><a name="PCSPAISetEpsilon"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetEpsilon.html#PCSPAISetEpsilon">PCSPAISetEpsilon</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,double epsilon1)</font></strong>
+<a name="line310">310: </a>{
+<a name="line311">311: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,double);
+<a name="line313">313: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetEpsilon_C"</font>,(void (**)(void))&amp;f);
+<a name="line314">314: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line315">315: </a>    (*f)(pc,epsilon1);
+<a name="line316">316: </a>  }
+<a name="line317">317: </a>  <font color="#4169E1">return</font>(0);
+<a name="line318">318: </a>}
+<a name="line319">319: </a>
+<a name="line320">320: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line324">324: </a><font color="#B22222">/*@</font>
+<a name="line325">325: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetNBSteps.html#PCSPAISetNBSteps">PCSPAISetNBSteps</A> - set maximum number of improvement steps per row in </font>
+<a name="line326">326: </a><font color="#B22222">        the SPAI preconditioner</font>
+
+<a name="line328">328: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line329">329: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line330">330: </a><font color="#B22222">- n - number of steps (default 5)</font>
+
+<a name="line332">332: </a><font color="#B22222">  Notes:  SPAI constructs to approximation to every column of</font>
+<a name="line333">333: </a><font color="#B22222">                 the exact inverse of A in a series of improvement</font>
+<a name="line334">334: </a><font color="#B22222">                 steps. The quality of the approximation is determined</font>
+<a name="line335">335: </a><font color="#B22222">                 by epsilon. If an approximation achieving an accuracy</font>
+<a name="line336">336: </a><font color="#B22222">                 of epsilon is not obtained after ns steps, SPAI simply</font>
+<a name="line337">337: </a><font color="#B22222">                 uses the best approximation constructed so far.</font>
+
+<a name="line339">339: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line341">341: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A>()</font>
+<a name="line342">342: </a><font color="#B22222">@*/</font>
+<a name="line343">343: </a><strong><font color="#4169E1"><a name="PCSPAISetNBSteps"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetNBSteps.html#PCSPAISetNBSteps">PCSPAISetNBSteps</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int nbsteps1)</font></strong>
+<a name="line344">344: </a>{
+<a name="line345">345: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line347">347: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetNBSteps_C"</font>,(void (**)(void))&amp;f);
+<a name="line348">348: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line349">349: </a>    (*f)(pc,nbsteps1);
+<a name="line350">350: </a>  }
+<a name="line351">351: </a>  <font color="#4169E1">return</font>(0);
+<a name="line352">352: </a>}
+
+<a name="line354">354: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line356">356: </a><font color="#B22222">/* added 1/7/99 g.h. */</font>
+<a name="line359">359: </a><font color="#B22222">/*@</font>
+<a name="line360">360: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetMax.html#PCSPAISetMax">PCSPAISetMax</A> - set the size of various working buffers in </font>
+<a name="line361">361: </a><font color="#B22222">        the SPAI preconditioner</font>
+
+<a name="line363">363: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line364">364: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line365">365: </a><font color="#B22222">- n - size (default is 5000)</font>
+
+<a name="line367">367: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line369">369: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line370">370: </a><font color="#B22222">@*/</font>
+<a name="line371">371: </a><strong><font color="#4169E1"><a name="PCSPAISetMax"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetMax.html#PCSPAISetMax">PCSPAISetMax</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int max1)</font></strong>
+<a name="line372">372: </a>{
+<a name="line373">373: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line375">375: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetMax_C"</font>,(void (**)(void))&amp;f);
+<a name="line376">376: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line377">377: </a>    (*f)(pc,max1);
+<a name="line378">378: </a>  }
+<a name="line379">379: </a>  <font color="#4169E1">return</font>(0);
+<a name="line380">380: </a>}
+
+<a name="line382">382: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line386">386: </a><font color="#B22222">/*@</font>
+<a name="line387">387: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A> - set maximum number of new nonzero candidates per step</font>
+<a name="line388">388: </a><font color="#B22222">   in SPAI preconditioner</font>
+
+<a name="line390">390: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line391">391: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line392">392: </a><font color="#B22222">- n - maximum number (default 5)</font>
+
+<a name="line394">394: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line396">396: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetNBSteps.html#PCSPAISetNBSteps">PCSPAISetNBSteps</A>()</font>
+<a name="line397">397: </a><font color="#B22222">@*/</font>
+<a name="line398">398: </a><strong><font color="#4169E1"><a name="PCSPAISetMaxNew"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int maxnew1)</font></strong>
+<a name="line399">399: </a>{
+<a name="line400">400: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line402">402: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetMaxNew_C"</font>,(void (**)(void))&amp;f);
+<a name="line403">403: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line404">404: </a>    (*f)(pc,maxnew1);
+<a name="line405">405: </a>  }
+<a name="line406">406: </a>  <font color="#4169E1">return</font>(0);
+<a name="line407">407: </a>}
+
+<a name="line409">409: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line413">413: </a><font color="#B22222">/*@</font>
+<a name="line414">414: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetBlockSize.html#PCSPAISetBlockSize">PCSPAISetBlockSize</A> - set the block size for the SPAI preconditioner</font>
+
+<a name="line416">416: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line417">417: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line418">418: </a><font color="#B22222">- n - block size (default 1)</font>
+
+<a name="line420">420: </a><font color="#B22222">  Notes: A block</font>
+<a name="line421">421: </a><font color="#B22222">                 size of 1 treats A as a matrix of scalar elements. A</font>
+<a name="line422">422: </a><font color="#B22222">                 block size of s &gt; 1 treats A as a matrix of sxs</font>
+<a name="line423">423: </a><font color="#B22222">                 blocks. A block size of 0 treats A as a matrix with</font>
+<a name="line424">424: </a><font color="#B22222">                 variable sized blocks, which are determined by</font>
+<a name="line425">425: </a><font color="#B22222">                 searching for dense square diagonal blocks in A.</font>
+<a name="line426">426: </a><font color="#B22222">                 This can be very effective for finite-element</font>
+<a name="line427">427: </a><font color="#B22222">                 matrices.</font>
+
+<a name="line429">429: </a><font color="#B22222">                 SPAI will convert A to block form, use a block</font>
+<a name="line430">430: </a><font color="#B22222">                 version of the preconditioner algorithm, and then</font>
+<a name="line431">431: </a><font color="#B22222">                 convert the result back to scalar form.</font>
+
+<a name="line433">433: </a><font color="#B22222">                 In many cases the a block-size parameter other than 1</font>
+<a name="line434">434: </a><font color="#B22222">                 can lead to very significant improvement in</font>
+<a name="line435">435: </a><font color="#B22222">                 performance.</font>
+
+
+<a name="line438">438: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line440">440: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line441">441: </a><font color="#B22222">@*/</font>
+<a name="line442">442: </a><strong><font color="#4169E1"><a name="PCSPAISetBlockSize"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetBlockSize.html#PCSPAISetBlockSize">PCSPAISetBlockSize</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int block_size1)</font></strong>
+<a name="line443">443: </a>{
+<a name="line444">444: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line446">446: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetBlockSize_C"</font>,(void (**)(void))&amp;f);
+<a name="line447">447: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line448">448: </a>    (*f)(pc,block_size1);
+<a name="line449">449: </a>  }
+<a name="line450">450: </a>  <font color="#4169E1">return</font>(0);
+<a name="line451">451: </a>}
+
+<a name="line453">453: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line457">457: </a><font color="#B22222">/*@</font>
+<a name="line458">458: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetCacheSize.html#PCSPAISetCacheSize">PCSPAISetCacheSize</A> - specify cache size in the SPAI preconditioner</font>
+
+<a name="line460">460: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line461">461: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line462">462: </a><font color="#B22222">- n -  cache size {0,1,2,3,4,5} (default 5)</font>
+
+<a name="line464">464: </a><font color="#B22222">  Notes:    SPAI uses a hash table to cache messages and avoid</font>
+<a name="line465">465: </a><font color="#B22222">                 redundant communication. If suggest always using</font>
+<a name="line466">466: </a><font color="#B22222">                 5. This parameter is irrelevant in the serial</font>
+<a name="line467">467: </a><font color="#B22222">                 version.</font>
+
+<a name="line469">469: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line471">471: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line472">472: </a><font color="#B22222">@*/</font>
+<a name="line473">473: </a><strong><font color="#4169E1"><a name="PCSPAISetCacheSize"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetCacheSize.html#PCSPAISetCacheSize">PCSPAISetCacheSize</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int cache_size)</font></strong>
+<a name="line474">474: </a>{
+<a name="line475">475: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line477">477: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetCacheSize_C"</font>,(void (**)(void))&amp;f);
+<a name="line478">478: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line479">479: </a>    (*f)(pc,cache_size);
+<a name="line480">480: </a>  }
+<a name="line481">481: </a>  <font color="#4169E1">return</font>(0);
+<a name="line482">482: </a>}
+
+<a name="line484">484: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line488">488: </a><font color="#B22222">/*@</font>
+<a name="line489">489: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetVerbose.html#PCSPAISetVerbose">PCSPAISetVerbose</A> - verbosity level for the SPAI preconditioner</font>
+
+<a name="line491">491: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line492">492: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line493">493: </a><font color="#B22222">- n - level (default 1)</font>
+
+<a name="line495">495: </a><font color="#B22222">  Notes: print parameters, timings and matrix statistics</font>
+
+<a name="line497">497: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line499">499: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line500">500: </a><font color="#B22222">@*/</font>
+<a name="line501">501: </a><strong><font color="#4169E1"><a name="PCSPAISetVerbose"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetVerbose.html#PCSPAISetVerbose">PCSPAISetVerbose</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int verbose)</font></strong>
+<a name="line502">502: </a>{
+<a name="line503">503: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line505">505: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetVerbose_C"</font>,(void (**)(void))&amp;f);
+<a name="line506">506: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line507">507: </a>    (*f)(pc,verbose);
+<a name="line508">508: </a>  }
+<a name="line509">509: </a>  <font color="#4169E1">return</font>(0);
+<a name="line510">510: </a>}
+
+<a name="line512">512: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line516">516: </a><font color="#B22222">/*@</font>
+<a name="line517">517: </a><font color="#B22222">  <A href="../../../../../docs/manualpages/PC/PCSPAISetSp.html#PCSPAISetSp">PCSPAISetSp</A> - specify a symmetric matrix sparsity pattern in the SPAI preconditioner</font>
+
+<a name="line519">519: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line520">520: </a><font color="#B22222">+ pc - the preconditioner</font>
+<a name="line521">521: </a><font color="#B22222">- n - 0 or 1</font>
+
+<a name="line523">523: </a><font color="#B22222">  Notes: If A has a symmetric nonzero pattern use -sp 1 to</font>
+<a name="line524">524: </a><font color="#B22222">                 improve performance by eliminating some communication</font>
+<a name="line525">525: </a><font color="#B22222">                 in the parallel version. Even if A does not have a</font>
+<a name="line526">526: </a><font color="#B22222">                 symmetric nonzero pattern -sp 1 may well lead to good</font>
+<a name="line527">527: </a><font color="#B22222">                 results, but the code will not follow the published</font>
+<a name="line528">528: </a><font color="#B22222">                 SPAI algorithm exactly.</font>
+
+
+<a name="line531">531: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line533">533: </a><font color="#B22222">.seealso: <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A>, <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>()</font>
+<a name="line534">534: </a><font color="#B22222">@*/</font>
+<a name="line535">535: </a><strong><font color="#4169E1"><a name="PCSPAISetSp"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCSPAISetSp.html#PCSPAISetSp">PCSPAISetSp</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,int sp)</font></strong>
+<a name="line536">536: </a>{
+<a name="line537">537: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*f)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,int);
+<a name="line539">539: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetSp_C"</font>,(void (**)(void))&amp;f);
+<a name="line540">540: </a>  <font color="#4169E1">if</font> (f) {
+<a name="line541">541: </a>    (*f)(pc,sp);
+<a name="line542">542: </a>  }
+<a name="line543">543: </a>  <font color="#4169E1">return</font>(0);
+<a name="line544">544: </a>}
+
+<a name="line546">546: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line548">548: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line552">552: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_SPAI"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetFromOptions_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line553">553: </a>{
+<a name="line554">554: </a>  PC_SPAI        *ispai = (PC_SPAI*)pc-&gt;data;
+<a name="line556">556: </a>  int            nbsteps1,max1,maxnew1,block_size1,cache_size,verbose,sp;
+<a name="line557">557: </a>  double         epsilon1;
+<a name="line558">558: </a>  <A href="../../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     flg;
+
+<a name="line561">561: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"SPAI options"</font>);
+<a name="line562">562: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-pc_spai_epsilon"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetEpsilon.html#PCSPAISetEpsilon">PCSPAISetEpsilon</A>"</font>,ispai-&gt;epsilon,&amp;epsilon1,&amp;flg);
+<a name="line563">563: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line564">564: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetEpsilon.html#PCSPAISetEpsilon">PCSPAISetEpsilon</A>(pc,epsilon1);
+<a name="line565">565: </a>    }
+<a name="line566">566: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_nbsteps"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetNBSteps.html#PCSPAISetNBSteps">PCSPAISetNBSteps</A>"</font>,ispai-&gt;nbsteps,&amp;nbsteps1,&amp;flg);
+<a name="line567">567: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line568">568: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetNBSteps.html#PCSPAISetNBSteps">PCSPAISetNBSteps</A>(pc,nbsteps1);
+<a name="line569">569: </a>    }
+<a name="line570">570: </a>    <font color="#B22222">/* added 1/7/99 g.h. */</font>
+<a name="line571">571: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_max"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetMax.html#PCSPAISetMax">PCSPAISetMax</A>"</font>,ispai-&gt;max,&amp;max1,&amp;flg);
+<a name="line572">572: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line573">573: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetMax.html#PCSPAISetMax">PCSPAISetMax</A>(pc,max1);
+<a name="line574">574: </a>    }
+<a name="line575">575: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_maxnew"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A>"</font>,ispai-&gt;maxnew,&amp;maxnew1,&amp;flg);
+<a name="line576">576: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line577">577: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A>(pc,maxnew1);
+<a name="line578">578: </a>    }
+<a name="line579">579: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_block_size"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetBlockSize.html#PCSPAISetBlockSize">PCSPAISetBlockSize</A>"</font>,ispai-&gt;block_size,&amp;block_size1,&amp;flg);
+<a name="line580">580: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line581">581: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetBlockSize.html#PCSPAISetBlockSize">PCSPAISetBlockSize</A>(pc,block_size1);
+<a name="line582">582: </a>    }
+<a name="line583">583: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_cache_size"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetCacheSize.html#PCSPAISetCacheSize">PCSPAISetCacheSize</A>"</font>,ispai-&gt;cache_size,&amp;cache_size,&amp;flg);
+<a name="line584">584: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line585">585: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetCacheSize.html#PCSPAISetCacheSize">PCSPAISetCacheSize</A>(pc,cache_size);
+<a name="line586">586: </a>    }
+<a name="line587">587: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_verbose"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetVerbose.html#PCSPAISetVerbose">PCSPAISetVerbose</A>"</font>,ispai-&gt;verbose,&amp;verbose,&amp;flg);
+<a name="line588">588: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line589">589: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetVerbose.html#PCSPAISetVerbose">PCSPAISetVerbose</A>(pc,verbose);
+<a name="line590">590: </a>    }
+<a name="line591">591: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_spai_sp"</font>,<font color="#666666">""</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCSPAISetSp.html#PCSPAISetSp">PCSPAISetSp</A>"</font>,ispai-&gt;sp,&amp;sp,&amp;flg);
+<a name="line592">592: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line593">593: </a>      <A href="../../../../../docs/manualpages/PC/PCSPAISetSp.html#PCSPAISetSp">PCSPAISetSp</A>(pc,sp);
+<a name="line594">594: </a>    }
+<a name="line595">595: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line596">596: </a>  <font color="#4169E1">return</font>(0);
+<a name="line597">597: </a>}
+
+<a name="line599">599: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line601">601: </a><font color="#B22222">/*MC</font>
+<a name="line602">602: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCSPAI.html#PCSPAI">PCSPAI</A> - Use the Sparse Approximate Inverse method of Grote and Barnard</font>
+<a name="line603">603: </a><font color="#B22222">     as a preconditioner (SIAM J. Sci. Comput.; vol 18, nr 3)</font>
+
+<a name="line605">605: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line606">606: </a><font color="#B22222">+  -pc_spai_epsilon &lt;eps&gt; - set tolerance</font>
+<a name="line607">607: </a><font color="#B22222">.  -pc_spai_nbstep &lt;n&gt; - set nbsteps</font>
+<a name="line608">608: </a><font color="#B22222">.  -pc_spai_max &lt;m&gt; - set max</font>
+<a name="line609">609: </a><font color="#B22222">.  -pc_spai_max_new &lt;m&gt; - set maxnew</font>
+<a name="line610">610: </a><font color="#B22222">.  -pc_spai_block_size &lt;n&gt; - set block size</font>
+<a name="line611">611: </a><font color="#B22222">.  -pc_spai_cache_size &lt;n&gt; - set cache size</font>
+<a name="line612">612: </a><font color="#B22222">.  -pc_spai_sp &lt;m&gt; - set sp</font>
+<a name="line613">613: </a><font color="#B22222">-  -pc_spai_set_verbose &lt;true,false&gt; - verbose output</font>
+
+<a name="line615">615: </a><font color="#B22222">   Notes: This only works with AIJ matrices.</font>
+
+<a name="line617">617: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line619">619: </a><font color="#B22222">   Concepts: approximate inverse</font>
+
+<a name="line621">621: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>(), <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCType.html#PCType">PCType</A> (for list of available types), <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,</font>
+<a name="line622">622: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/PC/PCSPAISetEpsilon.html#PCSPAISetEpsilon">PCSPAISetEpsilon</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetMax.html#PCSPAISetMax">PCSPAISetMax</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetMaxNew.html#PCSPAISetMaxNew">PCSPAISetMaxNew</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetBlockSize.html#PCSPAISetBlockSize">PCSPAISetBlockSize</A>(),</font>
+<a name="line623">623: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/PC/PCSPAISetVerbose.html#PCSPAISetVerbose">PCSPAISetVerbose</A>(), <A href="../../../../../docs/manualpages/PC/PCSPAISetSp.html#PCSPAISetSp">PCSPAISetSp</A>()</font>
+<a name="line624">624: </a><font color="#B22222">M*/</font>
+
+<a name="line629">629: </a><strong><font color="#4169E1"><a name="PCCreate_SPAI"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCCreate_SPAI(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line630">630: </a>{
+<a name="line631">631: </a>  PC_SPAI        *ispai;
+
+<a name="line635">635: </a>  PetscNewLog(pc,PC_SPAI,&amp;ispai);
+<a name="line636">636: </a>  pc-&gt;data           = ispai;
+
+<a name="line638">638: </a>  pc-&gt;ops-&gt;destroy         = PCDestroy_SPAI;
+<a name="line639">639: </a>  pc-&gt;ops-&gt;apply           = PCApply_SPAI;
+<a name="line640">640: </a>  pc-&gt;ops-&gt;applyrichardson = 0;
+<a name="line641">641: </a>  pc-&gt;ops-&gt;setup           = PCSetUp_SPAI;
+<a name="line642">642: </a>  pc-&gt;ops-&gt;view            = PCView_SPAI;
+<a name="line643">643: </a>  pc-&gt;ops-&gt;setfromoptions  = PCSetFromOptions_SPAI;
+
+<a name="line645">645: </a>  ispai-&gt;epsilon    = .4;
+<a name="line646">646: </a>  ispai-&gt;nbsteps    = 5;
+<a name="line647">647: </a>  ispai-&gt;max        = 5000;
+<a name="line648">648: </a>  ispai-&gt;maxnew     = 5;
+<a name="line649">649: </a>  ispai-&gt;block_size = 1;
+<a name="line650">650: </a>  ispai-&gt;cache_size = 5;
+<a name="line651">651: </a>  ispai-&gt;verbose    = 0;
+
+<a name="line653">653: </a>  ispai-&gt;sp         = 1;
+<a name="line654">654: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,&amp;(ispai-&gt;comm_spai));
+
+<a name="line656">656: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetEpsilon_C"</font>,
+<a name="line657">657: </a>                    <font color="#666666">"PCSPAISetEpsilon_SPAI"</font>,
+<a name="line658">658: </a>                     PCSPAISetEpsilon_SPAI);
+<a name="line659">659: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetNBSteps_C"</font>,
+<a name="line660">660: </a>                    <font color="#666666">"PCSPAISetNBSteps_SPAI"</font>,
+<a name="line661">661: </a>                     PCSPAISetNBSteps_SPAI);
+<a name="line662">662: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetMax_C"</font>,
+<a name="line663">663: </a>                    <font color="#666666">"PCSPAISetMax_SPAI"</font>,
+<a name="line664">664: </a>                     PCSPAISetMax_SPAI);
+<a name="line665">665: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetMaxNew_CC"</font>,
+<a name="line666">666: </a>                    <font color="#666666">"PCSPAISetMaxNew_SPAI"</font>,
+<a name="line667">667: </a>                     PCSPAISetMaxNew_SPAI);
+<a name="line668">668: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetBlockSize_C"</font>,
+<a name="line669">669: </a>                    <font color="#666666">"PCSPAISetBlockSize_SPAI"</font>,
+<a name="line670">670: </a>                     PCSPAISetBlockSize_SPAI);
+<a name="line671">671: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetCacheSize_C"</font>,
+<a name="line672">672: </a>                    <font color="#666666">"PCSPAISetCacheSize_SPAI"</font>,
+<a name="line673">673: </a>                     PCSPAISetCacheSize_SPAI);
+<a name="line674">674: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetVerbose_C"</font>,
+<a name="line675">675: </a>                    <font color="#666666">"PCSPAISetVerbose_SPAI"</font>,
+<a name="line676">676: </a>                     PCSPAISetVerbose_SPAI);
+<a name="line677">677: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,<font color="#666666">"PCSPAISetSp_C"</font>,
+<a name="line678">678: </a>                    <font color="#666666">"PCSPAISetSp_SPAI"</font>,
+<a name="line679">679: </a>                     PCSPAISetSp_SPAI);
+
+<a name="line681">681: </a>  <font color="#4169E1">return</font>(0);
+<a name="line682">682: </a>}
+
+<a name="line685">685: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line687">687: </a><font color="#B22222">/*</font>
+<a name="line688">688: </a><font color="#B22222">   Converts from a PETSc matrix to an SPAI matrix </font>
+<a name="line689">689: </a><font color="#B22222">*/</font>
+<a name="line692">692: </a><strong><font color="#4169E1"><a name="ConvertMatToMatrix"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertMatToMatrix(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm, <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> AT,matrix **B)</font></strong>
+<a name="line693">693: </a>{
+<a name="line694">694: </a>  matrix                  *M;
+<a name="line695">695: </a>  int                     i,j,col;
+<a name="line696">696: </a>  int                     row_indx;
+<a name="line697">697: </a>  int                     len,pe,local_indx,start_indx;
+<a name="line698">698: </a>  int                     *mapping;
+<a name="line699">699: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>          ierr;
+<a name="line700">700: </a>  const int               *cols;
+<a name="line701">701: </a>  const double            *vals;
+<a name="line702">702: </a>  int                     *num_ptr,n,mnl,nnl,nz,rstart,rend;
+<a name="line703">703: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>             size,rank;
+<a name="line704">704: </a>  <font color="#4169E1">struct compressed_lines</font> *rows;
+
+<a name="line707">707: </a>
+<a name="line708">708: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(comm,&amp;size);
+<a name="line709">709: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line710">710: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(A,&amp;n,&amp;n);
+<a name="line711">711: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>(A,&amp;mnl,&amp;nnl);
+
+<a name="line713">713: </a>  <font color="#B22222">/*</font>
+<a name="line714">714: </a><font color="#B22222">    not sure why a barrier is required. commenting out</font>
+<a name="line715">715: </a><font color="#B22222">  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</A>(comm);</font>
+<a name="line716">716: </a><font color="#B22222">  */</font>
+
+<a name="line718">718: </a>  M = new_matrix((SPAI_Comm)comm);
+<a name="line719">719: </a>
+<a name="line720">720: </a>  M-&gt;n = n;
+<a name="line721">721: </a>  M-&gt;bs = 1;
+<a name="line722">722: </a>  M-&gt;max_block_size = 1;
+
+<a name="line724">724: </a>  M-&gt;mnls          = (int*)malloc(<font color="#4169E1">sizeof</font>(int)*size);
+<a name="line725">725: </a>  M-&gt;start_indices = (int*)malloc(<font color="#4169E1">sizeof</font>(int)*size);
+<a name="line726">726: </a>  M-&gt;pe            = (int*)malloc(<font color="#4169E1">sizeof</font>(int)*n);
+<a name="line727">727: </a>  M-&gt;block_sizes   = (int*)malloc(<font color="#4169E1">sizeof</font>(int)*n);
+<a name="line728">728: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) M-&gt;block_sizes[i] = 1;
+
+<a name="line730">730: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allgather.html#MPI_Allgather">MPI_Allgather</A>(&amp;mnl,1,MPI_INT,M-&gt;mnls,1,MPI_INT,comm);
+
+<a name="line732">732: </a>  M-&gt;start_indices[0] = 0;
+<a name="line733">733: </a>  <font color="#4169E1">for</font> (i=1; i&lt;size; i++) {
+<a name="line734">734: </a>    M-&gt;start_indices[i] = M-&gt;start_indices[i-1] + M-&gt;mnls[i-1];
+<a name="line735">735: </a>  }
+
+<a name="line737">737: </a>  M-&gt;mnl = M-&gt;mnls[M-&gt;myid];
+<a name="line738">738: </a>  M-&gt;my_start_index = M-&gt;start_indices[M-&gt;myid];
+
+<a name="line740">740: </a>  <font color="#4169E1">for</font> (i=0; i&lt;size; i++) {
+<a name="line741">741: </a>    start_indx = M-&gt;start_indices[i];
+<a name="line742">742: </a>    <font color="#4169E1">for</font> (j=0; j&lt;M-&gt;mnls[i]; j++)
+<a name="line743">743: </a>      M-&gt;pe[start_indx+j] = i;
+<a name="line744">744: </a>  }
+
+<a name="line746">746: </a>  <font color="#4169E1">if</font> (AT) {
+<a name="line747">747: </a>    M-&gt;lines = new_compressed_lines(M-&gt;mnls[rank],1);
+<a name="line748">748: </a>  } <font color="#4169E1">else</font> {
+<a name="line749">749: </a>    M-&gt;lines = new_compressed_lines(M-&gt;mnls[rank],0);
+<a name="line750">750: </a>  }
+
+<a name="line752">752: </a>  rows = M-&gt;lines;
+
+<a name="line754">754: </a>  <font color="#B22222">/* Determine the mapping from global indices to pointers */</font>
+<a name="line755">755: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(M-&gt;n*<font color="#4169E1">sizeof</font>(int),&amp;mapping);
+<a name="line756">756: </a>  pe         = 0;
+<a name="line757">757: </a>  local_indx = 0;
+<a name="line758">758: </a>  <font color="#4169E1">for</font> (i=0; i&lt;M-&gt;n; i++) {
+<a name="line759">759: </a>    <font color="#4169E1">if</font> (local_indx &gt;= M-&gt;mnls[pe]) {
+<a name="line760">760: </a>      pe++;
+<a name="line761">761: </a>      local_indx = 0;
+<a name="line762">762: </a>    }
+<a name="line763">763: </a>    mapping[i] = local_indx + M-&gt;start_indices[pe];
+<a name="line764">764: </a>    local_indx++;
+<a name="line765">765: </a>  }
+
+
+<a name="line768">768: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(mnl*<font color="#4169E1">sizeof</font>(int),&amp;num_ptr);
+
+<a name="line770">770: </a>  <font color="#B22222">/*********************************************************/</font>
+<a name="line771">771: </a>  <font color="#B22222">/************** Set up the row structure *****************/</font>
+<a name="line772">772: </a>  <font color="#B22222">/*********************************************************/</font>
+
+<a name="line774">774: </a>  <font color="#B22222">/* count number of nonzeros in every row */</font>
+<a name="line775">775: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>(A,&amp;rstart,&amp;rend);
+<a name="line776">776: </a>  <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line777">777: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(A,i,&amp;num_ptr[i-rstart],<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line778">778: </a>    <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(A,i,&amp;num_ptr[i-rstart],<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line779">779: </a>  }
+
+<a name="line781">781: </a>  <font color="#B22222">/* allocate buffers */</font>
+<a name="line782">782: </a>  len = 0;
+<a name="line783">783: </a>  <font color="#4169E1">for</font> (i=0; i&lt;mnl; i++) {
+<a name="line784">784: </a>    <font color="#4169E1">if</font> (len &lt; num_ptr[i]) len = num_ptr[i];
+<a name="line785">785: </a>  }
+
+<a name="line787">787: </a>  <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line788">788: </a>    row_indx             = i-rstart;
+<a name="line789">789: </a>    len                  = num_ptr[row_indx];
+<a name="line790">790: </a>    rows-&gt;ptrs[row_indx] = (int*)malloc(len*<font color="#4169E1">sizeof</font>(int));
+<a name="line791">791: </a>    rows-&gt;A[row_indx]    = (double*)malloc(len*<font color="#4169E1">sizeof</font>(double));
+<a name="line792">792: </a>  }
+
+<a name="line794">794: </a>  <font color="#B22222">/* copy the matrix */</font>
+<a name="line795">795: </a>  <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line796">796: </a>    row_indx = i - rstart;
+<a name="line797">797: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(A,i,&amp;nz,&amp;cols,&amp;vals);
+<a name="line798">798: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line799">799: </a>      col = cols[j];
+<a name="line800">800: </a>      len = rows-&gt;len[row_indx]++;
+<a name="line801">801: </a>      rows-&gt;ptrs[row_indx][len] = mapping[col];
+<a name="line802">802: </a>      rows-&gt;A[row_indx][len]    = vals[j];
+<a name="line803">803: </a>    }
+<a name="line804">804: </a>    rows-&gt;slen[row_indx] = rows-&gt;len[row_indx];
+<a name="line805">805: </a>    <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(A,i,&amp;nz,&amp;cols,&amp;vals);
+<a name="line806">806: </a>  }
+
+
+<a name="line809">809: </a>  <font color="#B22222">/************************************************************/</font>
+<a name="line810">810: </a>  <font color="#B22222">/************** Set up the column structure *****************/</font>
+<a name="line811">811: </a>  <font color="#B22222">/*********************************************************/</font>
+
+<a name="line813">813: </a>  <font color="#4169E1">if</font> (AT) {
+
+<a name="line815">815: </a>    <font color="#B22222">/* count number of nonzeros in every column */</font>
+<a name="line816">816: </a>    <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line817">817: </a>      <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(AT,i,&amp;num_ptr[i-rstart],<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line818">818: </a>      <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(AT,i,&amp;num_ptr[i-rstart],<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line819">819: </a>    }
+
+<a name="line821">821: </a>    <font color="#B22222">/* allocate buffers */</font>
+<a name="line822">822: </a>    len = 0;
+<a name="line823">823: </a>    <font color="#4169E1">for</font> (i=0; i&lt;mnl; i++) {
+<a name="line824">824: </a>      <font color="#4169E1">if</font> (len &lt; num_ptr[i]) len = num_ptr[i];
+<a name="line825">825: </a>    }
+
+<a name="line827">827: </a>    <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line828">828: </a>      row_indx = i-rstart;
+<a name="line829">829: </a>      len      = num_ptr[row_indx];
+<a name="line830">830: </a>      rows-&gt;rptrs[row_indx] = (int*)malloc(len*<font color="#4169E1">sizeof</font>(int));
+<a name="line831">831: </a>    }
+
+<a name="line833">833: </a>    <font color="#B22222">/* copy the matrix (i.e., the structure) */</font>
+<a name="line834">834: </a>    <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line835">835: </a>      row_indx = i - rstart;
+<a name="line836">836: </a>      <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(AT,i,&amp;nz,&amp;cols,&amp;vals);
+<a name="line837">837: </a>      <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line838">838: </a>        col = cols[j];
+<a name="line839">839: </a>        len = rows-&gt;rlen[row_indx]++;
+<a name="line840">840: </a>        rows-&gt;rptrs[row_indx][len] = mapping[col];
+<a name="line841">841: </a>      }
+<a name="line842">842: </a>      <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(AT,i,&amp;nz,&amp;cols,&amp;vals);
+<a name="line843">843: </a>    }
+<a name="line844">844: </a>  }
+
+<a name="line846">846: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(num_ptr);
+<a name="line847">847: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(mapping);
+
+<a name="line849">849: </a>  order_pointers(M);
+<a name="line850">850: </a>  M-&gt;maxnz = calc_maxnz(M);
+
+<a name="line852">852: </a>  *B = M;
+
+<a name="line854">854: </a>  <font color="#4169E1">return</font>(0);
+<a name="line855">855: </a>}
+
+<a name="line857">857: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line859">859: </a><font color="#B22222">/*</font>
+<a name="line860">860: </a><font color="#B22222">   Converts from an SPAI matrix B  to a PETSc matrix PB.</font>
+<a name="line861">861: </a><font color="#B22222">   This assumes that the the SPAI matrix B is stored in</font>
+<a name="line862">862: </a><font color="#B22222">   COMPRESSED-ROW format.</font>
+<a name="line863">863: </a><font color="#B22222">*/</font>
+<a name="line866">866: </a><strong><font color="#4169E1"><a name="ConvertMatrixToMat"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertMatrixToMat(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,matrix *B,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *PB)</font></strong>
+<a name="line867">867: </a>{
+<a name="line868">868: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size,rank;
+<a name="line870">870: </a>  int            m,n,M,N;
+<a name="line871">871: </a>  int            d_nz,o_nz;
+<a name="line872">872: </a>  int            *d_nnz,*o_nnz;
+<a name="line873">873: </a>  int            i,k,global_row,global_col,first_diag_col,last_diag_col;
+<a name="line874">874: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    val;
+
+<a name="line877">877: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(comm,&amp;size);
+<a name="line878">878: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line879">879: </a>
+<a name="line880">880: </a>  m = n = B-&gt;mnls[rank];
+<a name="line881">881: </a>  d_nz = o_nz = 0;
+
+<a name="line883">883: </a>  <font color="#B22222">/* Determine preallocation for <A href="../../../../../docs/manualpages/Mat/MatCreateMPIAIJ.html#MatCreateMPIAIJ">MatCreateMPIAIJ</A> */</font>
+<a name="line884">884: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(m*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;d_nnz);
+<a name="line885">885: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(m*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;o_nnz);
+<a name="line886">886: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) d_nnz[i] = o_nnz[i] = 0;
+<a name="line887">887: </a>  first_diag_col = B-&gt;start_indices[rank];
+<a name="line888">888: </a>  last_diag_col = first_diag_col + B-&gt;mnls[rank];
+<a name="line889">889: </a>  <font color="#4169E1">for</font> (i=0; i&lt;B-&gt;mnls[rank]; i++) {
+<a name="line890">890: </a>    <font color="#4169E1">for</font> (k=0; k&lt;B-&gt;lines-&gt;len[i]; k++) {
+<a name="line891">891: </a>      global_col = B-&gt;lines-&gt;ptrs[i][k];
+<a name="line892">892: </a>      <font color="#4169E1">if</font> ((global_col &gt;= first_diag_col) &amp;&amp; (global_col &lt;= last_diag_col))
+<a name="line893">893: </a>        d_nnz[i]++;
+<a name="line894">894: </a>      <font color="#4169E1">else</font>
+<a name="line895">895: </a>        o_nnz[i]++;
+<a name="line896">896: </a>    }
+<a name="line897">897: </a>  }
+
+<a name="line899">899: </a>  M = N = B-&gt;n;
+<a name="line900">900: </a>  <font color="#B22222">/* Here we only know how to create AIJ format */</font>
+<a name="line901">901: </a>  <A href="../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(comm,PB);
+<a name="line902">902: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(*PB,m,n,M,N);
+<a name="line903">903: </a>  <A href="../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(*PB,<A href="../../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>);
+<a name="line904">904: </a>  <A href="../../../../../docs/manualpages/Mat/MatSeqAIJSetPreallocation.html#MatSeqAIJSetPreallocation">MatSeqAIJSetPreallocation</A>(*PB,d_nz,d_nnz);
+<a name="line905">905: </a>  <A href="../../../../../docs/manualpages/Mat/MatMPIAIJSetPreallocation.html#MatMPIAIJSetPreallocation">MatMPIAIJSetPreallocation</A>(*PB,d_nz,d_nnz,o_nz,o_nnz);
+
+<a name="line907">907: </a>  <font color="#4169E1">for</font> (i=0; i&lt;B-&gt;mnls[rank]; i++) {
+<a name="line908">908: </a>    global_row = B-&gt;start_indices[rank]+i;
+<a name="line909">909: </a>    <font color="#4169E1">for</font> (k=0; k&lt;B-&gt;lines-&gt;len[i]; k++) {
+<a name="line910">910: </a>      global_col = B-&gt;lines-&gt;ptrs[i][k];
+<a name="line911">911: </a>      val = B-&gt;lines-&gt;A[i][k];
+<a name="line912">912: </a>      <A href="../../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(*PB,1,&amp;global_row,1,&amp;global_col,&amp;val,<A href="../../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line913">913: </a>    }
+<a name="line914">914: </a>  }
+
+<a name="line916">916: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(d_nnz);
+<a name="line917">917: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(o_nnz);
+
+<a name="line919">919: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*PB,MAT_FINAL_ASSEMBLY);
+<a name="line920">920: </a>  <A href="../../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*PB,MAT_FINAL_ASSEMBLY);
+
+<a name="line922">922: </a>  <font color="#4169E1">return</font>(0);
+<a name="line923">923: </a>}
+
+<a name="line925">925: </a><font color="#B22222">/**********************************************************************/</font>
+
+<a name="line927">927: </a><font color="#B22222">/*</font>
+<a name="line928">928: </a><font color="#B22222">   Converts from an SPAI vector v  to a PETSc vec Pv.</font>
+<a name="line929">929: </a><font color="#B22222">*/</font>
+<a name="line932">932: </a><strong><font color="#4169E1"><a name="ConvertVectorToVec"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ConvertVectorToVec(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,vector *v,<A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Pv)</font></strong>
+<a name="line933">933: </a>{
+<a name="line935">935: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size,rank;
+<a name="line936">936: </a>  int            m,M,i,*mnls,*start_indices,*global_indices;
+<a name="line937">937: </a>
+<a name="line939">939: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(comm,&amp;size);
+<a name="line940">940: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line941">941: </a>
+<a name="line942">942: </a>  m = v-&gt;mnl;
+<a name="line943">943: </a>  M = v-&gt;n;
+<a name="line944">944: </a>
+<a name="line945">945: </a>
+<a name="line946">946: </a>  <A href="../../../../../docs/manualpages/Vec/VecCreateMPI.html#VecCreateMPI">VecCreateMPI</A>(comm,m,M,Pv);
+
+<a name="line948">948: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(size*<font color="#4169E1">sizeof</font>(int),&amp;mnls);
+<a name="line949">949: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allgather.html#MPI_Allgather">MPI_Allgather</A>(&amp;v-&gt;mnl,1,MPI_INT,mnls,1,MPI_INT,comm);
+<a name="line950">950: </a>
+<a name="line951">951: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(size*<font color="#4169E1">sizeof</font>(int),&amp;start_indices);
+<a name="line952">952: </a>  start_indices[0] = 0;
+<a name="line953">953: </a>  <font color="#4169E1">for</font> (i=1; i&lt;size; i++)
+<a name="line954">954: </a>    start_indices[i] = start_indices[i-1] +mnls[i-1];
+<a name="line955">955: </a>
+<a name="line956">956: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>(v-&gt;mnl*<font color="#4169E1">sizeof</font>(int),&amp;global_indices);
+<a name="line957">957: </a>  <font color="#4169E1">for</font> (i=0; i&lt;v-&gt;mnl; i++)
+<a name="line958">958: </a>    global_indices[i] = start_indices[rank] + i;
+
+<a name="line960">960: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(mnls);
+<a name="line961">961: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(start_indices);
+<a name="line962">962: </a>
+<a name="line963">963: </a>  <A href="../../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>(*Pv,v-&gt;mnl,global_indices,v-&gt;v,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line964">964: </a>  <A href="../../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(*Pv);
+<a name="line965">965: </a>  <A href="../../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(*Pv);
+
+<a name="line967">967: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(global_indices);
+<a name="line968">968: </a>  <font color="#4169E1">return</font>(0);
+<a name="line969">969: </a>}
+
+
+
+
+</pre>
+</body>
+
+</html>

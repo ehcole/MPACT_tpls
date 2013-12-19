@@ -1,0 +1,475 @@
+<center><a href="ex5s.c">Actual source code: ex5s.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2011-03-17T19:07:26+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line2">  2: </a>static char help[] = <font color="#666666">"2d Bratu problem in shared memory parallel with <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>.\n\</font>
+<a name="line3">  3: </a><font color="#666666">We solve the  Bratu (SFI - solid fuel ignition) problem in a 2D rectangular\n\</font>
+<a name="line4">  4: </a><font color="#666666">domain, uses SHARED MEMORY to evaluate the user function.\n\</font>
+<a name="line5">  5: </a><font color="#666666">The command line options include:\n\</font>
+<a name="line6">  6: </a><font color="#666666">  -par &lt;parameter&gt;, where &lt;parameter&gt; indicates the problem's nonlinearity\n\</font>
+<a name="line7">  7: </a><font color="#666666">     problem SFI:  &lt;parameter&gt; = Bratu parameter (0 &lt;= par &lt;= 6.81)\n\</font>
+<a name="line8">  8: </a><font color="#666666">  -mx &lt;xg&gt;, where &lt;xg&gt; = number of grid points in the x-direction\n\</font>
+<a name="line9">  9: </a><font color="#666666">  -my &lt;yg&gt;, where &lt;yg&gt; = number of grid points in the y-direction\n\</font>
+<a name="line10"> 10: </a><font color="#666666">  -use_fortran_function: use Fortran coded function, rather than C\n"</font>;
+
+<a name="line12"> 12: </a><font color="#B22222">/*</font>
+<a name="line13"> 13: </a><font color="#B22222">             This code compiles ONLY on SGI systems</font>
+<a name="line14"> 14: </a><font color="#B22222">            ========================================</font>
+<a name="line15"> 15: </a><font color="#B22222">*/</font>
+<a name="line16"> 16: </a><font color="#B22222">/*T</font>
+<a name="line17"> 17: </a><font color="#B22222">   Concepts: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>^parallel Bratu example</font>
+<a name="line18"> 18: </a><font color="#B22222">   Concepts: shared memory</font>
+<a name="line19"> 19: </a><font color="#B22222">   Processors: n</font>
+<a name="line20"> 20: </a><font color="#B22222">T*/</font>
+
+<a name="line22"> 22: </a><font color="#B22222">/*</font>
+
+<a name="line24"> 24: </a><font color="#B22222">     Programming model: Combination of </font>
+<a name="line25"> 25: </a><font color="#B22222">        1) MPI message passing for PETSc routines</font>
+<a name="line26"> 26: </a><font color="#B22222">        2) automatic loop parallism (using shared memory) for user</font>
+<a name="line27"> 27: </a><font color="#B22222">           provided function.</font>
+
+<a name="line29"> 29: </a><font color="#B22222">       While the user function is being evaluated all MPI processes except process</font>
+<a name="line30"> 30: </a><font color="#B22222">     0 blocks. Process zero spawns nt threads to evaluate the user function. Once </font>
+<a name="line31"> 31: </a><font color="#B22222">     the user function is complete, the worker threads are suspended and all the MPI processes</font>
+<a name="line32"> 32: </a><font color="#B22222">     continue.</font>
+
+<a name="line34"> 34: </a><font color="#B22222">     Other useful options:</font>
+
+<a name="line36"> 36: </a><font color="#B22222">       -snes_mf : use matrix free operator and no preconditioner</font>
+<a name="line37"> 37: </a><font color="#B22222">       -snes_mf_operator : use matrix free operator but compute Jacobian via</font>
+<a name="line38"> 38: </a><font color="#B22222">                           finite differences to form preconditioner</font>
+
+<a name="line40"> 40: </a><font color="#B22222">       Environmental variable:</font>
+
+<a name="line42"> 42: </a><font color="#B22222">         setenv MPC_NUM_THREADS nt &lt;- set number of threads processor 0 should </font>
+<a name="line43"> 43: </a><font color="#B22222">                                      use to evaluate user provided function</font>
+
+<a name="line45"> 45: </a><font color="#B22222">       Note: The number of MPI processes (set with the mpiexec option -np) can </font>
+<a name="line46"> 46: </a><font color="#B22222">       be set completely independently from the number of threads process 0 </font>
+<a name="line47"> 47: </a><font color="#B22222">       uses to evaluate the function (though usually one would make them the same).</font>
+<a name="line48"> 48: </a><font color="#B22222">*/</font>
+<a name="line49"> 49: </a>
+<a name="line50"> 50: </a><font color="#B22222">/* ------------------------------------------------------------------------</font>
+
+<a name="line52"> 52: </a><font color="#B22222">    Solid Fuel Ignition (SFI) problem.  This problem is modeled by</font>
+<a name="line53"> 53: </a><font color="#B22222">    the partial differential equation</font>
+<a name="line54"> 54: </a><font color="#B22222">  </font>
+<a name="line55"> 55: </a><font color="#B22222">            -Laplacian u - lambda*exp(u) = 0,  0 &lt; x,y &lt; 1,</font>
+<a name="line56"> 56: </a><font color="#B22222">  </font>
+<a name="line57"> 57: </a><font color="#B22222">    with boundary conditions</font>
+<a name="line58"> 58: </a><font color="#B22222">   </font>
+<a name="line59"> 59: </a><font color="#B22222">             u = 0  for  x = 0, x = 1, y = 0, y = 1.</font>
+<a name="line60"> 60: </a><font color="#B22222">  </font>
+<a name="line61"> 61: </a><font color="#B22222">    A finite difference approximation with the usual 5-point stencil</font>
+<a name="line62"> 62: </a><font color="#B22222">    is used to discretize the boundary value problem to obtain a nonlinear </font>
+<a name="line63"> 63: </a><font color="#B22222">    system of equations.</font>
+
+<a name="line65"> 65: </a><font color="#B22222">    The uniprocessor version of this code is snes/examples/tutorials/ex4.c</font>
+<a name="line66"> 66: </a><font color="#B22222">    A parallel distributed memory version is snes/examples/tutorials/ex5.c and ex5f.F</font>
+
+<a name="line68"> 68: </a><font color="#B22222">  ------------------------------------------------------------------------- */</font>
+
+<a name="line70"> 70: </a><font color="#B22222">/* </font>
+<a name="line71"> 71: </a><font color="#B22222">   Include "petscsnes.h" so that we can use <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> solvers.  Note that this</font>
+<a name="line72"> 72: </a><font color="#B22222">   file automatically includes:</font>
+<a name="line73"> 73: </a><font color="#B22222">     petscsys.h       - base PETSc routines   petscvec.h - vectors</font>
+<a name="line74"> 74: </a><font color="#B22222">     petscmat.h - matrices</font>
+<a name="line75"> 75: </a><font color="#B22222">     petscis.h     - index sets            petscksp.h - Krylov subspace methods</font>
+<a name="line76"> 76: </a><font color="#B22222">     petscviewer.h - viewers               petscpc.h  - preconditioners</font>
+<a name="line77"> 77: </a><font color="#B22222">     petscksp.h   - linear solvers</font>
+<a name="line78"> 78: </a><font color="#B22222">*/</font>
+<a name="line79"> 79: </a> #include <A href="../../../../include/petscsnes.h.html">petscsnes.h</A>
+
+<a name="line81"> 81: </a><font color="#B22222">/* </font>
+<a name="line82"> 82: </a><font color="#B22222">   User-defined application context - contains data needed by the </font>
+<a name="line83"> 83: </a><font color="#B22222">   application-provided call-back routines   FormFunction().</font>
+<a name="line84"> 84: </a><font color="#B22222">*/</font>
+<a name="line85"> 85: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line86"> 86: </a>   <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   param;          <font color="#B22222">/* test problem parameter */</font>
+<a name="line87"> 87: </a>   int         mx,my;          <font color="#B22222">/* discretization in x, y directions */</font>
+<a name="line88"> 88: </a>   int         rank;           <font color="#B22222">/* processor rank */</font>
+<a name="line89"> 89: </a>} AppCtx;
+
+<a name="line91"> 91: </a><font color="#B22222">/* </font>
+<a name="line92"> 92: </a><font color="#B22222">   User-defined routines</font>
+<a name="line93"> 93: </a><font color="#B22222">*/</font>
+
+<a name="line99"> 99: </a><font color="#B22222">/* </font>
+<a name="line100">100: </a><font color="#B22222">    The main program is written in C while the user provided function</font>
+<a name="line101">101: </a><font color="#B22222"> is given in both Fortran and C. The main program could also be written </font>
+<a name="line102">102: </a><font color="#B22222"> in Fortran; the ONE PROBLEM is that <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>() cannot be called from </font>
+<a name="line103">103: </a><font color="#B22222"> Fortran on the SGI machines; thus the routine FormFunctionFortran() must</font>
+<a name="line104">104: </a><font color="#B22222"> be written in C.</font>
+<a name="line105">105: </a><font color="#B22222">*/</font>
+<a name="line106">106: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line107">107: </a>{
+<a name="line108">108: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes;                <font color="#B22222">/* nonlinear solver */</font>
+<a name="line109">109: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            x,r;                 <font color="#B22222">/* solution, residual vectors */</font>
+<a name="line110">110: </a>  AppCtx         user;                <font color="#B22222">/* user-defined work context */</font>
+<a name="line111">111: </a>  int            its;                 <font color="#B22222">/* iterations for convergence */</font>
+<a name="line112">112: </a>  int            N,ierr,rstart,rend,*colors,i,ii,ri,rj;
+<a name="line113">113: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*fnc)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*);
+<a name="line114">114: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      bratu_lambda_max = 6.81,bratu_lambda_min = 0.;
+<a name="line115">115: </a>  <A href="../../../../docs/manualpages/Mat/MatFDColoring.html#MatFDColoring">MatFDColoring</A>  fdcoloring;
+<a name="line116">116: </a>  <A href="../../../../docs/manualpages/IS/ISColoring.html#ISColoring">ISColoring</A>     iscoloring;
+<a name="line117">117: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            J;
+<a name="line118">118: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    zero = 0.0;
+<a name="line119">119: </a>  <A href="../../../../docs/manualpages/Sys/PetscTruth.html#PetscTruth">PetscTruth</A>     flg;
+
+<a name="line121">121: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,(char *)0,help);
+<a name="line122">122: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;user.rank);
+
+<a name="line124">124: </a>  <font color="#B22222">/*</font>
+<a name="line125">125: </a><font color="#B22222">     Initialize problem parameters</font>
+<a name="line126">126: </a><font color="#B22222">  */</font>
+<a name="line127">127: </a>  user.mx = 4; user.my = 4; user.param = 6.0;
+<a name="line128">128: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetInt.html#PetscOptionsGetInt">PetscOptionsGetInt</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-mx"</font>,&amp;user.mx,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line129">129: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetInt.html#PetscOptionsGetInt">PetscOptionsGetInt</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-my"</font>,&amp;user.my,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line130">130: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-par"</font>,&amp;user.param,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line131">131: </a>  <font color="#4169E1">if</font> (user.param &gt;= bratu_lambda_max || user.param &lt;= bratu_lambda_min) {
+<a name="line132">132: </a>    <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(1,<font color="#666666">"Lambda is out of range"</font>);
+<a name="line133">133: </a>  }
+<a name="line134">134: </a>  N = user.mx*user.my;
+
+<a name="line136">136: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line137">137: </a><font color="#B22222">     Create nonlinear solver context</font>
+<a name="line138">138: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line140">140: </a>  <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;snes);
+
+<a name="line142">142: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line143">143: </a><font color="#B22222">     Create vector data structures; set function evaluation routine</font>
+<a name="line144">144: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line146">146: </a>  <font color="#B22222">/*</font>
+<a name="line147">147: </a><font color="#B22222">      The routine <A href="../../../../docs/manualpages/Vec/VecCreateShared.html#VecCreateShared">VecCreateShared</A>() creates a parallel vector with each processor</font>
+<a name="line148">148: </a><font color="#B22222">    assigned its own segment, BUT, in addition, the first processor has access to the </font>
+<a name="line149">149: </a><font color="#B22222">    entire array. This is to allow the users function to be based on loop level</font>
+<a name="line150">150: </a><font color="#B22222">    parallelism rather than MPI.</font>
+<a name="line151">151: </a><font color="#B22222">  */</font>
+<a name="line152">152: </a>  <A href="../../../../docs/manualpages/Vec/VecCreateShared.html#VecCreateShared">VecCreateShared</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,N,&amp;x);
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,&amp;r);
+
+<a name="line155">155: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHasName.html#PetscOptionsHasName">PetscOptionsHasName</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-use_fortran_function"</font>,&amp;flg);
+<a name="line156">156: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line157">157: </a>    fnc = FormFunctionFortran;
+<a name="line158">158: </a>  } <font color="#4169E1">else</font> {
+<a name="line159">159: </a>    fnc = FormFunction;
+<a name="line160">160: </a>  }
+
+<a name="line162">162: </a>  <font color="#B22222">/* </font>
+<a name="line163">163: </a><font color="#B22222">     Set function evaluation routine and vector</font>
+<a name="line164">164: </a><font color="#B22222">  */</font>
+<a name="line165">165: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(snes,r,fnc,&amp;user);
+
+<a name="line167">167: </a>  <font color="#B22222">/*</font>
+<a name="line168">168: </a><font color="#B22222">       Currently when using <A href="../../../../docs/manualpages/Vec/VecCreateShared.html#VecCreateShared">VecCreateShared</A>() and using loop level parallelism</font>
+<a name="line169">169: </a><font color="#B22222">    to automatically parallelise the user function it makes no sense for the </font>
+<a name="line170">170: </a><font color="#B22222">    Jacobian to be computed via loop level parallelism, because all the threads</font>
+<a name="line171">171: </a><font color="#B22222">    would be simultaneously calling <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>() causing a bottle-neck.</font>
+
+<a name="line173">173: </a><font color="#B22222">    Thus this example uses the PETSc Jacobian calculations via finite differencing</font>
+<a name="line174">174: </a><font color="#B22222">    to approximate the Jacobian</font>
+<a name="line175">175: </a><font color="#B22222">  */</font>
+
+<a name="line177">177: </a>  <font color="#B22222">/*</font>
+
+<a name="line179">179: </a><font color="#B22222">  */</font>
+<a name="line180">180: </a>  <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRange.html#VecGetOwnershipRange">VecGetOwnershipRange</A>(r,&amp;rstart,&amp;rend);
+<a name="line181">181: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>((rend-rstart)*<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),&amp;colors);
+<a name="line182">182: </a>  <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line183">183: </a>    colors[i - rstart] = 3*((i/user.mx) % 3) + (i % 3);
+<a name="line184">184: </a>  }
+<a name="line185">185: </a>  <A href="../../../../docs/manualpages/IS/ISColoringCreate.html#ISColoringCreate">ISColoringCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,3*2+2,rend-rstart,colors,&amp;iscoloring);
+<a name="line186">186: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(colors);
+
+<a name="line188">188: </a>  <font color="#B22222">/*</font>
+<a name="line189">189: </a><font color="#B22222">     Create and set the nonzero pattern for the Jacobian: This is not done </font>
+<a name="line190">190: </a><font color="#B22222">     particularly efficiently. One should process the boundary nodes separately and </font>
+<a name="line191">191: </a><font color="#B22222">     then use a simple loop for the interior nodes.</font>
+<a name="line192">192: </a><font color="#B22222">       Note that for this code we use the "natural" number of the nodes on the </font>
+<a name="line193">193: </a><font color="#B22222">     grid (since that is what is good for the user provided function). In the </font>
+<a name="line194">194: </a><font color="#B22222">     <A href="../../../../docs/manualpages/DA/DA.html#DA">DA</A> examples we must use the <A href="../../../../docs/manualpages/DA/DA.html#DA">DA</A> numbering where each processor is assigned a</font>
+<a name="line195">195: </a><font color="#B22222">     chunk of data.</font>
+<a name="line196">196: </a><font color="#B22222">  */</font>
+<a name="line197">197: </a>  <A href="../../../../docs/manualpages/Mat/MatCreateMPIAIJ.html#MatCreateMPIAIJ">MatCreateMPIAIJ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,rend-rstart,rend-rstart,N,
+<a name="line198">198: </a>                         N,5,0,0,0,&amp;J);
+<a name="line199">199: </a>  <font color="#4169E1">for</font> (i=rstart; i&lt;rend; i++) {
+<a name="line200">200: </a>    rj = i % user.mx;         <font color="#B22222">/* column in grid */</font>
+<a name="line201">201: </a>    ri = i / user.mx;         <font color="#B22222">/* row in grid */</font>
+<a name="line202">202: </a>    <font color="#4169E1">if</font> (ri != 0) {     <font color="#B22222">/* first row does not have neighbor below */</font>
+<a name="line203">203: </a>      ii   = i - user.mx;
+<a name="line204">204: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(J,1,&amp;i,1,&amp;ii,&amp;zero,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line205">205: </a>    }
+<a name="line206">206: </a>    <font color="#4169E1">if</font> (ri != user.my - 1) { <font color="#B22222">/* last row does not have neighbors above */</font>
+<a name="line207">207: </a>      ii   = i + user.mx;
+<a name="line208">208: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(J,1,&amp;i,1,&amp;ii,&amp;zero,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line209">209: </a>    }
+<a name="line210">210: </a>    <font color="#4169E1">if</font> (rj != 0) {     <font color="#B22222">/* first column does not have neighbor to left */</font>
+<a name="line211">211: </a>      ii   = i - 1;
+<a name="line212">212: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(J,1,&amp;i,1,&amp;ii,&amp;zero,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line213">213: </a>    }
+<a name="line214">214: </a>    <font color="#4169E1">if</font> (rj != user.mx - 1) {     <font color="#B22222">/* last column does not have neighbor to right */</font>
+<a name="line215">215: </a>      ii   = i + 1;
+<a name="line216">216: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(J,1,&amp;i,1,&amp;ii,&amp;zero,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line217">217: </a>    }
+<a name="line218">218: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(J,1,&amp;i,1,&amp;i,&amp;zero,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line219">219: </a>  }
+<a name="line220">220: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(J,MAT_FINAL_ASSEMBLY);
+<a name="line221">221: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(J,MAT_FINAL_ASSEMBLY);
+
+<a name="line223">223: </a>  <font color="#B22222">/*</font>
+<a name="line224">224: </a><font color="#B22222">       Create the data structure that <A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobianColor.html#SNESDefaultComputeJacobianColor">SNESDefaultComputeJacobianColor</A>() uses</font>
+<a name="line225">225: </a><font color="#B22222">       to compute the actual Jacobians via finite differences.</font>
+<a name="line226">226: </a><font color="#B22222">  */</font>
+<a name="line227">227: </a>  <A href="../../../../docs/manualpages/MatFD/MatFDColoringCreate.html#MatFDColoringCreate">MatFDColoringCreate</A>(J,iscoloring,&amp;fdcoloring);
+<a name="line228">228: </a>  <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFunction.html#MatFDColoringSetFunction">MatFDColoringSetFunction</A>(fdcoloring,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(void))fnc,&amp;user);
+<a name="line229">229: </a>  <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFromOptions.html#MatFDColoringSetFromOptions">MatFDColoringSetFromOptions</A>(fdcoloring);
+<a name="line230">230: </a>  <font color="#B22222">/*</font>
+<a name="line231">231: </a><font color="#B22222">        Tell <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> to use the routine <A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobianColor.html#SNESDefaultComputeJacobianColor">SNESDefaultComputeJacobianColor</A>()</font>
+<a name="line232">232: </a><font color="#B22222">      to compute Jacobians.</font>
+<a name="line233">233: </a><font color="#B22222">  */</font>
+<a name="line234">234: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,<A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobianColor.html#SNESDefaultComputeJacobianColor">SNESDefaultComputeJacobianColor</A>,fdcoloring);
+<a name="line235">235: </a>  <A href="../../../../docs/manualpages/IS/ISColoringDestroy.html#ISColoringDestroy">ISColoringDestroy</A>(iscoloring);
+
+
+<a name="line238">238: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line239">239: </a><font color="#B22222">     Customize nonlinear solver; set runtime options</font>
+<a name="line240">240: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line242">242: </a>  <font color="#B22222">/*</font>
+<a name="line243">243: </a><font color="#B22222">     Set runtime options (e.g., -snes_monitor -snes_rtol &lt;rtol&gt; -ksp_type &lt;type&gt;)</font>
+<a name="line244">244: </a><font color="#B22222">  */</font>
+<a name="line245">245: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(snes);
+
+<a name="line247">247: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line248">248: </a><font color="#B22222">     Evaluate initial guess; then solve nonlinear system</font>
+<a name="line249">249: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line250">250: </a>  <font color="#B22222">/*</font>
+<a name="line251">251: </a><font color="#B22222">     Note: The user should initialize the vector, x, with the initial guess</font>
+<a name="line252">252: </a><font color="#B22222">     for the nonlinear solver prior to calling <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>().  In particular,</font>
+<a name="line253">253: </a><font color="#B22222">     to employ an initial guess of zero, the user should explicitly set</font>
+<a name="line254">254: </a><font color="#B22222">     this vector to zero by calling <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>().</font>
+<a name="line255">255: </a><font color="#B22222">  */</font>
+<a name="line256">256: </a>  FormInitialGuess(&amp;user,x);
+<a name="line257">257: </a>  <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,x);
+<a name="line258">258: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(snes,&amp;its);
+<a name="line259">259: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Number of Newton iterations = %D\n"</font>,its);
+
+<a name="line261">261: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line262">262: </a><font color="#B22222">     Free work space.  All PETSc objects should be destroyed when they</font>
+<a name="line263">263: </a><font color="#B22222">     are no longer needed.</font>
+<a name="line264">264: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line265">265: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(x);
+<a name="line266">266: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(r);
+<a name="line267">267: </a>  <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(snes);
+<a name="line268">268: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+
+<a name="line270">270: </a>  <font color="#4169E1">return</font> 0;
+<a name="line271">271: </a>}
+<a name="line272">272: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+
+<a name="line276">276: </a><font color="#B22222">/* </font>
+<a name="line277">277: </a><font color="#B22222">   FormInitialGuess - Forms initial approximation.</font>
+
+<a name="line279">279: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line280">280: </a><font color="#B22222">   user - user-defined application context</font>
+<a name="line281">281: </a><font color="#B22222">   X - vector</font>
+
+<a name="line283">283: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line284">284: </a><font color="#B22222">   X - vector</font>
+<a name="line285">285: </a><font color="#B22222"> */</font>
+<a name="line286">286: </a><strong><font color="#4169E1"><a name="FormInitialGuess"></a>int FormInitialGuess(AppCtx *user,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X)</font></strong>
+<a name="line287">287: </a>{
+<a name="line288">288: </a>  int          i,j,row,mx,my,ierr;
+<a name="line289">289: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>    one = 1.0,lambda,temp1,temp,hx,hy,hxdhy,hydhx,sc;
+<a name="line290">290: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  *x;
+
+<a name="line292">292: </a>  <font color="#B22222">/*</font>
+<a name="line293">293: </a><font color="#B22222">      Process 0 has to wait for all other processes to get here </font>
+<a name="line294">294: </a><font color="#B22222">   before proceeding to write in the shared vector</font>
+<a name="line295">295: </a><font color="#B22222">  */</font>
+<a name="line296">296: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+<a name="line297">297: </a>  <font color="#4169E1">if</font> (user-&gt;rank) {
+<a name="line298">298: </a>     <font color="#B22222">/*</font>
+<a name="line299">299: </a><font color="#B22222">        All the non-busy processors have to wait here for process 0 to finish</font>
+<a name="line300">300: </a><font color="#B22222">        evaluating the function; otherwise they will start using the vector values</font>
+<a name="line301">301: </a><font color="#B22222">        before they have been computed</font>
+<a name="line302">302: </a><font color="#B22222">     */</font>
+<a name="line303">303: </a>     <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+<a name="line304">304: </a>     <font color="#4169E1">return</font> 0;
+<a name="line305">305: </a>  }
+
+<a name="line307">307: </a>  mx = user-&gt;mx;            my = user-&gt;my;            lambda = user-&gt;param;
+<a name="line308">308: </a>  hx = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mx-1);  hy = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(my-1);
+<a name="line309">309: </a>  sc = hx*hy*lambda;        hxdhy = hx/hy;            hydhx = hy/hx;
+<a name="line310">310: </a>  temp1 = lambda/(lambda + one);
+
+<a name="line312">312: </a>  <font color="#B22222">/*</font>
+<a name="line313">313: </a><font color="#B22222">     Get a pointer to vector data.</font>
+<a name="line314">314: </a><font color="#B22222">       - For default PETSc vectors, <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>() returns a pointer to</font>
+<a name="line315">315: </a><font color="#B22222">         the data array.  Otherwise, the routine is implementation dependent.</font>
+<a name="line316">316: </a><font color="#B22222">       - You MUST call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>() when you no longer need access to</font>
+<a name="line317">317: </a><font color="#B22222">         the array.</font>
+<a name="line318">318: </a><font color="#B22222">  */</font>
+<a name="line319">319: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;x);
+
+<a name="line321">321: </a>  <font color="#B22222">/*</font>
+<a name="line322">322: </a><font color="#B22222">     Compute initial guess over the locally owned part of the grid</font>
+<a name="line323">323: </a><font color="#B22222">  */</font>
+<a name="line324">324: </a><font color="#A020F0">#pragma arl(4)</font>
+<a name="line325">325: </a><font color="#A020F0">#pragma distinct (*x,*f)</font>
+<a name="line326">326: </a><font color="#A020F0">#pragma no side effects (sqrt)</font>
+<a name="line327">327: </a>  <font color="#4169E1">for</font> (j=0; j&lt;my; j++) {
+<a name="line328">328: </a>    temp = (<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(PetscMin(j,my-j-1))*hy;
+<a name="line329">329: </a>    <font color="#4169E1">for</font> (i=0; i&lt;mx; i++) {
+<a name="line330">330: </a>      row = i + j*mx;
+<a name="line331">331: </a>      <font color="#4169E1">if</font> (i == 0 || j == 0 || i == mx-1 || j == my-1) {
+<a name="line332">332: </a>        x[row] = 0.0;
+<a name="line333">333: </a>        <font color="#4169E1">continue</font>;
+<a name="line334">334: </a>      }
+<a name="line335">335: </a>      x[row] = temp1*sqrt(PetscMin((<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(PetscMin(i,mx-i-1))*hx,temp));
+<a name="line336">336: </a>    }
+<a name="line337">337: </a>  }
+
+<a name="line339">339: </a>  <font color="#B22222">/*</font>
+<a name="line340">340: </a><font color="#B22222">     Restore vector</font>
+<a name="line341">341: </a><font color="#B22222">  */</font>
+<a name="line342">342: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,&amp;x);
+
+<a name="line344">344: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+<a name="line345">345: </a>  <font color="#4169E1">return</font> 0;
+<a name="line346">346: </a>}
+<a name="line347">347: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+<a name="line350">350: </a><font color="#B22222">/* </font>
+<a name="line351">351: </a><font color="#B22222">   FormFunction - Evaluates nonlinear function, F(x).</font>
+
+<a name="line353">353: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line354">354: </a><font color="#B22222">.  snes - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line355">355: </a><font color="#B22222">.  X - input vector</font>
+<a name="line356">356: </a><font color="#B22222">.  ptr - optional user-defined context, as set by <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>()</font>
+
+<a name="line358">358: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line359">359: </a><font color="#B22222">.  F - function vector</font>
+<a name="line360">360: </a><font color="#B22222"> */</font>
+<a name="line361">361: </a><strong><font color="#4169E1"><a name="FormFunction"></a>int FormFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ptr)</font></strong>
+<a name="line362">362: </a>{
+<a name="line363">363: </a>  AppCtx       *user = (AppCtx*)ptr;
+<a name="line364">364: </a>  int          ierr,i,j,row,mx,my;
+<a name="line365">365: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>    two = 2.0,one = 1.0,lambda,hx,hy,hxdhy,hydhx,sc;
+<a name="line366">366: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  u,uxx,uyy,*x,*f;
+
+<a name="line368">368: </a>  <font color="#B22222">/*</font>
+<a name="line369">369: </a><font color="#B22222">      Process 0 has to wait for all other processes to get here </font>
+<a name="line370">370: </a><font color="#B22222">   before proceeding to write in the shared vector</font>
+<a name="line371">371: </a><font color="#B22222">  */</font>
+<a name="line372">372: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+
+<a name="line374">374: </a>  <font color="#4169E1">if</font> (user-&gt;rank) {
+<a name="line375">375: </a>     <font color="#B22222">/*</font>
+<a name="line376">376: </a><font color="#B22222">        All the non-busy processors have to wait here for process 0 to finish</font>
+<a name="line377">377: </a><font color="#B22222">        evaluating the function; otherwise they will start using the vector values</font>
+<a name="line378">378: </a><font color="#B22222">        before they have been computed</font>
+<a name="line379">379: </a><font color="#B22222">     */</font>
+<a name="line380">380: </a>     <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+<a name="line381">381: </a>     <font color="#4169E1">return</font> 0;
+<a name="line382">382: </a>  }
+
+<a name="line384">384: </a>  mx = user-&gt;mx;            my = user-&gt;my;            lambda = user-&gt;param;
+<a name="line385">385: </a>  hx = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(mx-1);  hy = one/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(my-1);
+<a name="line386">386: </a>  sc = hx*hy*lambda;        hxdhy = hx/hy;            hydhx = hy/hx;
+
+<a name="line388">388: </a>  <font color="#B22222">/*</font>
+<a name="line389">389: </a><font color="#B22222">     Get pointers to vector data</font>
+<a name="line390">390: </a><font color="#B22222">  */</font>
+<a name="line391">391: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;x);
+<a name="line392">392: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(F,&amp;f);
+
+<a name="line394">394: </a>  <font color="#B22222">/*</font>
+<a name="line395">395: </a><font color="#B22222">      The next line tells the SGI compiler that x and f contain no overlapping </font>
+<a name="line396">396: </a><font color="#B22222">    regions and thus it can use addition optimizations.</font>
+<a name="line397">397: </a><font color="#B22222">  */</font>
+<a name="line398">398: </a><font color="#A020F0">#pragma arl(4)</font>
+<a name="line399">399: </a><font color="#A020F0">#pragma distinct (*x,*f)</font>
+<a name="line400">400: </a><font color="#A020F0">#pragma no side effects (exp)</font>
+
+<a name="line402">402: </a>  <font color="#B22222">/*</font>
+<a name="line403">403: </a><font color="#B22222">     Compute function over the entire  grid</font>
+<a name="line404">404: </a><font color="#B22222">  */</font>
+<a name="line405">405: </a>  <font color="#4169E1">for</font> (j=0; j&lt;my; j++) {
+<a name="line406">406: </a>    <font color="#4169E1">for</font> (i=0; i&lt;mx; i++) {
+<a name="line407">407: </a>      row = i + j*mx;
+<a name="line408">408: </a>      <font color="#4169E1">if</font> (i == 0 || j == 0 || i == mx-1 || j == my-1) {
+<a name="line409">409: </a>        f[row] = x[row];
+<a name="line410">410: </a>        <font color="#4169E1">continue</font>;
+<a name="line411">411: </a>      }
+<a name="line412">412: </a>      u = x[row];
+<a name="line413">413: </a>      uxx = (two*u - x[row-1] - x[row+1])*hydhx;
+<a name="line414">414: </a>      uyy = (two*u - x[row-mx] - x[row+mx])*hxdhy;
+<a name="line415">415: </a>      f[row] = uxx + uyy - sc*exp(u);
+<a name="line416">416: </a>    }
+<a name="line417">417: </a>  }
+
+<a name="line419">419: </a>  <font color="#B22222">/*</font>
+<a name="line420">420: </a><font color="#B22222">     Restore vectors</font>
+<a name="line421">421: </a><font color="#B22222">  */</font>
+<a name="line422">422: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,&amp;x);
+<a name="line423">423: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(F,&amp;f);
+
+<a name="line425">425: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(11.0*(mx-2)*(my-2))
+<a name="line426">426: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)X);
+<a name="line427">427: </a>  <font color="#4169E1">return</font> 0;
+<a name="line428">428: </a>}
+
+<a name="line430">430: </a><font color="#A020F0">#if defined(PETSC_HAVE_FORTRAN_CAPS)</font>
+<a name="line431">431: </a><strong><font color="#228B22">#define applicationfunctionfortran_ APPLICATIONFUNCTIONFORTRAN</font></strong>
+<a name="line432">432: </a><font color="#A020F0">#elif !defined(PETSC_HAVE_FORTRAN_UNDERSCORE)</font>
+<a name="line433">433: </a><strong><font color="#228B22">#define applicationfunctionfortran_ applicationfunctionfortran</font></strong>
+<a name="line434">434: </a><font color="#A020F0">#endif</font>
+
+<a name="line436">436: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+<a name="line439">439: </a><font color="#B22222">/* </font>
+<a name="line440">440: </a><font color="#B22222">   FormFunctionFortran - Evaluates nonlinear function, F(x) in Fortran.</font>
+
+<a name="line442">442: </a><font color="#B22222">*/</font>
+<a name="line443">443: </a><strong><font color="#4169E1"><a name="FormFunctionFortran"></a>int FormFunctionFortran(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ptr)</font></strong>
+<a name="line444">444: </a>{
+<a name="line445">445: </a>  AppCtx  *user = (AppCtx*)ptr;
+<a name="line446">446: </a>  int     ierr;
+<a name="line447">447: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>  *x,*f;
+
+<a name="line449">449: </a>  <font color="#B22222">/*</font>
+<a name="line450">450: </a><font color="#B22222">      Process 0 has to wait for all other processes to get here </font>
+<a name="line451">451: </a><font color="#B22222">   before proceeding to write in the shared vector</font>
+<a name="line452">452: </a><font color="#B22222">  */</font>
+<a name="line453">453: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line454">454: </a>  <font color="#4169E1">if</font> (!user-&gt;rank) {
+<a name="line455">455: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;x);
+<a name="line456">456: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(F,&amp;f);
+<a name="line457">457: </a>    applicationfunctionfortran_(&amp;user-&gt;param,&amp;user-&gt;mx,&amp;user-&gt;my,x,f,&amp;ierr);
+<a name="line458">458: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,&amp;x);
+<a name="line459">459: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(F,&amp;f);
+<a name="line460">460: </a>    <A href="../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(11.0*(user-&gt;mx-2)*(user-&gt;my-2))
+<a name="line461">461: </a>  }
+<a name="line462">462: </a>  <font color="#B22222">/*</font>
+<a name="line463">463: </a><font color="#B22222">      All the non-busy processors have to wait here for process 0 to finish</font>
+<a name="line464">464: </a><font color="#B22222">      evaluating the function; otherwise they will start using the vector values</font>
+<a name="line465">465: </a><font color="#B22222">      before they have been computed</font>
+<a name="line466">466: </a><font color="#B22222">  */</font>
+<a name="line467">467: </a>  <A href="../../../../docs/manualpages/Sys/PetscBarrier.html#PetscBarrier">PetscBarrier</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line468">468: </a>  <font color="#4169E1">return</font> 0;
+<a name="line469">469: </a>}
+
+
+</pre>
+</body>
+
+</html>

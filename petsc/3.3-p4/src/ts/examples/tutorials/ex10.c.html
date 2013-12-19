@@ -1,0 +1,1066 @@
+<center><a href="ex10.c">Actual source code: ex10.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ts/examples/tutorials/ex10.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:25:49+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a>static const char help[] = <font color="#666666">"1D nonequilibrium radiation diffusion with Saha ionization model.\n\n"</font>;
+
+<a name="line3">  3: </a><font color="#B22222">/*</font>
+<a name="line4">  4: </a><font color="#B22222">  This example implements the model described in</font>
+
+<a name="line6">  6: </a><font color="#B22222">    Rauenzahn, Mousseau, Knoll. "Temporal accuracy of the nonequilibrium radiation diffusion</font>
+<a name="line7">  7: </a><font color="#B22222">    equations employing a Saha ionization model" 2005.</font>
+
+<a name="line9">  9: </a><font color="#B22222">  The paper discusses three examples, the first two are nondimensional with a simple</font>
+<a name="line10"> 10: </a><font color="#B22222">  ionization model.  The third example is fully dimensional and uses the Saha ionization</font>
+<a name="line11"> 11: </a><font color="#B22222">  model with realistic parameters.</font>
+<a name="line12"> 12: </a><font color="#B22222">*/</font>
+
+<a name="line14"> 14: </a><font color="#A020F0">#include &lt;petscts.h&gt;</font>
+<a name="line15"> 15: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+
+<a name="line17"> 17: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {BC_DIRICHLET,BC_NEUMANN,BC_ROBIN} BCType;
+<a name="line18"> 18: </a>static const char *const BCTypes[] = {<font color="#666666">"DIRICHLET"</font>,<font color="#666666">"NEUMANN"</font>,<font color="#666666">"ROBIN"</font>,<font color="#666666">"BCType"</font>,<font color="#666666">"BC_"</font>,0};
+<a name="line19"> 19: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {JACOBIAN_ANALYTIC,JACOBIAN_MATRIXFREE,JACOBIAN_FD_COLORING,JACOBIAN_FD_FULL} JacobianType;
+<a name="line20"> 20: </a>static const char *const JacobianTypes[] = {<font color="#666666">"ANALYTIC"</font>,<font color="#666666">"MATRIXFREE"</font>,<font color="#666666">"FD_COLORING"</font>,<font color="#666666">"FD_FULL"</font>,<font color="#666666">"JacobianType"</font>,<font color="#666666">"FD_"</font>,0};
+<a name="line21"> 21: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {DISCRETIZATION_FD,DISCRETIZATION_FE} DiscretizationType;
+<a name="line22"> 22: </a>static const char *const DiscretizationTypes[] = {<font color="#666666">"FD"</font>,<font color="#666666">"FE"</font>,<font color="#666666">"DiscretizationType"</font>,<font color="#666666">"DISCRETIZATION_"</font>,0};
+<a name="line23"> 23: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {QUADRATURE_GAUSS1,QUADRATURE_GAUSS2,QUADRATURE_GAUSS3,QUADRATURE_GAUSS4,QUADRATURE_LOBATTO2,QUADRATURE_LOBATTO3} QuadratureType;
+<a name="line24"> 24: </a>static const char *const QuadratureTypes[] = {<font color="#666666">"GAUSS1"</font>,<font color="#666666">"GAUSS2"</font>,<font color="#666666">"GAUSS3"</font>,<font color="#666666">"GAUSS4"</font>,<font color="#666666">"LOBATTO2"</font>,<font color="#666666">"LOBATTO3"</font>,<font color="#666666">"QuadratureType"</font>,<font color="#666666">"QUADRATURE_"</font>,0};
+
+<a name="line26"> 26: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line27"> 27: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> E;                <font color="#B22222">/* radiation energy */</font>
+<a name="line28"> 28: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> T;                <font color="#B22222">/* material temperature */</font>
+<a name="line29"> 29: </a>} RDNode;
+
+<a name="line31"> 31: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line32"> 32: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> meter,kilogram,second,Kelvin; <font color="#B22222">/* Fundamental units */</font>
+<a name="line33"> 33: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> Joule,Watt;                   <font color="#B22222">/* Derived units */</font>
+<a name="line34"> 34: </a>} RDUnit;
+
+<a name="line36"> 36: </a><font color="#4169E1">typedef struct _n_RD *RD;</font>
+
+<a name="line38"> 38: </a><font color="#4169E1"><a name="_n_RD"></a>struct _n_RD </font>{
+<a name="line39"> 39: </a>  void           (*MaterialEnergy)(RD,const RDNode*,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*,RDNode*);
+<a name="line40"> 40: </a>  DM             da;
+<a name="line41"> 41: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      monitor_residual;
+<a name="line42"> 42: </a>  DiscretizationType discretization;
+<a name="line43"> 43: </a>  QuadratureType quadrature;
+<a name="line44"> 44: </a>  JacobianType   jacobian;
+<a name="line45"> 45: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       initial;
+<a name="line46"> 46: </a>  BCType         leftbc;
+<a name="line47"> 47: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      view_draw;
+<a name="line48"> 48: </a>  char           view_binary[PETSC_MAX_PATH_LEN];
+<a name="line49"> 49: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      test_diff;
+<a name="line50"> 50: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      endpoint;
+<a name="line51"> 51: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      bclimit;
+<a name="line52"> 52: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      bcmidpoint;
+<a name="line53"> 53: </a>  RDUnit         unit;
+
+<a name="line55"> 55: </a>  <font color="#B22222">/* model constants, see Table 2 and RDCreate() */</font>
+<a name="line56"> 56: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rho,K_R,K_p,I_H,m_p,m_e,h,k,c,sigma_b,beta,gamma;
+
+<a name="line58"> 58: </a>  <font color="#B22222">/* Domain and boundary conditions */</font>
+<a name="line59"> 59: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> Eapplied;           <font color="#B22222">/* Radiation flux from the left */</font>
+<a name="line60"> 60: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> L;                  <font color="#B22222">/* Length of domain */</font>
+<a name="line61"> 61: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> final_time;
+<a name="line62"> 62: </a>};
+
+<a name="line66"> 66: </a><strong><font color="#4169E1"><a name="RDDestroy"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDDestroy(RD *rd)</font></strong>
+<a name="line67"> 67: </a>{
+
+<a name="line71"> 71: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;(*rd)-&gt;da);
+<a name="line72"> 72: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(*rd);
+<a name="line73"> 73: </a>  <font color="#4169E1">return</font>(0);
+<a name="line74"> 74: </a>}
+
+<a name="line76"> 76: </a><font color="#B22222">/* The paper has a time derivative for material energy (Eq 2) which is a dependent variable (computable from temperature</font>
+<a name="line77"> 77: </a><font color="#B22222"> * and density through an uninvertible relation).  Computing this derivative is trivial for trapezoid rule (used in the</font>
+<a name="line78"> 78: </a><font color="#B22222"> * paper), but does not generalize nicely to higher order integrators.  Here we use the implicit form which provides</font>
+<a name="line79"> 79: </a><font color="#B22222"> * time derivatives of the independent variables (radiation energy and temperature), so we must compute the time</font>
+<a name="line80"> 80: </a><font color="#B22222"> * derivative of material energy ourselves (could be done using AD).</font>
+<a name="line81"> 81: </a><font color="#B22222"> *</font>
+<a name="line82"> 82: </a><font color="#B22222"> * There are multiple ionization models, this interface dispatches to the one currently in use.</font>
+<a name="line83"> 83: </a><font color="#B22222"> */</font>
+<a name="line84"> 84: </a><strong><font color="#4169E1"><a name="RDMaterialEnergy"></a>static void RDMaterialEnergy(RD rd,const RDNode *n,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *Em,RDNode *dEm)</font></strong>
+<a name="line85"> 85: </a>{ rd-&gt;MaterialEnergy(rd,n,Em,dEm); }
+
+<a name="line87"> 87: </a><font color="#B22222">/* Solves a quadratic equation while propagating tangents */</font>
+<a name="line88"> 88: </a><strong><font color="#4169E1"><a name="QuadraticSolve"></a>static void QuadraticSolve(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a_t,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> b,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> b_t,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> c,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> c_t,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *x,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *x_t)</font></strong>
+<a name="line89"> 89: </a>{
+<a name="line90"> 90: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>
+<a name="line91"> 91: </a>    disc   = b*b - 4.*a*c,
+<a name="line92"> 92: </a>    disc_t = 2.*b*b_t - 4.*a_t*c - 4.*a*c_t,
+<a name="line93"> 93: </a>    num    = -b + PetscSqrtScalar(disc), <font color="#B22222">/* choose positive sign */</font>
+<a name="line94"> 94: </a>    num_t  = -b_t + 0.5/PetscSqrtScalar(disc)*disc_t,
+<a name="line95"> 95: </a>    den    = 2.*a,
+<a name="line96"> 96: </a>    den_t  = 2.*a_t;
+<a name="line97"> 97: </a>  *x   = num/den;
+<a name="line98"> 98: </a>  *x_t = (num_t*den - num*den_t) / PetscSqr(den);
+<a name="line99"> 99: </a>}
+
+<a name="line101">101: </a><font color="#B22222">/* The primary model presented in the paper */</font>
+<a name="line102">102: </a><strong><font color="#4169E1"><a name="RDMaterialEnergy_Saha"></a>static void RDMaterialEnergy_Saha(RD rd,const RDNode *n,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *inEm,RDNode *dEm)</font></strong>
+<a name="line103">103: </a>{
+<a name="line104">104: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em,alpha,alpha_t,
+<a name="line105">105: </a>    T     = n-&gt;T,
+<a name="line106">106: </a>    T_t   = 1.,
+<a name="line107">107: </a>    chi   = rd-&gt;I_H / (rd-&gt;k * T),
+<a name="line108">108: </a>    chi_t = -chi / T * T_t,
+<a name="line109">109: </a>    a     = 1.,
+<a name="line110">110: </a>    a_t   = 0,
+<a name="line111">111: </a>    b     = 4. * rd-&gt;m_p / rd-&gt;rho * pow(2. * PETSC_PI * rd-&gt;m_e * rd-&gt;I_H / PetscSqr(rd-&gt;h),1.5) * PetscExpScalar(-chi) * PetscPowScalar(chi,1.5), <font color="#B22222">/* Eq 7 */</font>
+<a name="line112">112: </a>    b_t   = -b*chi_t + 1.5*b/chi*chi_t,
+<a name="line113">113: </a>    c     = -b,
+<a name="line114">114: </a>    c_t   = -b_t;
+<a name="line115">115: </a>  QuadraticSolve(a,a_t,b,b_t,c,c_t,&amp;alpha,&amp;alpha_t);       <font color="#B22222">/* Solve Eq 7 for alpha */</font>
+<a name="line116">116: </a>  Em = rd-&gt;k * T / rd-&gt;m_p * (1.5*(1.+alpha) + alpha*chi); <font color="#B22222">/* Eq 6 */</font>
+<a name="line117">117: </a>  <font color="#4169E1">if</font> (inEm) *inEm = Em;
+<a name="line118">118: </a>  <font color="#4169E1">if</font> (dEm) {
+<a name="line119">119: </a>    dEm-&gt;E = 0;
+<a name="line120">120: </a>    dEm-&gt;T = Em / T * T_t + rd-&gt;k * T / rd-&gt;m_p * (1.5*alpha_t + alpha_t*chi + alpha*chi_t);
+<a name="line121">121: </a>  }
+<a name="line122">122: </a>}
+<a name="line123">123: </a><font color="#B22222">/* Reduced ionization model, Eq 30 */</font>
+<a name="line124">124: </a><strong><font color="#4169E1"><a name="RDMaterialEnergy_Reduced"></a>static void RDMaterialEnergy_Reduced(RD rd,const RDNode *n,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *Em,RDNode *dEm)</font></strong>
+<a name="line125">125: </a>{
+<a name="line126">126: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> alpha,alpha_t,
+<a name="line127">127: </a>    T = n-&gt;T,
+<a name="line128">128: </a>    T_t = 1.,
+<a name="line129">129: </a>    chi = -0.3 / T,
+<a name="line130">130: </a>    chi_t = -chi / T * T_t,
+<a name="line131">131: </a>    a = 1.,
+<a name="line132">132: </a>    a_t = 0.,
+<a name="line133">133: </a>    b = PetscExpScalar(chi),
+<a name="line134">134: </a>    b_t = b*chi_t,
+<a name="line135">135: </a>    c = -b,
+<a name="line136">136: </a>    c_t = -b_t;
+<a name="line137">137: </a>  QuadraticSolve(a,a_t,b,b_t,c,c_t,&amp;alpha,&amp;alpha_t);
+<a name="line138">138: </a>  <font color="#4169E1">if</font> (Em)  *Em   = (1.+alpha)*T + 0.3*alpha;
+<a name="line139">139: </a>  <font color="#4169E1">if</font> (dEm) {
+<a name="line140">140: </a>    dEm-&gt;E = 0;
+<a name="line141">141: </a>    dEm-&gt;T = alpha_t*T + (1.+alpha)*T_t + 0.3*alpha_t;
+<a name="line142">142: </a>  }
+<a name="line143">143: </a>}
+
+<a name="line145">145: </a><font color="#B22222">/* Eq 5 */</font>
+<a name="line146">146: </a><strong><font color="#4169E1"><a name="RDSigma_R"></a>static void RDSigma_R(RD rd,RDNode *n,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *sigma_R,RDNode *dsigma_R)</font></strong>
+<a name="line147">147: </a>{
+<a name="line148">148: </a>  *sigma_R = rd-&gt;K_R * rd-&gt;rho * PetscPowScalar(n-&gt;T,-rd-&gt;gamma);
+<a name="line149">149: </a>  dsigma_R-&gt;E = 0;
+<a name="line150">150: </a>  dsigma_R-&gt;T = -rd-&gt;gamma * (*sigma_R) / n-&gt;T;
+<a name="line151">151: </a>}
+
+<a name="line153">153: </a><font color="#B22222">/* Eq 4 */</font>
+<a name="line154">154: </a><strong><font color="#4169E1"><a name="RDDiffusionCoefficient"></a>static void RDDiffusionCoefficient(RD rd,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  limit,RDNode *n,RDNode *nx,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *D_R,RDNode *dD_R,RDNode *dxD_R)</font></strong>
+<a name="line155">155: </a>{
+<a name="line156">156: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sigma_R,denom;
+<a name="line157">157: </a>  RDNode dsigma_R,ddenom,dxdenom;
+<a name="line158">158: </a>  RDSigma_R(rd,n,&amp;sigma_R,&amp;dsigma_R);
+<a name="line159">159: </a>  denom = 3. * rd-&gt;rho * sigma_R + (int)limit * PetscAbsScalar(nx-&gt;E) / n-&gt;E;
+<a name="line160">160: </a>  ddenom.E = -(int)limit * PetscAbsScalar(nx-&gt;E) / PetscSqr(n-&gt;E);
+<a name="line161">161: </a>  ddenom.T = 3. * rd-&gt;rho * dsigma_R.T;
+<a name="line162">162: </a>  dxdenom.E = (int)limit * (PetscRealPart(nx-&gt;E)&lt;0 ? -1. : 1.) / n-&gt;E;
+<a name="line163">163: </a>  dxdenom.T = 0;
+<a name="line164">164: </a>  *D_R = rd-&gt;c / denom;
+<a name="line165">165: </a>  <font color="#4169E1">if</font> (dD_R) {
+<a name="line166">166: </a>    dD_R-&gt;E = -rd-&gt;c / PetscSqr(denom) * ddenom.E;
+<a name="line167">167: </a>    dD_R-&gt;T = -rd-&gt;c / PetscSqr(denom) * ddenom.T;
+<a name="line168">168: </a>  }
+<a name="line169">169: </a>  <font color="#4169E1">if</font> (dxD_R) {
+<a name="line170">170: </a>    dxD_R-&gt;E = -rd-&gt;c / PetscSqr(denom) * dxdenom.E;
+<a name="line171">171: </a>    dxD_R-&gt;T = -rd-&gt;c / PetscSqr(denom) * dxdenom.T;
+<a name="line172">172: </a>  }
+<a name="line173">173: </a>}
+
+<a name="line177">177: </a><strong><font color="#4169E1"><a name="RDStateView"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDStateView(RD rd,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F)</font></strong>
+<a name="line178">178: </a>{
+<a name="line180">180: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A> info;
+<a name="line181">181: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i;
+<a name="line182">182: </a>  RDNode *x,*xdot,*f;
+<a name="line183">183: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm = ((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)rd-&gt;da)-&gt;comm;
+
+<a name="line186">186: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+<a name="line187">187: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,X,&amp;x);
+<a name="line188">188: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,Xdot,&amp;xdot);
+<a name="line189">189: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,F,&amp;f);
+<a name="line190">190: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;info.xs+info.xm; i++) {
+<a name="line191">191: </a>    <A href="../../../../docs/manualpages/Sys/PetscSynchronizedPrintf.html#PetscSynchronizedPrintf">PetscSynchronizedPrintf</A>(comm,<font color="#666666">"x[%D] (%10.2G,%10.2G) (%10.2G,%10.2G) (%10.2G,%10.2G)\n"</font>,i,PetscRealPart(x[i].E),PetscRealPart(x[i].T),
+<a name="line192">192: </a>                                   PetscRealPart(xdot[i].E),PetscRealPart(xdot[i].T), PetscRealPart(f[i].E),PetscRealPart(f[i].T));
+<a name="line193">193: </a>  }
+<a name="line194">194: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,X,&amp;x);
+<a name="line195">195: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,Xdot,&amp;xdot);
+<a name="line196">196: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,F,&amp;f);
+<a name="line197">197: </a>  <A href="../../../../docs/manualpages/Sys/PetscSynchronizedFlush.html#PetscSynchronizedFlush">PetscSynchronizedFlush</A>(comm);
+<a name="line198">198: </a>  <font color="#4169E1">return</font>(0);
+<a name="line199">199: </a>}
+
+<a name="line201">201: </a><strong><font color="#4169E1"><a name="RDRadiation"></a>static <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> RDRadiation(RD rd,const RDNode *n,RDNode *dn)</font></strong>
+<a name="line202">202: </a>{
+<a name="line203">203: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sigma_p = rd-&gt;K_p * rd-&gt;rho * PetscPowScalar(n-&gt;T,-rd-&gt;beta),
+<a name="line204">204: </a>    sigma_p_T = -rd-&gt;beta * sigma_p / n-&gt;T,
+<a name="line205">205: </a>    tmp = 4. * rd-&gt;sigma_b * PetscSqr(PetscSqr(n-&gt;T)) / rd-&gt;c - n-&gt;E,
+<a name="line206">206: </a>    tmp_E = -1.,
+<a name="line207">207: </a>    tmp_T = 4. * rd-&gt;sigma_b * 4 * n-&gt;T*(PetscSqr(n-&gt;T)) / rd-&gt;c,
+<a name="line208">208: </a>    rad = sigma_p * rd-&gt;c * rd-&gt;rho * tmp,
+<a name="line209">209: </a>    rad_E = sigma_p * rd-&gt;c * rd-&gt;rho * tmp_E,
+<a name="line210">210: </a>    rad_T = rd-&gt;c * rd-&gt;rho * (sigma_p_T * tmp + sigma_p * tmp_T);
+<a name="line211">211: </a>  <font color="#4169E1">if</font> (dn) {
+<a name="line212">212: </a>    dn-&gt;E = rad_E;
+<a name="line213">213: </a>    dn-&gt;T = rad_T;
+<a name="line214">214: </a>  }
+<a name="line215">215: </a>  <font color="#4169E1">return</font> rad;
+<a name="line216">216: </a>}
+
+<a name="line218">218: </a><strong><font color="#4169E1"><a name="RDDiffusion"></a>static <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> RDDiffusion(RD rd,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> hx,const RDNode x[],<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i,RDNode d[])</font></strong>
+<a name="line219">219: </a>{
+<a name="line220">220: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ihx = 1./hx;
+<a name="line221">221: </a>  RDNode n_L,nx_L,n_R,nx_R,dD_L,dxD_L,dD_R,dxD_R,dfluxL[2],dfluxR[2];
+<a name="line222">222: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D_L,D_R,fluxL,fluxR;
+
+<a name="line224">224: </a>  n_L.E = 0.5*(x[i-1].E + x[i].E);
+<a name="line225">225: </a>  n_L.T = 0.5*(x[i-1].T + x[i].T);
+<a name="line226">226: </a>  nx_L.E = (x[i].E - x[i-1].E)/hx;
+<a name="line227">227: </a>  nx_L.T = (x[i].T - x[i-1].T)/hx;
+<a name="line228">228: </a>  RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n_L,&amp;nx_L,&amp;D_L,&amp;dD_L,&amp;dxD_L);
+<a name="line229">229: </a>  fluxL = D_L*nx_L.E;
+<a name="line230">230: </a>  dfluxL[0].E = -ihx*D_L + (0.5*dD_L.E - ihx*dxD_L.E)*nx_L.E;
+<a name="line231">231: </a>  dfluxL[1].E = +ihx*D_L + (0.5*dD_L.E + ihx*dxD_L.E)*nx_L.E;
+<a name="line232">232: </a>  dfluxL[0].T = (0.5*dD_L.T - ihx*dxD_L.T)*nx_L.E;
+<a name="line233">233: </a>  dfluxL[1].T = (0.5*dD_L.T + ihx*dxD_L.T)*nx_L.E;
+
+<a name="line235">235: </a>  n_R.E = 0.5*(x[i].E + x[i+1].E);
+<a name="line236">236: </a>  n_R.T = 0.5*(x[i].T + x[i+1].T);
+<a name="line237">237: </a>  nx_R.E = (x[i+1].E - x[i].E)/hx;
+<a name="line238">238: </a>  nx_R.T = (x[i+1].T - x[i].T)/hx;
+<a name="line239">239: </a>  RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n_R,&amp;nx_R,&amp;D_R,&amp;dD_R,&amp;dxD_R);
+<a name="line240">240: </a>  fluxR = D_R*nx_R.E;
+<a name="line241">241: </a>  dfluxR[0].E = -ihx*D_R + (0.5*dD_R.E - ihx*dxD_R.E)*nx_R.E;
+<a name="line242">242: </a>  dfluxR[1].E = +ihx*D_R + (0.5*dD_R.E + ihx*dxD_R.E)*nx_R.E;
+<a name="line243">243: </a>  dfluxR[0].T = (0.5*dD_R.T - ihx*dxD_R.T)*nx_R.E;
+<a name="line244">244: </a>  dfluxR[1].T = (0.5*dD_R.T + ihx*dxD_R.T)*nx_R.E;
+
+<a name="line246">246: </a>  <font color="#4169E1">if</font> (d) {
+<a name="line247">247: </a>    d[0].E = -ihx*dfluxL[0].E;
+<a name="line248">248: </a>    d[0].T = -ihx*dfluxL[0].T;
+<a name="line249">249: </a>    d[1].E =  ihx*(dfluxR[0].E - dfluxL[1].E);
+<a name="line250">250: </a>    d[1].T =  ihx*(dfluxR[0].T - dfluxL[1].T);
+<a name="line251">251: </a>    d[2].E =  ihx*dfluxR[1].E;
+<a name="line252">252: </a>    d[2].T =  ihx*dfluxR[1].T;
+<a name="line253">253: </a>  }
+<a name="line254">254: </a>  <font color="#4169E1">return</font> ihx*(fluxR - fluxL);
+<a name="line255">255: </a>}
+
+<a name="line259">259: </a><strong><font color="#4169E1"><a name="RDGetLocalArrays"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDGetLocalArrays(RD rd,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *Theta,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *dt,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *X0loc,RDNode **x0,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Xloc,RDNode **x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Xloc_t,RDNode **xdot)</font></strong>
+<a name="line260">260: </a>{
+<a name="line262">262: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  istheta;
+
+<a name="line265">265: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(rd-&gt;da,X0loc);
+<a name="line266">266: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(rd-&gt;da,Xloc);
+<a name="line267">267: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(rd-&gt;da,Xloc_t);
+
+<a name="line269">269: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(rd-&gt;da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,*Xloc);
+<a name="line270">270: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(rd-&gt;da,X,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,*Xloc);
+<a name="line271">271: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(rd-&gt;da,Xdot,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,*Xloc_t);
+<a name="line272">272: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(rd-&gt;da,Xdot,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,*Xloc_t);
+
+<a name="line274">274: </a>  <font color="#B22222">/*</font>
+<a name="line275">275: </a><font color="#B22222">    The following is a hack to subvert <A href="../../../../docs/manualpages/TS/TSTHETA.html#TSTHETA">TSTHETA</A> which is like an implicit midpoint method to behave more like a trapezoid</font>
+<a name="line276">276: </a><font color="#B22222">    rule.  These methods have equivalent linear stability, but the nonlinear stability is somewhat different.  The</font>
+<a name="line277">277: </a><font color="#B22222">    radiation system is inconvenient to write in explicit form because the ionization model is "on the left".</font>
+<a name="line278">278: </a><font color="#B22222">   */</font>
+<a name="line279">279: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<A href="../../../../docs/manualpages/TS/TSTHETA.html#TSTHETA">TSTHETA</A>,&amp;istheta);
+<a name="line280">280: </a>  <font color="#4169E1">if</font> (istheta &amp;&amp; rd-&gt;endpoint) {
+<a name="line281">281: </a>    <A href="../../../../docs/manualpages/TS/TSThetaGetTheta.html#TSThetaGetTheta">TSThetaGetTheta</A>(ts,Theta);
+<a name="line282">282: </a>  } <font color="#4169E1">else</font> {
+<a name="line283">283: </a>    *Theta = 1.;
+<a name="line284">284: </a>  }
+<a name="line285">285: </a>  <A href="../../../../docs/manualpages/TS/TSGetTimeStep.html#TSGetTimeStep">TSGetTimeStep</A>(ts,dt);
+<a name="line286">286: </a>  <A href="../../../../docs/manualpages/Vec/VecWAXPY.html#VecWAXPY">VecWAXPY</A>(*X0loc,-(*Theta)*(*dt),*Xloc_t,*Xloc); <font color="#B22222">/* back out the value at the start of this step */</font>
+<a name="line287">287: </a>  <font color="#4169E1">if</font> (rd-&gt;endpoint) {
+<a name="line288">288: </a>    <A href="../../../../docs/manualpages/Vec/VecWAXPY.html#VecWAXPY">VecWAXPY</A>(*Xloc,*dt,*Xloc_t,*X0loc);      <font color="#B22222">/* move the abscissa to the end of the step */</font>
+<a name="line289">289: </a>  }
+
+<a name="line291">291: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,*X0loc,x0);
+<a name="line292">292: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,*Xloc,x);
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,*Xloc_t,xdot);
+<a name="line294">294: </a>  <font color="#4169E1">return</font>(0);
+<a name="line295">295: </a>}
+
+<a name="line299">299: </a><strong><font color="#4169E1"><a name="RDRestoreLocalArrays"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDRestoreLocalArrays(RD rd,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *X0loc,RDNode **x0,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Xloc,RDNode **x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Xloc_t,RDNode **xdot)</font></strong>
+<a name="line300">300: </a>{
+
+<a name="line304">304: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,*X0loc,x0);
+<a name="line305">305: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,*Xloc,x);
+<a name="line306">306: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,*Xloc_t,xdot);
+<a name="line307">307: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(rd-&gt;da,X0loc);
+<a name="line308">308: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(rd-&gt;da,Xloc);
+<a name="line309">309: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(rd-&gt;da,Xloc_t);
+<a name="line310">310: </a>  <font color="#4169E1">return</font>(0);
+<a name="line311">311: </a>}
+
+<a name="line315">315: </a><strong><font color="#4169E1"><a name="RDCheckDomain_Private"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDCheckDomain_Private(RD rd,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  *in)</font></strong> {
+<a name="line317">317: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       minloc;
+<a name="line318">318: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      min;
+
+<a name="line321">321: </a>  <A href="../../../../docs/manualpages/Vec/VecMin.html#VecMin">VecMin</A>(X,&amp;minloc,&amp;min);
+<a name="line322">322: </a>  <font color="#4169E1">if</font> (min &lt; 0) {
+<a name="line323">323: </a>    <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes;
+<a name="line324">324: </a>    *in = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line325">325: </a>    <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line326">326: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetFunctionDomainError.html#SNESSetFunctionDomainError">SNESSetFunctionDomainError</A>(snes);
+<a name="line327">327: </a>    PetscInfo3(ts,<font color="#666666">"Domain violation at %D field %D value %G\n"</font>,minloc/2,minloc%2,min);
+<a name="line328">328: </a>  } <font color="#4169E1">else</font> {
+<a name="line329">329: </a>    *in = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line330">330: </a>  }
+<a name="line331">331: </a>  <font color="#4169E1">return</font>(0);
+<a name="line332">332: </a>}
+
+<a name="line334">334: </a><font color="#B22222">/* Energy and temperature must remain positive */</font>
+<a name="line335">335: </a><strong><font color="#228B22">#define RDCheckDomain(rd,ts,X) do {                                \</font></strong>
+<a name="line336">336: </a><strong><font color="#228B22">    <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> _ierr;                                          \</font></strong>
+<a name="line337">337: </a><strong><font color="#228B22">    <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  _in;                                                \</font></strong>
+<a name="line338">338: </a><strong><font color="#228B22">    _RDCheckDomain_Private(rd,ts,X,&amp;_in);<A href="../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>(_ierr);    \</font></strong>
+<a name="line339">339: </a><strong><font color="#228B22">    if (!_in) return(0);                              \</font></strong>
+<a name="line340">340: </a><strong><font color="#228B22">  } while (0)</font></strong>
+
+<a name="line344">344: </a><strong><font color="#4169E1"><a name="RDIFunction_FD"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDIFunction_FD(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ctx)</font></strong>
+<a name="line345">345: </a>{
+<a name="line347">347: </a>  RD             rd = (RD)ctx;
+<a name="line348">348: </a>  RDNode         *x,*x0,*xdot,*f;
+<a name="line349">349: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X0loc,Xloc,Xloc_t;
+<a name="line350">350: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      hx,Theta,dt;
+<a name="line351">351: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A>    info;
+<a name="line352">352: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line355">355: </a>  RDCheckDomain(rd,ts,X);
+<a name="line356">356: </a>  RDGetLocalArrays(rd,ts,X,Xdot,&amp;Theta,&amp;dt,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line357">357: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,F,&amp;f);
+<a name="line358">358: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+<a name="line359">359: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(F);
+
+<a name="line361">361: </a>  hx = rd-&gt;L / (info.mx-1);
+
+<a name="line363">363: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;info.xs+info.xm; i++) {
+<a name="line364">364: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rho = rd-&gt;rho;
+<a name="line365">365: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em_t,rad;
+
+<a name="line367">367: </a>    rad = (1.-Theta)*RDRadiation(rd,&amp;x0[i],0) + Theta*RDRadiation(rd,&amp;x[i],0);
+<a name="line368">368: </a>    <font color="#4169E1">if</font> (rd-&gt;endpoint) {
+<a name="line369">369: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em0,Em1;
+<a name="line370">370: </a>      RDMaterialEnergy(rd,&amp;x0[i],&amp;Em0,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line371">371: </a>      RDMaterialEnergy(rd,&amp;x[i],&amp;Em1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line372">372: </a>      Em_t = (Em1 - Em0) / dt;
+<a name="line373">373: </a>    } <font color="#4169E1">else</font> {
+<a name="line374">374: </a>      RDNode dEm;
+<a name="line375">375: </a>      RDMaterialEnergy(rd,&amp;x[i],<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;dEm);
+<a name="line376">376: </a>      Em_t = dEm.E * xdot[i].E + dEm.T * xdot[i].T;
+<a name="line377">377: </a>    }
+<a name="line378">378: </a>    <font color="#B22222">/* Residuals are multiplied by the volume element (hx).  */</font>
+<a name="line379">379: </a>    <font color="#B22222">/* The temperature equation does not have boundary conditions */</font>
+<a name="line380">380: </a>    f[i].T = hx*(rho*Em_t + rad);
+
+<a name="line382">382: </a>    <font color="#4169E1">if</font> (i == 0) {               <font color="#B22222">/* Left boundary condition */</font>
+<a name="line383">383: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D_R,bcTheta = rd-&gt;bcmidpoint ? Theta : 1.;
+<a name="line384">384: </a>      RDNode n = {(1.-bcTheta)*x0[0].E + bcTheta*x[0].E,
+<a name="line385">385: </a>          (1.-bcTheta)*x0[0].T + bcTheta*x[0].T},
+<a name="line386">386: </a>          nx = {((1.-bcTheta)*(x0[1].E-x0[0].E) + bcTheta*(x[1].E-x[0].E))/hx,
+<a name="line387">387: </a>              ((1.-bcTheta)*(x0[1].T-x0[0].T) + bcTheta*(x[1].T-x[0].T))/hx};
+<a name="line388">388: </a>      <font color="#4169E1">switch</font> (rd-&gt;leftbc) {
+<a name="line389">389: </a>      <font color="#4169E1">case</font> BC_ROBIN:
+<a name="line390">390: </a>        RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D_R,0,0);
+<a name="line391">391: </a>        f[0].E = hx*(n.E - 2. * D_R * nx.E - rd-&gt;Eapplied);
+<a name="line392">392: </a>        <font color="#4169E1">break</font>;
+<a name="line393">393: </a>      <font color="#4169E1">case</font> BC_NEUMANN:
+<a name="line394">394: </a>        f[0].E = x[1].E - x[0].E;
+<a name="line395">395: </a>        <font color="#4169E1">break</font>;
+<a name="line396">396: </a><strong><font color="#FF0000">      default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Case %D"</font>,rd-&gt;initial);
+<a name="line397">397: </a>      }
+<a name="line398">398: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == info.mx-1) { <font color="#B22222">/* Right boundary */</font>
+<a name="line399">399: </a>      f[i].E = x[i].E - x[i-1].E; <font color="#B22222">/* Homogeneous Neumann */</font>
+<a name="line400">400: </a>    } <font color="#4169E1">else</font> {
+<a name="line401">401: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> diff = (1.-Theta)*RDDiffusion(rd,hx,x0,i,0) + Theta*RDDiffusion(rd,hx,x,i,0);
+<a name="line402">402: </a>      f[i].E = hx*(xdot[i].E - diff - rad);
+<a name="line403">403: </a>    }
+<a name="line404">404: </a>  }
+<a name="line405">405: </a>  RDRestoreLocalArrays(rd,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line406">406: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,F,&amp;f);
+<a name="line407">407: </a>  <font color="#4169E1">if</font> (rd-&gt;monitor_residual) {RDStateView(rd,X,Xdot,F);}
+<a name="line408">408: </a>  <font color="#4169E1">return</font>(0);
+<a name="line409">409: </a>}
+
+<a name="line413">413: </a><strong><font color="#4169E1"><a name="RDIJacobian_FD"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDIJacobian_FD(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> a,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *B,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *mstr,void *ctx)</font></strong>
+<a name="line414">414: </a>{
+<a name="line416">416: </a>  RD             rd = (RD)ctx;
+<a name="line417">417: </a>  RDNode         *x,*x0,*xdot;
+<a name="line418">418: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X0loc,Xloc,Xloc_t;
+<a name="line419">419: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      hx,Theta,dt;
+<a name="line420">420: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A>    info;
+<a name="line421">421: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line424">424: </a>  RDCheckDomain(rd,ts,X);
+<a name="line425">425: </a>  RDGetLocalArrays(rd,ts,X,Xdot,&amp;Theta,&amp;dt,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line426">426: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+<a name="line427">427: </a>  hx = rd-&gt;L / (info.mx-1);
+<a name="line428">428: </a>  <A href="../../../../docs/manualpages/Mat/MatZeroEntries.html#MatZeroEntries">MatZeroEntries</A>(*B);
+
+<a name="line430">430: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;info.xs+info.xm; i++) {
+<a name="line431">431: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> col[3];
+<a name="line432">432: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rho = rd-&gt;rho;
+<a name="line433">433: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em_t,rad,K[2][6];
+<a name="line434">434: </a>    RDNode dEm_t,drad;
+
+<a name="line436">436: </a>    rad = (1.-Theta)*RDRadiation(rd,&amp;x0[i],0) + Theta*RDRadiation(rd,&amp;x[i],&amp;drad); rad=rad;
+
+<a name="line438">438: </a>    <font color="#4169E1">if</font> (rd-&gt;endpoint) {
+<a name="line439">439: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em0,Em1;
+<a name="line440">440: </a>      RDNode      dEm1;
+<a name="line441">441: </a>      RDMaterialEnergy(rd,&amp;x0[i],&amp;Em0,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line442">442: </a>      RDMaterialEnergy(rd,&amp;x[i],&amp;Em1,&amp;dEm1);
+<a name="line443">443: </a>      Em_t = (Em1 - Em0) / (Theta*dt);
+<a name="line444">444: </a>      dEm_t.E = dEm1.E / (Theta*dt);
+<a name="line445">445: </a>      dEm_t.T = dEm1.T / (Theta*dt);
+<a name="line446">446: </a>    } <font color="#4169E1">else</font> {
+<a name="line447">447: </a>      const <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> epsilon = x[i].T * PETSC_SQRT_MACHINE_EPSILON;
+<a name="line448">448: </a>      const RDNode n1 = {x[i].E,x[i].T+epsilon};
+<a name="line449">449: </a>      RDNode dEm,dEm1;
+<a name="line450">450: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em_TT;
+<a name="line451">451: </a>      RDMaterialEnergy(rd,&amp;x[i],<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;dEm);
+<a name="line452">452: </a>      RDMaterialEnergy(rd,&amp;n1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;dEm1);
+<a name="line453">453: </a>      <font color="#B22222">/* The Jacobian needs another derivative.  We finite difference here instead of</font>
+<a name="line454">454: </a><font color="#B22222">       * propagating second derivatives through the ionization model. */</font>
+<a name="line455">455: </a>      Em_TT = (dEm1.T - dEm.T) / epsilon;
+<a name="line456">456: </a>      Em_t = dEm.E * xdot[i].E + dEm.T * xdot[i].T;
+<a name="line457">457: </a>      dEm_t.E = dEm.E * a;
+<a name="line458">458: </a>      dEm_t.T = dEm.T * a + Em_TT * xdot[i].T;
+<a name="line459">459: </a>    }
+<a name="line460">460: </a>    Em_t = Em_t;
+
+<a name="line462">462: </a>    <A href="../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(K,<font color="#4169E1">sizeof</font>(K));
+<a name="line463">463: </a>    <font color="#B22222">/* Residuals are multiplied by the volume element (hx).  */</font>
+<a name="line464">464: </a>    <font color="#4169E1">if</font> (i == 0) {
+<a name="line465">465: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D,bcTheta = rd-&gt;bcmidpoint ? Theta : 1.;
+<a name="line466">466: </a>      RDNode n = {(1.-bcTheta)*x0[0].E + bcTheta*x[0].E,
+<a name="line467">467: </a>                  (1.-bcTheta)*x0[0].T + bcTheta*x[0].T},
+<a name="line468">468: </a>            nx = {((1.-bcTheta)*(x0[1].E-x0[0].E) + bcTheta*(x[1].E-x[0].E))/hx,
+<a name="line469">469: </a>                  ((1.-bcTheta)*(x0[1].T-x0[0].T) + bcTheta*(x[1].T-x[0].T))/hx};
+<a name="line470">470: </a>      RDNode dD,dxD;
+<a name="line471">471: </a>      <font color="#4169E1">switch</font> (rd-&gt;leftbc) {
+<a name="line472">472: </a>      <font color="#4169E1">case</font> BC_ROBIN:
+<a name="line473">473: </a>        RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D,&amp;dD,&amp;dxD);
+<a name="line474">474: </a>        K[0][1*2+0] = (bcTheta/Theta)*hx*(1. -2.*D*(-1./hx) - 2.*nx.E*dD.E + 2.*nx.E*dxD.E/hx);
+<a name="line475">475: </a>        K[0][1*2+1] = (bcTheta/Theta)*hx*(-2.*nx.E*dD.T);
+<a name="line476">476: </a>        K[0][2*2+0] = (bcTheta/Theta)*hx*(-2.*D*(1./hx) - 2.*nx.E*dD.E - 2.*nx.E*dxD.E/hx);
+<a name="line477">477: </a>        <font color="#4169E1">break</font>;
+<a name="line478">478: </a>      <font color="#4169E1">case</font> BC_NEUMANN:
+<a name="line479">479: </a>        K[0][1*2+0] = -1./Theta;
+<a name="line480">480: </a>        K[0][2*2+0] = 1./Theta;
+<a name="line481">481: </a>        <font color="#4169E1">break</font>;
+<a name="line482">482: </a><strong><font color="#FF0000">      default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Case %D"</font>,rd-&gt;initial);
+<a name="line483">483: </a>      }
+<a name="line484">484: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == info.mx-1) {
+<a name="line485">485: </a>      K[0][0*2+0] = -1./Theta;
+<a name="line486">486: </a>      K[0][1*2+0] = 1./Theta;
+<a name="line487">487: </a>    } <font color="#4169E1">else</font> {
+<a name="line488">488: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> diff;
+<a name="line489">489: </a>      RDNode      ddiff[3];
+<a name="line490">490: </a>      diff = (1.-Theta)*RDDiffusion(rd,hx,x0,i,0) + Theta*RDDiffusion(rd,hx,x,i,ddiff); diff=diff;
+<a name="line491">491: </a>      K[0][0*2+0] = -hx*ddiff[0].E;
+<a name="line492">492: </a>      K[0][0*2+1] = -hx*ddiff[0].T;
+<a name="line493">493: </a>      K[0][1*2+0] = hx*(a - ddiff[1].E - drad.E);
+<a name="line494">494: </a>      K[0][1*2+1] = hx*(-ddiff[1].T - drad.T);
+<a name="line495">495: </a>      K[0][2*2+0] = -hx*ddiff[2].E;
+<a name="line496">496: </a>      K[0][2*2+1] = -hx*ddiff[2].T;
+<a name="line497">497: </a>    }
+
+<a name="line499">499: </a>    K[1][1*2+0] = hx*(rho*dEm_t.E + drad.E);
+<a name="line500">500: </a>    K[1][1*2+1] = hx*(rho*dEm_t.T + drad.T);
+
+<a name="line502">502: </a>    col[0] = i-1;
+<a name="line503">503: </a>    col[1] = i;
+<a name="line504">504: </a>    col[2] = i+1&lt;info.mx ? i+1 : -1;
+<a name="line505">505: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValuesBlocked.html#MatSetValuesBlocked">MatSetValuesBlocked</A>(*B,1,&amp;i,3,col,&amp;K[0][0],<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line506">506: </a>  }
+<a name="line507">507: </a>  RDRestoreLocalArrays(rd,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line508">508: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*B,MAT_FINAL_ASSEMBLY);
+<a name="line509">509: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*B,MAT_FINAL_ASSEMBLY);
+<a name="line510">510: </a>  <font color="#4169E1">if</font> (*A != *B) {
+<a name="line511">511: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*A,MAT_FINAL_ASSEMBLY);
+<a name="line512">512: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*A,MAT_FINAL_ASSEMBLY);
+<a name="line513">513: </a>  }
+<a name="line514">514: </a>  *mstr = SAME_NONZERO_PATTERN;
+<a name="line515">515: </a>  <font color="#4169E1">return</font>(0);
+<a name="line516">516: </a>}
+
+<a name="line518">518: </a><font color="#B22222">/* Evaluate interpolants and derivatives at a select quadrature point */</font>
+<a name="line519">519: </a>static void RDEvaluate(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> interp[][2],<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> deriv[][2],<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> q,const RDNode x[],<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i,RDNode *n,RDNode *nx)
+<a name="line520">520: </a>{
+<a name="line521">521: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> j;
+<a name="line522">522: </a>  n-&gt;E = 0; n-&gt;T = 0; nx-&gt;E = 0; nx-&gt;T = 0;
+<a name="line523">523: </a>  <font color="#4169E1">for</font> (j=0; j&lt;2; j++) {
+<a name="line524">524: </a>    n-&gt;E += interp[q][j] * x[i+j].E;
+<a name="line525">525: </a>    n-&gt;T += interp[q][j] * x[i+j].T;
+<a name="line526">526: </a>    nx-&gt;E += deriv[q][j] * x[i+j].E;
+<a name="line527">527: </a>    nx-&gt;T += deriv[q][j] * x[i+j].T;
+<a name="line528">528: </a>  }
+<a name="line529">529: </a>}
+
+<a name="line533">533: </a><font color="#B22222">/*</font>
+<a name="line534">534: </a><font color="#B22222"> Various quadrature rules.  The nonlinear terms are non-polynomial so no standard quadrature will be exact.</font>
+<a name="line535">535: </a><font color="#B22222">*/</font>
+<a name="line536">536: </a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDGetQuadrature(RD rd,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> hx,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *nq,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> weight[],<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> interp[][2],<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> deriv[][2])
+<a name="line537">537: </a>{
+<a name="line538">538: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> q,j;
+<a name="line539">539: </a>  const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *refweight,(*refinterp)[2],(*refderiv)[2];
+
+<a name="line542">542: </a>  <font color="#4169E1">switch</font> (rd-&gt;quadrature) {
+<a name="line543">543: </a>  <font color="#4169E1">case</font> QUADRATURE_GAUSS1: {
+<a name="line544">544: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ww[1] = {1.},ii[1][2] = {{0.5,0.5}},dd[1][2] = {{-1.,1.}};
+<a name="line545">545: </a>    *nq = 1; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line546">546: </a>  } <font color="#4169E1">break</font>;
+<a name="line547">547: </a>  <font color="#4169E1">case</font> QUADRATURE_GAUSS2: {
+<a name="line548">548: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ii[2][2] = {{0.78867513459481287,0.21132486540518713},{0.21132486540518713,0.78867513459481287}},dd[2][2] = {{-1.,1.},{-1.,1.}},ww[2] = {0.5,0.5};
+<a name="line549">549: </a>    *nq = 2; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line550">550: </a>  } <font color="#4169E1">break</font>;
+<a name="line551">551: </a>  <font color="#4169E1">case</font> QUADRATURE_GAUSS3: {
+<a name="line552">552: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ii[3][2] = {{0.8872983346207417,0.1127016653792583},{0.5,0.5},{0.1127016653792583,0.8872983346207417}},
+<a name="line553">553: </a>        dd[3][2] = {{-1,1},{-1,1},{-1,1}},ww[3] = {5./18,8./18,5./18};
+<a name="line554">554: </a>    *nq = 3; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line555">555: </a>  } <font color="#4169E1">break</font>;
+<a name="line556">556: </a>  <font color="#4169E1">case</font> QUADRATURE_GAUSS4: {
+<a name="line557">557: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ii[][2] = {{0.93056815579702623,0.069431844202973658},
+<a name="line558">558: </a>        {0.66999052179242813,0.33000947820757187},
+<a name="line559">559: </a>        {0.33000947820757187,0.66999052179242813},
+<a name="line560">560: </a>        {0.069431844202973658,0.93056815579702623}},
+<a name="line561">561: </a>        dd[][2] = {{-1,1},{-1,1},{-1,1},{-1,1}},ww[] = {0.17392742256872692,0.3260725774312731,0.3260725774312731,0.17392742256872692};
+
+<a name="line563">563: </a>    *nq = 4; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line564">564: </a>  } <font color="#4169E1">break</font>;
+<a name="line565">565: </a>  <font color="#4169E1">case</font> QUADRATURE_LOBATTO2: {
+<a name="line566">566: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ii[2][2] = {{1.,0.},{0.,1.}},dd[2][2] = {{-1.,1.},{-1.,1.}},ww[2] = {0.5,0.5};
+<a name="line567">567: </a>    *nq = 2; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line568">568: </a>  } <font color="#4169E1">break</font>;
+<a name="line569">569: </a>  <font color="#4169E1">case</font> QUADRATURE_LOBATTO3: {
+<a name="line570">570: </a>    static const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ii[3][2] = {{1,0},{0.5,0.5},{0,1}},dd[3][2] = {{-1,1},{-1,1},{-1,1}},ww[3] = {1./6,4./6,1./6};
+<a name="line571">571: </a>    *nq = 3; refweight = ww; refinterp = ii; refderiv = dd;
+<a name="line572">572: </a>  } <font color="#4169E1">break</font>;
+<a name="line573">573: </a><strong><font color="#FF0000">  default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Unknown quadrature %d"</font>,(int)rd-&gt;quadrature);
+<a name="line574">574: </a>  }
+
+<a name="line576">576: </a>  <font color="#4169E1">for</font> (q=0; q&lt;*nq; q++) {
+<a name="line577">577: </a>    weight[q] = refweight[q] * hx;
+<a name="line578">578: </a>    <font color="#4169E1">for</font> (j=0; j&lt;2; j++) {
+<a name="line579">579: </a>      interp[q][j] = refinterp[q][j];
+<a name="line580">580: </a>      deriv[q][j] = refderiv[q][j] / hx;
+<a name="line581">581: </a>    }
+<a name="line582">582: </a>  }
+<a name="line583">583: </a>  <font color="#4169E1">return</font>(0);
+<a name="line584">584: </a>}
+
+<a name="line588">588: </a><font color="#B22222">/*</font>
+<a name="line589">589: </a><font color="#B22222"> Finite element version</font>
+<a name="line590">590: </a><font color="#B22222">*/</font>
+<a name="line591">591: </a><strong><font color="#4169E1"><a name="RDIFunction_FE"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDIFunction_FE(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ctx)</font></strong>
+<a name="line592">592: </a>{
+<a name="line594">594: </a>  RD             rd = (RD)ctx;
+<a name="line595">595: </a>  RDNode         *x,*x0,*xdot,*f;
+<a name="line596">596: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X0loc,Xloc,Xloc_t,Floc;
+<a name="line597">597: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      hx,Theta,dt,weight[5],interp[5][2],deriv[5][2];
+<a name="line598">598: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A>    info;
+<a name="line599">599: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,q,nq;
+
+<a name="line602">602: </a>  RDCheckDomain(rd,ts,X);
+<a name="line603">603: </a>  RDGetLocalArrays(rd,ts,X,Xdot,&amp;Theta,&amp;dt,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+
+<a name="line605">605: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(rd-&gt;da,&amp;Floc);
+<a name="line606">606: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(Floc);
+<a name="line607">607: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,Floc,&amp;f);
+<a name="line608">608: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+
+<a name="line610">610: </a>  <font color="#B22222">/* Set up shape functions and quadrature for elements (assumes a uniform grid) */</font>
+<a name="line611">611: </a>  hx = rd-&gt;L / (info.mx-1);
+<a name="line612">612: </a>  RDGetQuadrature(rd,hx,&amp;nq,weight,interp,deriv);
+
+<a name="line614">614: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;PetscMin(info.xs+info.xm,info.mx-1); i++) {
+<a name="line615">615: </a>    <font color="#4169E1">for</font> (q=0; q&lt;nq; q++) {
+<a name="line616">616: </a>      <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> rho = rd-&gt;rho;
+<a name="line617">617: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em_t,rad,D_R,D0_R;
+<a name="line618">618: </a>      RDNode n,n0,nx,n0x,nt,ntx;
+<a name="line619">619: </a>      RDEvaluate(interp,deriv,q,x,i,&amp;n,&amp;nx);
+<a name="line620">620: </a>      RDEvaluate(interp,deriv,q,x0,i,&amp;n0,&amp;n0x);
+<a name="line621">621: </a>      RDEvaluate(interp,deriv,q,xdot,i,&amp;nt,&amp;ntx);
+
+<a name="line623">623: </a>      rad = (1.-Theta)*RDRadiation(rd,&amp;n0,0) + Theta*RDRadiation(rd,&amp;n,0);
+<a name="line624">624: </a>      <font color="#4169E1">if</font> (rd-&gt;endpoint) {
+<a name="line625">625: </a>        <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Em0,Em1;
+<a name="line626">626: </a>        RDMaterialEnergy(rd,&amp;n0,&amp;Em0,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line627">627: </a>        RDMaterialEnergy(rd,&amp;n,&amp;Em1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line628">628: </a>        Em_t = (Em1 - Em0) / dt;
+<a name="line629">629: </a>      } <font color="#4169E1">else</font> {
+<a name="line630">630: </a>        RDNode dEm;
+<a name="line631">631: </a>        RDMaterialEnergy(rd,&amp;n,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;dEm);
+<a name="line632">632: </a>        Em_t = dEm.E * nt.E + dEm.T * nt.T;
+<a name="line633">633: </a>      }
+<a name="line634">634: </a>      RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n0,&amp;n0x,&amp;D0_R,0,0);
+<a name="line635">635: </a>      RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n,&amp;nx,&amp;D_R,0,0);
+<a name="line636">636: </a>      <font color="#4169E1">for</font> (j=0; j&lt;2; j++) {
+<a name="line637">637: </a>        f[i+j].E += (deriv[q][j] * weight[q] * ((1.-Theta)*D0_R*n0x.E + Theta*D_R*nx.E)
+<a name="line638">638: </a>                     + interp[q][j] * weight[q] * (nt.E - rad));
+<a name="line639">639: </a>        f[i+j].T += interp[q][j] * weight[q] * (rho * Em_t + rad);
+<a name="line640">640: </a>      }
+<a name="line641">641: </a>    }
+<a name="line642">642: </a>  }
+<a name="line643">643: </a>  <font color="#4169E1">if</font> (info.xs == 0) {
+<a name="line644">644: </a>    <font color="#4169E1">switch</font> (rd-&gt;leftbc) {
+<a name="line645">645: </a>    <font color="#4169E1">case</font> BC_ROBIN: {
+<a name="line646">646: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D_R,D_R_bc;
+<a name="line647">647: </a>      <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   ratio,bcTheta = rd-&gt;bcmidpoint ? Theta : 1.;
+<a name="line648">648: </a>      RDNode n = {(1-bcTheta)*x0[0].E + bcTheta*x[0].E,(1-bcTheta)*x0[0].T + bcTheta*x[0].T},
+<a name="line649">649: </a>          nx = {(x[1].E-x[0].E)/hx,(x[1].T-x[0].T)/hx};
+<a name="line650">650: </a>      RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n,&amp;nx,&amp;D_R,0,0);
+<a name="line651">651: </a>      RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D_R_bc,0,0);
+<a name="line652">652: </a>      ratio = PetscRealPart(D_R/D_R_bc);
+<a name="line653">653: </a>      <font color="#4169E1">if</font> (ratio &gt; 1.) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,1,<font color="#666666">"Limited diffusivity is greater than unlimited"</font>);
+<a name="line654">654: </a>      <font color="#4169E1">if</font> (ratio &lt; 1e-3) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,1,<font color="#666666">"Heavily limited diffusivity"</font>);
+<a name="line655">655: </a>      f[0].E += -ratio*0.5*(rd-&gt;Eapplied - n.E);
+<a name="line656">656: </a>    } <font color="#4169E1">break</font>;
+<a name="line657">657: </a>    <font color="#4169E1">case</font> BC_NEUMANN:
+<a name="line658">658: </a>      <font color="#B22222">/* homogeneous Neumann is the natural condition */</font>
+<a name="line659">659: </a>      <font color="#4169E1">break</font>;
+<a name="line660">660: </a><strong><font color="#FF0000">    default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Case %D"</font>,rd-&gt;initial);
+<a name="line661">661: </a>    }
+<a name="line662">662: </a>  }
+
+<a name="line664">664: </a>  RDRestoreLocalArrays(rd,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line665">665: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,Floc,&amp;f);
+<a name="line666">666: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(F);
+<a name="line667">667: </a>  <A href="../../../../docs/manualpages/DM/DMLocalToGlobalBegin.html#DMLocalToGlobalBegin">DMLocalToGlobalBegin</A>(rd-&gt;da,Floc,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,F);
+<a name="line668">668: </a>  <A href="../../../../docs/manualpages/DM/DMLocalToGlobalEnd.html#DMLocalToGlobalEnd">DMLocalToGlobalEnd</A>(rd-&gt;da,Floc,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,F);
+<a name="line669">669: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(rd-&gt;da,&amp;Floc);
+
+<a name="line671">671: </a>  <font color="#4169E1">if</font> (rd-&gt;monitor_residual) {RDStateView(rd,X,Xdot,F);}
+<a name="line672">672: </a>  <font color="#4169E1">return</font>(0);
+<a name="line673">673: </a>}
+
+<a name="line677">677: </a><strong><font color="#4169E1"><a name="RDIJacobian_FE"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDIJacobian_FE(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xdot,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> a,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *B,<A href="../../../../docs/manualpages/Mat/MatStructure.html#MatStructure">MatStructure</A> *mstr,void *ctx)</font></strong>
+<a name="line678">678: </a>{
+<a name="line680">680: </a>  RD             rd = (RD)ctx;
+<a name="line681">681: </a>  RDNode         *x,*x0,*xdot;
+<a name="line682">682: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X0loc,Xloc,Xloc_t;
+<a name="line683">683: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      hx,Theta,dt,weight[5],interp[5][2],deriv[5][2];
+<a name="line684">684: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A>    info;
+<a name="line685">685: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,k,q,nq;
+<a name="line686">686: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    K[4][4];
+
+<a name="line689">689: </a>  RDCheckDomain(rd,ts,X);
+<a name="line690">690: </a>  RDGetLocalArrays(rd,ts,X,Xdot,&amp;Theta,&amp;dt,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line691">691: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+<a name="line692">692: </a>  hx = rd-&gt;L / (info.mx-1);
+<a name="line693">693: </a>  RDGetQuadrature(rd,hx,&amp;nq,weight,interp,deriv);
+<a name="line694">694: </a>  <A href="../../../../docs/manualpages/Mat/MatZeroEntries.html#MatZeroEntries">MatZeroEntries</A>(*B);
+<a name="line695">695: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;PetscMin(info.xs+info.xm,info.mx-1); i++) {
+<a name="line696">696: </a>    const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> rc[2] = {i,i+1};
+<a name="line697">697: </a>    <A href="../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(K,<font color="#4169E1">sizeof</font>(K));
+<a name="line698">698: </a>    <font color="#4169E1">for</font> (q=0; q&lt;nq; q++) {
+<a name="line699">699: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D_R,PETSC_UNUSED rad;
+<a name="line700">700: </a>      RDNode n,nx,nt,ntx,drad,dD_R,dxD_R,dEm;
+<a name="line701">701: </a>      RDEvaluate(interp,deriv,q,x,i,&amp;n,&amp;nx);
+<a name="line702">702: </a>      RDEvaluate(interp,deriv,q,xdot,i,&amp;nt,&amp;ntx);
+<a name="line703">703: </a>      rad = RDRadiation(rd,&amp;n,&amp;drad);
+<a name="line704">704: </a>      RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n,&amp;nx,&amp;D_R,&amp;dD_R,&amp;dxD_R);
+<a name="line705">705: </a>      RDMaterialEnergy(rd,&amp;n,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;dEm);
+<a name="line706">706: </a>      <font color="#4169E1">for</font> (j=0; j&lt;2; j++) {
+<a name="line707">707: </a>        <font color="#4169E1">for</font> (k=0; k&lt;2; k++) {
+<a name="line708">708: </a>          K[j*2+0][k*2+0] += (+interp[q][j] * weight[q] * (a - drad.E) * interp[q][k]
+<a name="line709">709: </a>                              + deriv[q][j] * weight[q] * ((D_R + dxD_R.E * nx.E) * deriv[q][k] + dD_R.E * nx.E * interp[q][k]));
+<a name="line710">710: </a>          K[j*2+0][k*2+1] += (+interp[q][j] * weight[q] * (-drad.T * interp[q][k])
+<a name="line711">711: </a>                              + deriv[q][j] * weight[q] * (dxD_R.T * deriv[q][k] + dD_R.T * interp[q][k]) * nx.E);
+<a name="line712">712: </a>          K[j*2+1][k*2+0] +=   interp[q][j] * weight[q] * drad.E * interp[q][k];
+<a name="line713">713: </a>          K[j*2+1][k*2+1] +=   interp[q][j] * weight[q] * (a * rd-&gt;rho * dEm.T + drad.T) * interp[q][k];
+<a name="line714">714: </a>        }
+<a name="line715">715: </a>      }
+<a name="line716">716: </a>    }
+<a name="line717">717: </a>    <A href="../../../../docs/manualpages/Mat/MatSetValuesBlocked.html#MatSetValuesBlocked">MatSetValuesBlocked</A>(*B,2,rc,2,rc,&amp;K[0][0],<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line718">718: </a>  }
+<a name="line719">719: </a>  <font color="#4169E1">if</font> (info.xs == 0) {
+<a name="line720">720: </a>    <font color="#4169E1">switch</font> (rd-&gt;leftbc) {
+<a name="line721">721: </a>    <font color="#4169E1">case</font> BC_ROBIN: {
+<a name="line722">722: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D_R,D_R_bc;
+<a name="line723">723: </a>      <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   ratio;
+<a name="line724">724: </a>      RDNode n = {(1-Theta)*x0[0].E + Theta*x[0].E,(1-Theta)*x0[0].T + Theta*x[0].T},
+<a name="line725">725: </a>          nx = {(x[1].E-x[0].E)/hx,(x[1].T-x[0].T)/hx};
+<a name="line726">726: </a>      RDDiffusionCoefficient(rd,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>,&amp;n,&amp;nx,&amp;D_R,0,0);
+<a name="line727">727: </a>      RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D_R_bc,0,0);
+<a name="line728">728: </a>      ratio = PetscRealPart(D_R/D_R_bc);
+<a name="line729">729: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValue.html#MatSetValue">MatSetValue</A>(*B,0,0,ratio*0.5,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line730">730: </a>    } <font color="#4169E1">break</font>;
+<a name="line731">731: </a>    <font color="#4169E1">case</font> BC_NEUMANN:
+<a name="line732">732: </a>      <font color="#B22222">/* homogeneous Neumann is the natural condition */</font>
+<a name="line733">733: </a>      <font color="#4169E1">break</font>;
+<a name="line734">734: </a><strong><font color="#FF0000">    default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Case %D"</font>,rd-&gt;initial);
+<a name="line735">735: </a>    }
+<a name="line736">736: </a>  }
+
+<a name="line738">738: </a>  RDRestoreLocalArrays(rd,&amp;X0loc,&amp;x0,&amp;Xloc,&amp;x,&amp;Xloc_t,&amp;xdot);
+<a name="line739">739: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*B,MAT_FINAL_ASSEMBLY);
+<a name="line740">740: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*B,MAT_FINAL_ASSEMBLY);
+<a name="line741">741: </a>  <font color="#4169E1">if</font> (*A != *B) {
+<a name="line742">742: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(*A,MAT_FINAL_ASSEMBLY);
+<a name="line743">743: </a>    <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(*A,MAT_FINAL_ASSEMBLY);
+<a name="line744">744: </a>  }
+<a name="line745">745: </a>  *mstr = SAME_NONZERO_PATTERN;
+<a name="line746">746: </a>  <font color="#4169E1">return</font>(0);
+<a name="line747">747: </a>}
+
+<a name="line749">749: </a><font color="#B22222">/* Temperature that is in equilibrium with the radiation density */</font>
+<a name="line750">750: </a><strong><font color="#4169E1"><a name="RDRadiationTemperature"></a>static <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> RDRadiationTemperature(RD rd,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> E)</font></strong>
+<a name="line751">751: </a>{ <font color="#4169E1">return</font> pow(E*rd-&gt;c/(4.*rd-&gt;sigma_b),0.25); }
+
+<a name="line755">755: </a><strong><font color="#4169E1"><a name="RDInitialState"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDInitialState(RD rd,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X)</font></strong>
+<a name="line756">756: </a>{
+<a name="line757">757: </a>  <A href="../../../../docs/manualpages/DM/DMDALocalInfo.html#DMDALocalInfo">DMDALocalInfo</A> info;
+<a name="line758">758: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i;
+<a name="line759">759: </a>  RDNode *x;
+
+<a name="line763">763: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetLocalInfo.html#DMDAGetLocalInfo">DMDAGetLocalInfo</A>(rd-&gt;da,&amp;info);
+<a name="line764">764: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(rd-&gt;da,X,&amp;x);
+<a name="line765">765: </a>  <font color="#4169E1">for</font> (i=info.xs; i&lt;info.xs+info.xm; i++) {
+<a name="line766">766: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> coord = i*rd-&gt;L/(info.mx-1);
+<a name="line767">767: </a>    <font color="#4169E1">switch</font> (rd-&gt;initial) {
+<a name="line768">768: </a>    <font color="#4169E1">case</font> 1:
+<a name="line769">769: </a>      x[i].E = 0.001;
+<a name="line770">770: </a>      x[i].T = RDRadiationTemperature(rd,x[i].E);
+<a name="line771">771: </a>      <font color="#4169E1">break</font>;
+<a name="line772">772: </a>    <font color="#4169E1">case</font> 2:
+<a name="line773">773: </a>      x[i].E = 0.001 + 100.*PetscExpScalar(-PetscSqr(coord/0.1));
+<a name="line774">774: </a>      x[i].T = RDRadiationTemperature(rd,x[i].E);
+<a name="line775">775: </a>      <font color="#4169E1">break</font>;
+<a name="line776">776: </a>    <font color="#4169E1">case</font> 3:
+<a name="line777">777: </a>      x[i].E = 7.56e-2 * rd-&gt;unit.Joule / pow(rd-&gt;unit.meter,3);
+<a name="line778">778: </a>      x[i].T = RDRadiationTemperature(rd,x[i].E);
+<a name="line779">779: </a>      <font color="#4169E1">break</font>;
+<a name="line780">780: </a><strong><font color="#FF0000">    default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"No initial state %D"</font>,rd-&gt;initial);
+<a name="line781">781: </a>    }
+<a name="line782">782: </a>  }
+<a name="line783">783: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(rd-&gt;da,X,&amp;x);
+<a name="line784">784: </a>  <font color="#4169E1">return</font>(0);
+<a name="line785">785: </a>}
+
+<a name="line789">789: </a><strong><font color="#4169E1"><a name="RDView"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDView(RD rd,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line790">790: </a>{
+<a name="line792">792: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Y;
+<a name="line793">793: </a>  RDNode         *x;
+<a name="line794">794: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *y;
+<a name="line795">795: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,m,M;
+<a name="line796">796: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *lx;
+<a name="line797">797: </a>  DM             da;
+
+<a name="line800">800: </a>  <font color="#B22222">/*</font>
+<a name="line801">801: </a><font color="#B22222">    Create a DMDA (one dof per node, zero stencil width, same layout) to hold Trad</font>
+<a name="line802">802: </a><font color="#B22222">    (radiation temperature).  It is not necessary to create a DMDA for this, but this way</font>
+<a name="line803">803: </a><font color="#B22222">    output and visualization will have meaningful variable names and correct scales.</font>
+<a name="line804">804: </a><font color="#B22222">  */</font>
+<a name="line805">805: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(rd-&gt;da,0, &amp;M,0,0, 0,0,0, 0,0,0,0,0,0);
+<a name="line806">806: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetOwnershipRanges.html#DMDAGetOwnershipRanges">DMDAGetOwnershipRanges</A>(rd-&gt;da,&amp;lx,0,0);
+<a name="line807">807: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate1d.html#DMDACreate1d">DMDACreate1d</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)rd-&gt;da)-&gt;comm,DMDA_BOUNDARY_NONE,M,1,0,lx,&amp;da);
+<a name="line808">808: </a>  <A href="../../../../docs/manualpages/DM/DMDASetUniformCoordinates.html#DMDASetUniformCoordinates">DMDASetUniformCoordinates</A>(da,0.,rd-&gt;L,0.,0.,0.,0.);
+<a name="line809">809: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,0,<font color="#666666">"T_rad"</font>);
+<a name="line810">810: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(da,&amp;Y);
+
+<a name="line812">812: </a>  <font color="#B22222">/* Compute the radiation temperature from the solution at each node */</font>
+<a name="line813">813: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(Y,&amp;m);
+<a name="line814">814: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>**)&amp;x);
+<a name="line815">815: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(Y,&amp;y);
+<a name="line816">816: </a>  <font color="#4169E1">for</font> (i=0; i&lt;m; i++) {
+<a name="line817">817: </a>    y[i] = RDRadiationTemperature(rd,x[i].E);
+<a name="line818">818: </a>  }
+<a name="line819">819: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>**)&amp;x);
+<a name="line820">820: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(Y,&amp;y);
+
+<a name="line822">822: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(Y,viewer);
+<a name="line823">823: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;Y);
+<a name="line824">824: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;da);
+<a name="line825">825: </a>  <font color="#4169E1">return</font>(0);
+<a name="line826">826: </a>}
+
+<a name="line830">830: </a><strong><font color="#4169E1"><a name="RDTestDifferentiation"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDTestDifferentiation(RD rd)</font></strong>
+<a name="line831">831: </a>{
+<a name="line832">832: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm = ((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)rd-&gt;da)-&gt;comm;
+<a name="line834">834: </a>  RDNode n,nx;
+<a name="line835">835: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> epsilon;
+
+<a name="line838">838: </a>  epsilon = 1e-8;
+<a name="line839">839: </a>  {
+<a name="line840">840: </a>    RDNode dEm,fdEm;
+<a name="line841">841: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> T0 = 1000.,T1 = T0*(1.+epsilon),Em0,Em1;
+<a name="line842">842: </a>    n.E = 1.;            n.T = T0;
+<a name="line843">843: </a>    rd-&gt;MaterialEnergy(rd,&amp;n,&amp;Em0,&amp;dEm);
+<a name="line844">844: </a>    n.E = 1.+epsilon;    n.T = T0;
+<a name="line845">845: </a>    rd-&gt;MaterialEnergy(rd,&amp;n,&amp;Em1,0); fdEm.E = (Em1-Em0)/epsilon;
+<a name="line846">846: </a>    n.E = 1.;            n.T = T1;
+<a name="line847">847: </a>    rd-&gt;MaterialEnergy(rd,&amp;n,&amp;Em1,0); fdEm.T = (Em1-Em0)/(T0*epsilon);
+<a name="line848">848: </a>    <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(comm,<font color="#666666">"dEm {%G,%G}, fdEm {%G,%G}, diff {%G,%G}\n"</font>,PetscRealPart(dEm.E),PetscRealPart(dEm.T),
+<a name="line849">849: </a>                       PetscRealPart(fdEm.E),PetscRealPart(fdEm.T),PetscRealPart(dEm.E-fdEm.E),PetscRealPart(dEm.T-fdEm.T));
+<a name="line850">850: </a>  }
+<a name="line851">851: </a>  {
+<a name="line852">852: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> D0,D;
+<a name="line853">853: </a>    RDNode dD,dxD,fdD,fdxD;
+<a name="line854">854: </a>    n.E = 1.;          n.T = 1.;           nx.E = 1.;          n.T = 1.;
+<a name="line855">855: </a>    RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D0,&amp;dD,&amp;dxD);
+<a name="line856">856: </a>    n.E = 1.+epsilon;  n.T = 1.;           nx.E = 1.;          n.T = 1.;
+<a name="line857">857: </a>    RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D,0,0); fdD.E = (D-D0)/epsilon;
+<a name="line858">858: </a>    n.E = 1;           n.T = 1.+epsilon;   nx.E = 1.;          n.T = 1.;
+<a name="line859">859: </a>    RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D,0,0); fdD.T = (D-D0)/epsilon;
+<a name="line860">860: </a>    n.E = 1;           n.T = 1.;           nx.E = 1.+epsilon;  n.T = 1.;
+<a name="line861">861: </a>    RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D,0,0); fdxD.E = (D-D0)/epsilon;
+<a name="line862">862: </a>    n.E = 1;           n.T = 1.;           nx.E = 1.;          n.T = 1.+epsilon;
+<a name="line863">863: </a>    RDDiffusionCoefficient(rd,rd-&gt;bclimit,&amp;n,&amp;nx,&amp;D,0,0); fdxD.T = (D-D0)/epsilon;
+<a name="line864">864: </a>    <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(comm,<font color="#666666">"dD {%G,%G}, fdD {%G,%G}, diff {%G,%G}\n"</font>,PetscRealPart(dD.E),PetscRealPart(dD.T),
+<a name="line865">865: </a>                       PetscRealPart(fdD.E),PetscRealPart(fdD.T),PetscRealPart(dD.E-fdD.E),PetscRealPart(dD.T-fdD.T));
+<a name="line866">866: </a>    <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(comm,<font color="#666666">"dxD {%G,%G}, fdxD {%G,%G}, diffx {%G,%G}\n"</font>,PetscRealPart(dxD.E),PetscRealPart(dxD.T),
+<a name="line867">867: </a>                       PetscRealPart(fdxD.E),PetscRealPart(fdxD.T),PetscRealPart(dxD.E-fdxD.E),PetscRealPart(dxD.T-fdxD.T));
+<a name="line868">868: </a>  }
+<a name="line869">869: </a>  {
+<a name="line870">870: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i;
+<a name="line871">871: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> hx = 1.;
+<a name="line872">872: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a0;
+<a name="line873">873: </a>    RDNode n0[3] = {{1.,1.},{5.,3.},{4.,2.}},n1[3],d[3],fd[3];
+<a name="line874">874: </a>    a0 = RDDiffusion(rd,hx,n0,1,d);
+<a name="line875">875: </a>    <font color="#4169E1">for</font> (i=0; i&lt;3; i++) {
+<a name="line876">876: </a>      <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(n1,n0,<font color="#4169E1">sizeof</font>(n0)); n1[i].E += epsilon;
+<a name="line877">877: </a>      fd[i].E = (RDDiffusion(rd,hx,n1,1,0)-a0)/epsilon;
+<a name="line878">878: </a>      <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(n1,n0,<font color="#4169E1">sizeof</font>(n0)); n1[i].T += epsilon;
+<a name="line879">879: </a>      fd[i].T = (RDDiffusion(rd,hx,n1,1,0)-a0)/epsilon;
+<a name="line880">880: </a>      <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(comm,<font color="#666666">"ddiff[%D] {%G,%G}, fd {%G %G}, diff {%G,%G}\n"</font>,i,PetscRealPart(d[i].E),PetscRealPart(d[i].T),
+<a name="line881">881: </a>                         PetscRealPart(fd[i].E),PetscRealPart(fd[i].T),PetscRealPart(d[i].E-fd[i].E),PetscRealPart(d[i].T-fd[i].T));
+<a name="line882">882: </a>    }
+<a name="line883">883: </a>  }
+<a name="line884">884: </a>  {
+<a name="line885">885: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> rad0,rad;
+<a name="line886">886: </a>    RDNode drad,fdrad;
+<a name="line887">887: </a>    n.E = 1.;         n.T = 1.;
+<a name="line888">888: </a>    rad0 = RDRadiation(rd,&amp;n,&amp;drad);
+<a name="line889">889: </a>    n.E = 1.+epsilon; n.T = 1.;
+<a name="line890">890: </a>    rad = RDRadiation(rd,&amp;n,0); fdrad.E = (rad-rad0)/epsilon;
+<a name="line891">891: </a>    n.E = 1.;         n.T = 1.+epsilon;
+<a name="line892">892: </a>    rad = RDRadiation(rd,&amp;n,0); fdrad.T = (rad-rad0)/epsilon;
+<a name="line893">893: </a>    <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)rd-&gt;da)-&gt;comm,<font color="#666666">"drad {%G,%G}, fdrad {%G,%G}, diff {%G,%G}\n"</font>,PetscRealPart(drad.E),PetscRealPart(drad.T),
+<a name="line894">894: </a>                       PetscRealPart(fdrad.E),PetscRealPart(fdrad.T),PetscRealPart(drad.E-drad.E),PetscRealPart(drad.T-fdrad.T));
+<a name="line895">895: </a>  }
+<a name="line896">896: </a>  <font color="#4169E1">return</font>(0);
+<a name="line897">897: </a>}
+
+<a name="line901">901: </a><strong><font color="#4169E1"><a name="RDCreate"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RDCreate(<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,RD *inrd)</font></strong>
+<a name="line902">902: </a>{
+<a name="line904">904: </a>  RD             rd;
+<a name="line905">905: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      meter,kilogram,second,Kelvin,Joule,Watt;
+
+<a name="line908">908: </a>  *inrd = 0;
+<a name="line909">909: </a>  <A href="../../../../docs/manualpages/Sys/PetscNew.html#PetscNew">PetscNew</A>(<font color="#4169E1">struct _n_RD</font>,&amp;rd);
+
+<a name="line911">911: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBegin.html#PetscOptionsBegin">PetscOptionsBegin</A>(comm,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"Options for nonequilibrium radiation-diffusion with RD ionization"</font>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line912">912: </a>  {
+<a name="line913">913: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-rd_initial"</font>,<font color="#666666">"Initial condition (1=Marshak, 2=Blast, 3=Marshak+)"</font>,<font color="#666666">""</font>,rd-&gt;initial,&amp;rd-&gt;initial,0);
+<a name="line914">914: </a>    <font color="#4169E1">switch</font> (rd-&gt;initial) {
+<a name="line915">915: </a>    <font color="#4169E1">case</font> 1:
+<a name="line916">916: </a>    <font color="#4169E1">case</font> 2:
+<a name="line917">917: </a>      rd-&gt;unit.kilogram = 1.;
+<a name="line918">918: </a>      rd-&gt;unit.meter    = 1.;
+<a name="line919">919: </a>      rd-&gt;unit.second   = 1.;
+<a name="line920">920: </a>      rd-&gt;unit.Kelvin   = 1.;
+<a name="line921">921: </a>      <font color="#4169E1">break</font>;
+<a name="line922">922: </a>    <font color="#4169E1">case</font> 3:
+<a name="line923">923: </a>      rd-&gt;unit.kilogram = 1.e12;
+<a name="line924">924: </a>      rd-&gt;unit.meter    = 1.;
+<a name="line925">925: </a>      rd-&gt;unit.second   = 1.e9;
+<a name="line926">926: </a>      rd-&gt;unit.Kelvin   = 1.;
+<a name="line927">927: </a>      <font color="#4169E1">break</font>;
+<a name="line928">928: </a><strong><font color="#FF0000">    default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Unknown initial condition %d"</font>,rd-&gt;initial);
+<a name="line929">929: </a>    }
+<a name="line930">930: </a>    <font color="#B22222">/* Fundamental units */</font>
+<a name="line931">931: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_unit_meter"</font>,<font color="#666666">"Length of 1 meter in nondimensional units"</font>,<font color="#666666">""</font>,rd-&gt;unit.meter,&amp;rd-&gt;unit.meter,0);
+<a name="line932">932: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_unit_kilogram"</font>,<font color="#666666">"Mass of 1 kilogram in nondimensional units"</font>,<font color="#666666">""</font>,rd-&gt;unit.kilogram,&amp;rd-&gt;unit.kilogram,0);
+<a name="line933">933: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_unit_second"</font>,<font color="#666666">"Time of a second in nondimensional units"</font>,<font color="#666666">""</font>,rd-&gt;unit.second,&amp;rd-&gt;unit.second,0);
+<a name="line934">934: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_unit_Kelvin"</font>,<font color="#666666">"Temperature of a Kelvin in nondimensional units"</font>,<font color="#666666">""</font>,rd-&gt;unit.Kelvin,&amp;rd-&gt;unit.Kelvin,0);
+<a name="line935">935: </a>    <font color="#B22222">/* Derived units */</font>
+<a name="line936">936: </a>    rd-&gt;unit.Joule = rd-&gt;unit.kilogram*PetscSqr(rd-&gt;unit.meter/rd-&gt;unit.second);
+<a name="line937">937: </a>    rd-&gt;unit.Watt  = rd-&gt;unit.Joule/rd-&gt;unit.second;
+<a name="line938">938: </a>    <font color="#B22222">/* Local aliases */</font>
+<a name="line939">939: </a>    meter    = rd-&gt;unit.meter;
+<a name="line940">940: </a>    kilogram = rd-&gt;unit.kilogram;
+<a name="line941">941: </a>    second   = rd-&gt;unit.second;
+<a name="line942">942: </a>    Kelvin   = rd-&gt;unit.Kelvin;
+<a name="line943">943: </a>    Joule    = rd-&gt;unit.Joule;
+<a name="line944">944: </a>    Watt     = rd-&gt;unit.Watt;
+
+<a name="line946">946: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_monitor_residual"</font>,<font color="#666666">"Display residuals every time they are evaluated"</font>,<font color="#666666">""</font>,rd-&gt;monitor_residual,&amp;rd-&gt;monitor_residual,0);
+<a name="line947">947: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-rd_discretization"</font>,<font color="#666666">"Discretization type"</font>,<font color="#666666">""</font>,DiscretizationTypes,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)rd-&gt;discretization,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;rd-&gt;discretization,0);
+<a name="line948">948: </a>    <font color="#4169E1">if</font> (rd-&gt;discretization == DISCRETIZATION_FE) {
+<a name="line949">949: </a>      rd-&gt;quadrature = QUADRATURE_GAUSS2;
+<a name="line950">950: </a>      <A href="../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-rd_quadrature"</font>,<font color="#666666">"Finite element quadrature"</font>,<font color="#666666">""</font>,QuadratureTypes,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)rd-&gt;quadrature,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;rd-&gt;quadrature,0);
+<a name="line951">951: </a>    }
+<a name="line952">952: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-rd_jacobian"</font>,<font color="#666666">"Type of finite difference Jacobian"</font>,<font color="#666666">""</font>,JacobianTypes,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)rd-&gt;jacobian,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;rd-&gt;jacobian,0);
+<a name="line953">953: </a>    <font color="#4169E1">switch</font> (rd-&gt;initial) {
+<a name="line954">954: </a>    <font color="#4169E1">case</font> 1:
+<a name="line955">955: </a>      rd-&gt;leftbc     = BC_ROBIN;
+<a name="line956">956: </a>      rd-&gt;Eapplied   = 4 * rd-&gt;unit.Joule / pow(rd-&gt;unit.meter,3.);
+<a name="line957">957: </a>      rd-&gt;L          = 1. * rd-&gt;unit.meter;
+<a name="line958">958: </a>      rd-&gt;beta       = 3.0;
+<a name="line959">959: </a>      rd-&gt;gamma      = 3.0;
+<a name="line960">960: </a>      rd-&gt;final_time = 3 * second;
+<a name="line961">961: </a>      <font color="#4169E1">break</font>;
+<a name="line962">962: </a>    <font color="#4169E1">case</font> 2:
+<a name="line963">963: </a>      rd-&gt;leftbc     = BC_NEUMANN;
+<a name="line964">964: </a>      rd-&gt;Eapplied   = 0.;
+<a name="line965">965: </a>      rd-&gt;L          = 1. * rd-&gt;unit.meter;
+<a name="line966">966: </a>      rd-&gt;beta       = 3.0;
+<a name="line967">967: </a>      rd-&gt;gamma      = 3.0;
+<a name="line968">968: </a>      rd-&gt;final_time = 1 * second;
+<a name="line969">969: </a>      <font color="#4169E1">break</font>;
+<a name="line970">970: </a>    <font color="#4169E1">case</font> 3:
+<a name="line971">971: </a>      rd-&gt;leftbc     = BC_ROBIN;
+<a name="line972">972: </a>      rd-&gt;Eapplied   = 7.503e6 * rd-&gt;unit.Joule / pow(rd-&gt;unit.meter,3);
+<a name="line973">973: </a>      rd-&gt;L          = 5. * rd-&gt;unit.meter;
+<a name="line974">974: </a>      rd-&gt;beta       = 3.5;
+<a name="line975">975: </a>      rd-&gt;gamma      = 3.5;
+<a name="line976">976: </a>      rd-&gt;final_time = 20e-9 * second;
+<a name="line977">977: </a>      <font color="#4169E1">break</font>;
+<a name="line978">978: </a><strong><font color="#FF0000">    default:</font></strong> <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Initial %D"</font>,rd-&gt;initial);
+<a name="line979">979: </a>    }
+<a name="line980">980: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-rd_leftbc"</font>,<font color="#666666">"Left boundary condition"</font>,<font color="#666666">""</font>,BCTypes,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)rd-&gt;leftbc,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;rd-&gt;leftbc,0);
+<a name="line981">981: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_E_applied"</font>,<font color="#666666">"Radiation flux at left end of domain"</font>,<font color="#666666">""</font>,rd-&gt;Eapplied,&amp;rd-&gt;Eapplied,0);
+<a name="line982">982: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_beta"</font>,<font color="#666666">"Thermal exponent for photon absorption"</font>,<font color="#666666">""</font>,rd-&gt;beta,&amp;rd-&gt;beta,0);
+<a name="line983">983: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-rd_gamma"</font>,<font color="#666666">"Thermal exponent for diffusion coefficient"</font>,<font color="#666666">""</font>,rd-&gt;gamma,&amp;rd-&gt;gamma,0);
+<a name="line984">984: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_view_draw"</font>,<font color="#666666">"Draw final solution"</font>,<font color="#666666">""</font>,rd-&gt;view_draw,&amp;rd-&gt;view_draw,0);
+<a name="line985">985: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_endpoint"</font>,<font color="#666666">"Discretize using endpoints (like trapezoid rule) instead of midpoint"</font>,<font color="#666666">""</font>,rd-&gt;endpoint,&amp;rd-&gt;endpoint,0);
+<a name="line986">986: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_bcmidpoint"</font>,<font color="#666666">"Impose the boundary condition at the midpoint (Theta) of the interval"</font>,<font color="#666666">""</font>,rd-&gt;bcmidpoint,&amp;rd-&gt;bcmidpoint,0);
+<a name="line987">987: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_bclimit"</font>,<font color="#666666">"Limit diffusion coefficient in definition of Robin boundary condition"</font>,<font color="#666666">""</font>,rd-&gt;bclimit,&amp;rd-&gt;bclimit,0);
+<a name="line988">988: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-rd_test_diff"</font>,<font color="#666666">"Test differentiation in constitutive relations"</font>,<font color="#666666">""</font>,rd-&gt;test_diff,&amp;rd-&gt;test_diff,0);
+<a name="line989">989: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsString.html#PetscOptionsString">PetscOptionsString</A>(<font color="#666666">"-rd_view_binary"</font>,<font color="#666666">"File name to hold final solution"</font>,<font color="#666666">""</font>,rd-&gt;view_binary,rd-&gt;view_binary,<font color="#4169E1">sizeof</font>(rd-&gt;view_binary),0);
+<a name="line990">990: </a>  }
+<a name="line991">991: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsEnd.html#PetscOptionsEnd">PetscOptionsEnd</A>();
+
+<a name="line993">993: </a>  <font color="#4169E1">switch</font> (rd-&gt;initial) {
+<a name="line994">994: </a>  <font color="#4169E1">case</font> 1:
+<a name="line995">995: </a>  <font color="#4169E1">case</font> 2:
+<a name="line996">996: </a>    rd-&gt;rho     = 1.;
+<a name="line997">997: </a>    rd-&gt;c       = 1.;
+<a name="line998">998: </a>    rd-&gt;K_R     = 1.;
+<a name="line999">999: </a>    rd-&gt;K_p     = 1.;
+<a name="line1000">1000: </a>    rd-&gt;sigma_b = 0.25;
+<a name="line1001">1001: </a>    rd-&gt;MaterialEnergy = RDMaterialEnergy_Reduced;
+<a name="line1002">1002: </a>    <font color="#4169E1">break</font>;
+<a name="line1003">1003: </a>  <font color="#4169E1">case</font> 3:
+<a name="line1004">1004: </a>    <font color="#B22222">/* Table 2 */</font>
+<a name="line1005">1005: </a>    rd-&gt;rho     = 1.17e-3 * kilogram / (meter*meter*meter);                      <font color="#B22222">/* density */</font>
+<a name="line1006">1006: </a>    rd-&gt;K_R     = 7.44e18 * pow(meter,5.) * pow(Kelvin,3.5) * pow(kilogram,-2.); <font color="#B22222">/*  */</font>
+<a name="line1007">1007: </a>    rd-&gt;K_p     = 2.33e20 * pow(meter,5.) * pow(Kelvin,3.5) * pow(kilogram,-2.); <font color="#B22222">/*  */</font>
+<a name="line1008">1008: </a>    rd-&gt;I_H     = 2.179e-18 * Joule;                                             <font color="#B22222">/* Hydrogen ionization potential */</font>
+<a name="line1009">1009: </a>    rd-&gt;m_p     = 1.673e-27 * kilogram;                                          <font color="#B22222">/* proton mass */</font>
+<a name="line1010">1010: </a>    rd-&gt;m_e     = 9.109e-31 * kilogram;                                          <font color="#B22222">/* electron mass */</font>
+<a name="line1011">1011: </a>    rd-&gt;h       = 6.626e-34 * Joule * second;                                    <font color="#B22222">/* Planck's constant */</font>
+<a name="line1012">1012: </a>    rd-&gt;k       = 1.381e-23 * Joule / Kelvin;                                    <font color="#B22222">/* Boltzman constant */</font>
+<a name="line1013">1013: </a>    rd-&gt;c       = 3.00e8 * meter / second;                                       <font color="#B22222">/* speed of light */</font>
+<a name="line1014">1014: </a>    rd-&gt;sigma_b = 5.67e-8 * Watt * pow(meter,-2.) * pow(Kelvin,-4.);             <font color="#B22222">/* Stefan-Boltzman constant */</font>
+<a name="line1015">1015: </a>    rd-&gt;MaterialEnergy = RDMaterialEnergy_Saha;
+<a name="line1016">1016: </a>    <font color="#4169E1">break</font>;
+<a name="line1017">1017: </a>  }
+
+<a name="line1019">1019: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate1d.html#DMDACreate1d">DMDACreate1d</A>(comm,DMDA_BOUNDARY_NONE,-20,<font color="#4169E1">sizeof</font>(RDNode)/<font color="#4169E1">sizeof</font>(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>),1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;rd-&gt;da);
+<a name="line1020">1020: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(rd-&gt;da,0,<font color="#666666">"E"</font>);
+<a name="line1021">1021: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(rd-&gt;da,1,<font color="#666666">"T"</font>);
+<a name="line1022">1022: </a>  <A href="../../../../docs/manualpages/DM/DMDASetUniformCoordinates.html#DMDASetUniformCoordinates">DMDASetUniformCoordinates</A>(rd-&gt;da,0.,1.,0.,0.,0.,0.);
+
+<a name="line1024">1024: </a>  *inrd = rd;
+<a name="line1025">1025: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1026">1026: </a>}
+
+<a name="line1030">1030: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char *argv[])</font></strong>
+<a name="line1031">1031: </a>{
+<a name="line1033">1033: </a>  RD             rd;
+<a name="line1034">1034: </a>  <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>             ts;
+<a name="line1035">1035: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes;
+<a name="line1036">1036: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X;
+<a name="line1037">1037: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            A,B;
+<a name="line1038">1038: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       steps;
+<a name="line1039">1039: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      ftime;
+<a name="line1040">1040: </a>  <A href="../../../../docs/manualpages/Mat/MatFDColoring.html#MatFDColoring">MatFDColoring</A>  matfdcoloring = 0;
+
+<a name="line1042">1042: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,0,help);
+<a name="line1043">1043: </a>  RDCreate(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;rd);
+<a name="line1044">1044: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(rd-&gt;da,&amp;X);
+<a name="line1045">1045: </a>  <A href="../../../../docs/manualpages/DM/DMCreateMatrix.html#DMCreateMatrix">DMCreateMatrix</A>(rd-&gt;da,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>,&amp;B);
+<a name="line1046">1046: </a>  RDInitialState(rd,X);
+
+<a name="line1048">1048: </a>  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;ts);
+<a name="line1049">1049: </a>  <A href="../../../../docs/manualpages/TS/TSSetProblemType.html#TSSetProblemType">TSSetProblemType</A>(ts,TS_NONLINEAR);
+<a name="line1050">1050: </a>  <A href="../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>(ts,<A href="../../../../docs/manualpages/TS/TSTHETA.html#TSTHETA">TSTHETA</A>);
+<a name="line1051">1051: </a>  <font color="#4169E1">switch</font> (rd-&gt;discretization) {
+<a name="line1052">1052: </a>  <font color="#4169E1">case</font> DISCRETIZATION_FD:
+<a name="line1053">1053: </a>    <A href="../../../../docs/manualpages/TS/TSSetIFunction.html#TSSetIFunction">TSSetIFunction</A>(ts,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,RDIFunction_FD,rd);
+<a name="line1054">1054: </a>    <A href="../../../../docs/manualpages/TS/TSSetIJacobian.html#TSSetIJacobian">TSSetIJacobian</A>(ts,B,B,RDIJacobian_FD,rd);
+<a name="line1055">1055: </a>    <font color="#4169E1">break</font>;
+<a name="line1056">1056: </a>  <font color="#4169E1">case</font> DISCRETIZATION_FE:
+<a name="line1057">1057: </a>    <A href="../../../../docs/manualpages/TS/TSSetIFunction.html#TSSetIFunction">TSSetIFunction</A>(ts,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,RDIFunction_FE,rd);
+<a name="line1058">1058: </a>    <A href="../../../../docs/manualpages/TS/TSSetIJacobian.html#TSSetIJacobian">TSSetIJacobian</A>(ts,B,B,RDIJacobian_FE,rd);
+<a name="line1059">1059: </a>    <font color="#4169E1">break</font>;
+<a name="line1060">1060: </a>  }
+<a name="line1061">1061: </a>  <A href="../../../../docs/manualpages/TS/TSSetDuration.html#TSSetDuration">TSSetDuration</A>(ts,10000,rd-&gt;final_time);
+<a name="line1062">1062: </a>  <A href="../../../../docs/manualpages/TS/TSSetInitialTimeStep.html#TSSetInitialTimeStep">TSSetInitialTimeStep</A>(ts,0.,1e-3);
+<a name="line1063">1063: </a>  <A href="../../../../docs/manualpages/TS/TSSetFromOptions.html#TSSetFromOptions">TSSetFromOptions</A>(ts);
+
+<a name="line1065">1065: </a>  A = B;
+<a name="line1066">1066: </a>  <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line1067">1067: </a>  <font color="#4169E1">switch</font> (rd-&gt;jacobian) {
+<a name="line1068">1068: </a>  <font color="#4169E1">case</font> JACOBIAN_ANALYTIC:
+<a name="line1069">1069: </a>    <font color="#4169E1">break</font>;
+<a name="line1070">1070: </a>  <font color="#4169E1">case</font> JACOBIAN_MATRIXFREE:
+<a name="line1071">1071: </a>    <font color="#4169E1">break</font>;
+<a name="line1072">1072: </a>  <font color="#4169E1">case</font> JACOBIAN_FD_COLORING: {
+<a name="line1073">1073: </a>    <A href="../../../../docs/manualpages/IS/ISColoring.html#ISColoring">ISColoring</A>     iscoloring;
+<a name="line1074">1074: </a>    <A href="../../../../docs/manualpages/DM/DMCreateColoring.html#DMCreateColoring">DMCreateColoring</A>(rd-&gt;da,IS_COLORING_GLOBAL,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>,&amp;iscoloring);
+<a name="line1075">1075: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringCreate.html#MatFDColoringCreate">MatFDColoringCreate</A>(B,iscoloring,&amp;matfdcoloring);
+<a name="line1076">1076: </a>    <A href="../../../../docs/manualpages/IS/ISColoringDestroy.html#ISColoringDestroy">ISColoringDestroy</A>(&amp;iscoloring);
+<a name="line1077">1077: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFunction.html#MatFDColoringSetFunction">MatFDColoringSetFunction</A>(matfdcoloring,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>(*)(void))<A href="../../../../docs/manualpages/TS/SNESTSFormFunction.html#SNESTSFormFunction">SNESTSFormFunction</A>,ts);
+<a name="line1078">1078: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFromOptions.html#MatFDColoringSetFromOptions">MatFDColoringSetFromOptions</A>(matfdcoloring);
+<a name="line1079">1079: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,A,B,<A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobianColor.html#SNESDefaultComputeJacobianColor">SNESDefaultComputeJacobianColor</A>,matfdcoloring);
+<a name="line1080">1080: </a>  } <font color="#4169E1">break</font>;
+<a name="line1081">1081: </a>  <font color="#4169E1">case</font> JACOBIAN_FD_FULL:
+<a name="line1082">1082: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,A,B,<A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobian.html#SNESDefaultComputeJacobian">SNESDefaultComputeJacobian</A>,ts);
+<a name="line1083">1083: </a>    <font color="#4169E1">break</font>;
+<a name="line1084">1084: </a>  }
+
+<a name="line1086">1086: </a>  <font color="#4169E1">if</font> (rd-&gt;test_diff) {
+<a name="line1087">1087: </a>    RDTestDifferentiation(rd);
+<a name="line1088">1088: </a>  }
+<a name="line1089">1089: </a>  <A href="../../../../docs/manualpages/TS/TSSolve.html#TSSolve">TSSolve</A>(ts,X,&amp;ftime);
+<a name="line1090">1090: </a>  <A href="../../../../docs/manualpages/TS/TSGetTimeStepNumber.html#TSGetTimeStepNumber">TSGetTimeStepNumber</A>(ts,&amp;steps);
+<a name="line1091">1091: </a>  <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Steps %D  final time %G\n"</font>,steps,ftime);
+<a name="line1092">1092: </a>  <font color="#4169E1">if</font> (rd-&gt;view_draw) {
+<a name="line1093">1093: </a>    RDView(rd,X,<A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_DRAW_WORLD.html#PETSC_VIEWER_DRAW_WORLD">PETSC_VIEWER_DRAW_WORLD</A>);
+<a name="line1094">1094: </a>  }
+<a name="line1095">1095: </a>  <font color="#4169E1">if</font> (rd-&gt;view_binary[0]) {
+<a name="line1096">1096: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer;
+<a name="line1097">1097: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,rd-&gt;view_binary,FILE_MODE_WRITE,&amp;viewer);
+<a name="line1098">1098: </a>    RDView(rd,X,viewer);
+<a name="line1099">1099: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;viewer);
+<a name="line1100">1100: </a>  }
+
+<a name="line1102">1102: </a>  <font color="#4169E1">if</font> (matfdcoloring) {<A href="../../../../docs/manualpages/MatFD/MatFDColoringDestroy.html#MatFDColoringDestroy">MatFDColoringDestroy</A>(&amp;matfdcoloring);}
+<a name="line1103">1103: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;X);
+<a name="line1104">1104: </a>  <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;B);
+<a name="line1105">1105: </a>  RDDestroy(&amp;rd);
+<a name="line1106">1106: </a>  <A href="../../../../docs/manualpages/TS/TSDestroy.html#TSDestroy">TSDestroy</A>(&amp;ts);
+<a name="line1107">1107: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line1108">1108: </a>  <font color="#4169E1">return</font> 0;
+<a name="line1109">1109: </a>}
+</pre>
+</body>
+
+</html>

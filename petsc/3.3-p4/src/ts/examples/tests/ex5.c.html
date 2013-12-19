@@ -1,0 +1,748 @@
+<center><a href="ex5.c">Actual source code: ex5.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ts/examples/tests/ex5.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:25:20+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a>static char help[] = <font color="#666666">"Nonlinear, time-dependent. Developed from radiative_surface_balance.c - work with petsc-dev \n"</font>;
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">  Contributed by Steve Froehlich, Illinois Institute of Technology</font>
+
+<a name="line5">  5: </a><font color="#B22222">   Usage:</font>
+<a name="line6">  6: </a><font color="#B22222">    mpiexec -n &lt;np&gt; ./ex5 [options]</font>
+<a name="line7">  7: </a><font color="#B22222">    ./ex5 -help  [view petsc options]</font>
+<a name="line8">  8: </a><font color="#B22222">    ./ex5 -ts_type sundials -ts_sundials_monitor_steps -pc_type lu -ts_view</font>
+<a name="line9">  9: </a><font color="#B22222">    ./ex5 -da_grid_x 20 -da_grid_y 20 -log_summary</font>
+<a name="line10"> 10: </a><font color="#B22222">    ./ex5 -drawcontours -draw_pause 0.1 -draw_fields 0,1,2,3,4</font>
+<a name="line11"> 11: </a><font color="#B22222">*/</font>
+
+<a name="line13"> 13: </a><font color="#B22222">/*</font>
+<a name="line14"> 14: </a><font color="#B22222">   -----------------------------------------------------------------------</font>
+
+<a name="line16"> 16: </a><font color="#B22222">   Governing equations:</font>
+
+<a name="line18"> 18: </a><font color="#B22222">        R      = s*(Ea*Ta^4 - Es*Ts^4)</font>
+<a name="line19"> 19: </a><font color="#B22222">        SH     = p*Cp*Ch*wind*(Ta - Ts)</font>
+<a name="line20"> 20: </a><font color="#B22222">        LH     = p*L*Ch*wind*B(q(Ta) - q(Ts))</font>
+<a name="line21"> 21: </a><font color="#B22222">        G      = k*(Tgnd - Ts)/dz</font>
+
+<a name="line23"> 23: </a><font color="#B22222">        Fnet   = R + SH + LH + G</font>
+
+<a name="line25"> 25: </a><font color="#B22222">        du/dt  = -u*(du/dx) - v*(du/dy) - 2*omeg*sin(lat)*v - (1/p)*(dP/dx)</font>
+<a name="line26"> 26: </a><font color="#B22222">        dv/dt  = -u*(dv/dx) - v*(dv/dy) + 2*omeg*sin(lat)*u - (1/p)*(dP/dy)</font>
+<a name="line27"> 27: </a><font color="#B22222">        dTs/dt = Fnet/(Cp*dz) - Div([u*Ts, v*Ts]) + D*Lap(Ts)</font>
+<a name="line28"> 28: </a><font color="#B22222">               = Fnet/(Cs*dz) - u*(dTs/dx) - v*(dTs/dy) + D*(Ts_xx + Ts_yy)</font>
+<a name="line29"> 29: </a><font color="#B22222">        dp/dt  = -Div([u*p,v*p])</font>
+<a name="line30"> 30: </a><font color="#B22222">               = - u*dp/dx - v*dp/dy  </font>
+<a name="line31"> 31: </a><font color="#B22222">        dTa/dt = Fnet/Cp</font>
+
+<a name="line33"> 33: </a><font color="#B22222">   Equation of State:</font>
+
+<a name="line35"> 35: </a><font color="#B22222">        P = p*R*Ts</font>
+
+<a name="line37"> 37: </a><font color="#B22222">   -----------------------------------------------------------------------</font>
+
+<a name="line39"> 39: </a><font color="#B22222">   Program considers the evolution of a two dimensional atmosphere from</font>
+<a name="line40"> 40: </a><font color="#B22222">   sunset to sunrise. There are two components:</font>
+<a name="line41"> 41: </a><font color="#B22222">                1. Surface energy balance model to compute diabatic dT (Fnet)</font>
+<a name="line42"> 42: </a><font color="#B22222">                2. Dynamical model using simplified primitive equations</font>
+
+<a name="line44"> 44: </a><font color="#B22222">   Program is to be initiated at sunset and run to sunrise.</font>
+
+<a name="line46"> 46: </a><font color="#B22222">   Inputs are:</font>
+<a name="line47"> 47: </a><font color="#B22222">                Surface temperature</font>
+<a name="line48"> 48: </a><font color="#B22222">                Dew point temperature</font>
+<a name="line49"> 49: </a><font color="#B22222">                Air temperature</font>
+<a name="line50"> 50: </a><font color="#B22222">                Temperature at cloud base (if clouds are present)</font>
+<a name="line51"> 51: </a><font color="#B22222">                Fraction of sky covered by clouds</font>
+<a name="line52"> 52: </a><font color="#B22222">                Wind speed</font>
+<a name="line53"> 53: </a><font color="#B22222">                Precipitable water in centimeters</font>
+<a name="line54"> 54: </a><font color="#B22222">                Wind direction</font>
+
+<a name="line56"> 56: </a><font color="#B22222">   Inputs are are read in from the text file ex5_control.txt. To change an</font>
+<a name="line57"> 57: </a><font color="#B22222">   input value use ex5_control.txt.</font>
+
+<a name="line59"> 59: </a><font color="#B22222">   Solvers:</font>
+<a name="line60"> 60: </a><font color="#B22222">            Backward Euler = default solver</font>
+<a name="line61"> 61: </a><font color="#B22222">            Sundials = fastest and most accurate, requires Sundials libraries</font>
+
+<a name="line63"> 63: </a><font color="#B22222">   This model is under development and should be used only as an example</font>
+<a name="line64"> 64: </a><font color="#B22222">   and not as a predictive weather model.</font>
+<a name="line65"> 65: </a><font color="#B22222">*/</font>
+
+<a name="line67"> 67: </a><font color="#A020F0">#include &lt;petscts.h&gt;</font>
+<a name="line68"> 68: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+
+<a name="line70"> 70: </a><strong><font color="#228B22">#define SIG 0.000000056703  //stefan-boltzmann constant</font></strong>
+<a name="line71"> 71: </a><strong><font color="#228B22">#define EMMSFC 1            //absorption-emission constant for surface</font></strong>
+<a name="line72"> 72: </a><strong><font color="#228B22">#define TIMESTEP 1          //amount of time(seconds) that passes before new flux is calculated</font></strong>
+
+<a name="line74"> 74: </a><font color="#B22222">/* variables of interest to be solved at each grid point */</font>
+<a name="line75"> 75: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line76"> 76: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Ts,Ta; // surface and air temperature
+<a name="line77"> 77: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> u,v;   // wind speed
+<a name="line78"> 78: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> p;     // density
+<a name="line79"> 79: </a>} Field;
+
+<a name="line81"> 81: </a><font color="#B22222">/* User defined variables. Used in solving for variables of interest */</font>
+<a name="line82"> 82: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line83"> 83: </a>  DM          da;        //grid
+<a name="line84"> 84: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> csoil;     //heat constant <font color="#4169E1">for</font> layer
+<a name="line85"> 85: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dzlay;     //thickness of top soil layer
+<a name="line86"> 86: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma;      //emission parameter
+<a name="line87"> 87: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wind;      //wind speed
+<a name="line88"> 88: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dewtemp;         //dew point temperature (moisture in air)
+<a name="line89"> 89: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure1; //sea level pressure
+<a name="line90"> 90: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> airtemp;         //temperature of air near boundary layer inversion
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Ts;         //temperature at the surface
+<a name="line92"> 92: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fract;         //fraction of sky covered by clouds
+<a name="line93"> 93: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Tc;        //temperature at base of lowest cloud layer
+<a name="line94"> 94: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> lat;         //Latitude in degrees
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> init;         //initialization scenario
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> deep_grnd_temp;//temperature of ground under top soil surface layer
+<a name="line97"> 97: </a>} AppCtx;
+
+<a name="line99"> 99: </a><font color="#B22222">/* Struct for visualization */</font>
+<a name="line100">100: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line101">101: </a>   <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>   drawcontours;   <font color="#B22222">/* flag - 1 indicates drawing contours */</font>
+<a name="line102">102: </a>   <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> drawviewer;
+<a name="line103">103: </a>} MonitorCtx;
+
+
+<a name="line106">106: </a><font color="#B22222">/* Inputs read in from text file */</font>
+<a name="line107">107: </a><font color="#4169E1"><a name="in"></a>struct in </font>{
+<a name="line108">108: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Ts;        //surface temperature
+<a name="line109">109: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Td;        //dewpoint temperature
+<a name="line110">110: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Tc;        //temperature of cloud base
+<a name="line111">111: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fr;        //fraction of sky covered by clouds
+<a name="line112">112: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wnd;        //wind speed
+<a name="line113">113: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Ta;        //air temperature
+<a name="line114">114: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pwt;        //precipitable water
+<a name="line115">115: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wndDir; //wind direction
+<a name="line116">116: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> lat;        //latitude
+<a name="line117">117: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   time;        //time in hours
+<a name="line118">118: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> init;
+<a name="line119">119: </a>};
+
+<a name="line121">121: </a>//functions
+<a name="line122">122: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emission(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                           //sets emission/absorption constant depending on water vapor content
+<a name="line123">123: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> calc_q(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                             //calculates specific humidity
+<a name="line124">124: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mph2mpers(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                          //converts miles per hour to meters per second
+<a name="line125">125: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Lconst(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                             //calculates latent heat constant taken from Satellite estimates of wind speed and latent heat flux over the global oceans., Bentamy et al.
+<a name="line126">126: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fahr_to_cel(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                        //converts Fahrenheit to Celsius
+<a name="line127">127: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cel_to_fahr(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                        //converts Celsius to Fahrenheit
+<a name="line128">128: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> calcmixingr(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;           //calculates mixing ratio
+<a name="line129">129: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cloud(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)</font></strong>;                              //cloud radiative parameterization
+<a name="line130">130: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormInitialSolution(DM,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;            //Specifies initial conditions <font color="#4169E1">for</font> the system of equations (PETSc defined function)
+<a name="line131">131: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RhsFunc(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;            //Specifies the user defined functions                       (PETSc defined function)
+<a name="line132">132: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;            //Specifies output and visualization tools                       (PETSc defined function)
+<a name="line133">133: </a><strong><font color="#4169E1">extern void readinput(struct in *put)</font></strong>;                                    //reads input from text file
+<a name="line134">134: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calcfluxs(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>;//calculates upward IR from surface
+<a name="line135">135: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calcfluxa(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>;                          //calculates downward IR from atmosphere
+<a name="line136">136: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> sensibleflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>;                       //calculates sensible heat flux
+<a name="line137">137: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> potential_temperature(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>; //calculates potential temperature
+<a name="line138">138: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> latentflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>;            //calculates latent heat flux
+<a name="line139">139: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calc_gflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>*)</font></strong>;                                      //calculates flux between top soil layer and underlying earth
+
+<a name="line143">143: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc,char **argv)</font></strong>
+<a name="line144">144: </a>{
+<a name="line145">145: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>         ierr;
+<a name="line146">146: </a>  int time;                   //amount of loops
+<a name="line147">147: </a>  <font color="#4169E1">struct in</font>   put;
+<a name="line148">148: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> rh;             //relative humidity
+<a name="line149">149: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> x;              //memory varialbe <font color="#4169E1">for</font> relative humidity calculation
+<a name="line150">150: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> deep_grnd_temp; //temperature of ground under top soil surface layer
+
+<a name="line152">152: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma;                //absorption-emission constant <font color="#4169E1">for</font> air
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure1 = 101300; //surface pressure
+<a name="line154">154: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mixratio;         //mixing ratio
+<a name="line155">155: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> airtemp;          //temperature of air near boundary layer inversion
+<a name="line156">156: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dewtemp;          //dew point temperature
+<a name="line157">157: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp;          //temperature at surface
+<a name="line158">158: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pwat;                //total column precipitable water
+<a name="line159">159: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cloudTemp;        //temperature at base of cloud
+<a name="line160">160: </a>  AppCtx      user;             <font color="#B22222">/* user-defined work context */</font>
+<a name="line161">161: </a>  MonitorCtx  usermonitor;      <font color="#B22222">/* user-defined monitor context */</font>
+<a name="line162">162: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> rank,size;
+<a name="line163">163: </a>  <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>          ts;
+<a name="line164">164: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>        snes;
+<a name="line165">165: </a>  DM          da;
+<a name="line166">166: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         T,rhs;            <font color="#B22222">/* solution vector */</font>
+<a name="line167">167: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         J;                <font color="#B22222">/* Jacobian matrix */</font>
+<a name="line168">168: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   ftime,dt;
+<a name="line169">169: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    steps,dof = 5;
+
+<a name="line171">171: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv,(char *)0,help);
+<a name="line172">172: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;size);
+<a name="line173">173: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;rank);
+
+<a name="line175">175: </a>  <font color="#B22222">/* Inputs */</font>
+<a name="line176">176: </a>  readinput(&amp;put);
+
+<a name="line178">178: </a>  sfctemp = put.Ts;
+<a name="line179">179: </a>  dewtemp = put.Td;
+<a name="line180">180: </a>  cloudTemp = put.Tc;
+<a name="line181">181: </a>  airtemp = put.Ta;
+<a name="line182">182: </a>  pwat = put.pwt;
+
+<a name="line184">184: </a>  <font color="#4169E1">if</font> (!rank) <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,<font color="#666666">"Initial Temperature = %g\n"</font>,sfctemp); //input surface temperature
+
+<a name="line186">186: </a>  deep_grnd_temp = sfctemp - 10;   //set underlying ground layer temperature
+<a name="line187">187: </a>  emma = emission(pwat);           //accounts <font color="#4169E1">for</font> radiative effects of water vapor
+
+<a name="line189">189: </a> <font color="#B22222">/* Converts from Fahrenheit to Celsuis */</font>
+<a name="line190">190: </a>    sfctemp = fahr_to_cel(sfctemp);
+<a name="line191">191: </a>    airtemp = fahr_to_cel(airtemp);
+<a name="line192">192: </a>    dewtemp = fahr_to_cel(dewtemp);
+<a name="line193">193: </a>    cloudTemp = fahr_to_cel(cloudTemp);
+<a name="line194">194: </a>    deep_grnd_temp = fahr_to_cel(deep_grnd_temp);
+
+<a name="line196">196: </a> <font color="#B22222">/* Converts from Celsius to Kelvin */</font>
+<a name="line197">197: </a>    sfctemp +=273;
+<a name="line198">198: </a>    airtemp +=273;
+<a name="line199">199: </a>    dewtemp +=273;
+<a name="line200">200: </a>    cloudTemp +=273;
+<a name="line201">201: </a>    deep_grnd_temp +=273;
+
+<a name="line203">203: </a> <font color="#B22222">/* Calculates initial relative humidity */</font>
+<a name="line204">204: </a>    x = calcmixingr(dewtemp,pressure1);
+<a name="line205">205: </a>    mixratio = calcmixingr(sfctemp,pressure1);
+<a name="line206">206: </a>    rh = (x/mixratio)*100;
+
+<a name="line208">208: </a>    <font color="#4169E1">if</font> (!rank){printf(<font color="#666666">"Initial RH = %.1f percent\n\n"</font>,rh);}   //prints initial relative humidity
+
+<a name="line210">210: </a>    time = 3600*put.time;                         //sets amount of timesteps to run model
+
+<a name="line212">212: </a>  <font color="#B22222">/* Configure PETSc <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> solver */</font>
+<a name="line213">213: </a>  <font color="#B22222">/*------------------------------------------*/</font>
+
+<a name="line215">215: </a>  <font color="#B22222">/*Create grid*/</font>
+<a name="line216">216: </a>  <A href="../../../../docs/manualpages/DM/DMDACreate2d.html#DMDACreate2d">DMDACreate2d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DMDA_BOUNDARY_PERIODIC,DMDA_BOUNDARY_PERIODIC,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_STAR.html#DMDA_STENCIL_STAR">DMDA_STENCIL_STAR</A>,-20,-20,
+<a name="line217">217: </a>                      <A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,dof,1,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;da);
+
+<a name="line219">219: </a>  <font color="#B22222">/*Define output window for each variable of interest*/</font>
+<a name="line220">220: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,0,<font color="#666666">"Ts"</font>);
+<a name="line221">221: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,1,<font color="#666666">"Ta"</font>);
+<a name="line222">222: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,2,<font color="#666666">"u"</font>);
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,3,<font color="#666666">"v"</font>);
+<a name="line224">224: </a>  <A href="../../../../docs/manualpages/DM/DMDASetFieldName.html#DMDASetFieldName">DMDASetFieldName</A>(da,4,<font color="#666666">"p"</font>);
+
+<a name="line226">226: </a>  <font color="#B22222">/*set values for appctx*/</font>
+<a name="line227">227: </a>  user.da        = da;
+<a name="line228">228: </a>  user.Ts         = sfctemp;
+<a name="line229">229: </a>  user.fract     = put.fr;            //fraction of sky covered by clouds
+<a name="line230">230: </a>  user.dewtemp   = dewtemp;           //dew point temperature (mositure in air)
+<a name="line231">231: </a>  user.csoil     = 2000000;                 //heat constant <font color="#4169E1">for</font> layer
+<a name="line232">232: </a>  user.dzlay     = 0.08;              //thickness of top soil layer
+<a name="line233">233: </a>  user.emma      = emma;              //emission parameter
+<a name="line234">234: </a>  user.wind      = put.wnd;           //wind spped
+<a name="line235">235: </a>  user.pressure1 = pressure1;         //sea level pressure
+<a name="line236">236: </a>  user.airtemp   = airtemp;           //temperature of air near boundar layer inversion
+<a name="line237">237: </a>  user.Tc         = cloudTemp;               //temperature at base of lowest cloud layer
+<a name="line238">238: </a>  user.init         = put.init;              //user chosen initiation scenario
+<a name="line239">239: </a>  user.lat         = 70*0.0174532; //converts latitude degrees to latitude in radians
+<a name="line240">240: </a>  user.deep_grnd_temp = deep_grnd_temp;  //temp in lowest ground layer
+
+<a name="line242">242: </a>  <font color="#B22222">/*set values for MonitorCtx*/</font>
+<a name="line243">243: </a>  usermonitor.drawcontours = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line244">244: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHasName.html#PetscOptionsHasName">PetscOptionsHasName</A>(<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,<font color="#666666">"-drawcontours"</font>,&amp;usermonitor.drawcontours);
+<a name="line245">245: </a>  <font color="#4169E1">if</font> (usermonitor.drawcontours){
+<a name="line246">246: </a>    <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> bounds[] = {1000.0,-1000.,  -1000.,-1000.,  1000.,-1000.,  1000.,-1000.,  1000,-1000, 100700,100800};
+<a name="line247">247: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawOpen.html#PetscViewerDrawOpen">PetscViewerDrawOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,0,0,0,0,300,300,&amp;usermonitor.drawviewer);
+<a name="line248">248: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDrawSetBounds.html#PetscViewerDrawSetBounds">PetscViewerDrawSetBounds</A>(usermonitor.drawviewer,dof,bounds);
+<a name="line249">249: </a>  }
+
+<a name="line251">251: </a>  <font color="#B22222">/*  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line252">252: </a><font color="#B22222">     Extract global vectors from DA; </font>
+<a name="line253">253: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line254">254: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(da,&amp;T);
+<a name="line255">255: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(T,&amp;rhs); //r: vector to put the computed right hand side
+
+<a name="line257">257: </a>  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;ts);
+<a name="line258">258: </a>  <A href="../../../../docs/manualpages/TS/TSSetProblemType.html#TSSetProblemType">TSSetProblemType</A>(ts,TS_NONLINEAR);
+<a name="line259">259: </a>  <A href="../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>(ts,<A href="../../../../docs/manualpages/TS/TSBEULER.html#TSBEULER">TSBEULER</A>);
+<a name="line260">260: </a>  <A href="../../../../docs/manualpages/TS/TSSetRHSFunction.html#TSSetRHSFunction">TSSetRHSFunction</A>(ts,rhs,RhsFunc,&amp;user);
+
+<a name="line262">262: </a>  <font color="#B22222">/* Set Jacobian evaluation routine - use coloring to compute finite difference Jacobian efficiently */</font>
+<a name="line263">263: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      use_coloring=<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line264">264: </a>  <A href="../../../../docs/manualpages/Mat/MatFDColoring.html#MatFDColoring">MatFDColoring</A>  matfdcoloring=0;
+<a name="line265">265: </a>  <A href="../../../../docs/manualpages/DM/DMCreateMatrix.html#DMCreateMatrix">DMCreateMatrix</A>(da,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>,&amp;J);
+<a name="line266">266: </a>  <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line267">267: </a>  <font color="#4169E1">if</font> (use_coloring){
+<a name="line268">268: </a>    <A href="../../../../docs/manualpages/IS/ISColoring.html#ISColoring">ISColoring</A>     iscoloring;
+<a name="line269">269: </a>    <A href="../../../../docs/manualpages/DM/DMCreateColoring.html#DMCreateColoring">DMCreateColoring</A>(da,IS_COLORING_GLOBAL,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>,&amp;iscoloring);
+<a name="line270">270: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringCreate.html#MatFDColoringCreate">MatFDColoringCreate</A>(J,iscoloring,&amp;matfdcoloring);
+<a name="line271">271: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFromOptions.html#MatFDColoringSetFromOptions">MatFDColoringSetFromOptions</A>(matfdcoloring);
+<a name="line272">272: </a>    <A href="../../../../docs/manualpages/IS/ISColoringDestroy.html#ISColoringDestroy">ISColoringDestroy</A>(&amp;iscoloring);
+<a name="line273">273: </a>    <A href="../../../../docs/manualpages/MatFD/MatFDColoringSetFunction.html#MatFDColoringSetFunction">MatFDColoringSetFunction</A>(matfdcoloring,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(void))<A href="../../../../docs/manualpages/TS/SNESTSFormFunction.html#SNESTSFormFunction">SNESTSFormFunction</A>,ts);
+<a name="line274">274: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,<A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobianColor.html#SNESDefaultComputeJacobianColor">SNESDefaultComputeJacobianColor</A>,matfdcoloring);
+<a name="line275">275: </a>  } <font color="#4169E1">else</font> {
+<a name="line276">276: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,<A href="../../../../docs/manualpages/SNES/SNESDefaultComputeJacobian.html#SNESDefaultComputeJacobian">SNESDefaultComputeJacobian</A>,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line277">277: </a>  }
+
+<a name="line279">279: </a>  <font color="#B22222">/*Define what to print for ts_monitor option*/</font>
+<a name="line280">280: </a>  <A href="../../../../docs/manualpages/TS/TSMonitorSet.html#TSMonitorSet">TSMonitorSet</A>(ts,Monitor,&amp;usermonitor,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line281">281: </a>  FormInitialSolution(da,T,&amp;user);
+<a name="line282">282: </a>  dt    = TIMESTEP; <font color="#B22222">/* initial time step */</font>
+<a name="line283">283: </a>  ftime = TIMESTEP*time;
+<a name="line284">284: </a>  <font color="#4169E1">if</font> (!rank){printf(<font color="#666666">"time %d, ftime %g hour, TIMESTEP %g\n"</font>,time,ftime/3600,dt);}
+<a name="line285">285: </a>  <A href="../../../../docs/manualpages/TS/TSSetInitialTimeStep.html#TSSetInitialTimeStep">TSSetInitialTimeStep</A>(ts,0.0,dt);
+<a name="line286">286: </a>  <A href="../../../../docs/manualpages/TS/TSSetDuration.html#TSSetDuration">TSSetDuration</A>(ts,time,ftime);
+<a name="line287">287: </a>  <A href="../../../../docs/manualpages/TS/TSSetSolution.html#TSSetSolution">TSSetSolution</A>(ts,T);
+
+<a name="line289">289: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line290">290: </a><font color="#B22222">     Set runtime options</font>
+<a name="line291">291: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line292">292: </a>  <A href="../../../../docs/manualpages/TS/TSSetFromOptions.html#TSSetFromOptions">TSSetFromOptions</A>(ts);
+
+<a name="line294">294: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line295">295: </a><font color="#B22222">     Solve nonlinear system</font>
+<a name="line296">296: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line297">297: </a>  <A href="../../../../docs/manualpages/TS/TSSolve.html#TSSolve">TSSolve</A>(ts,T,&amp;ftime);
+<a name="line298">298: </a>  <A href="../../../../docs/manualpages/TS/TSGetTimeStepNumber.html#TSGetTimeStepNumber">TSGetTimeStepNumber</A>(ts,&amp;steps);
+<a name="line299">299: </a>  <font color="#4169E1">if</font> (!rank){<A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"Solution T after %g hours %d steps\n"</font>,ftime/3600,steps);}
+
+
+<a name="line302">302: </a>  <font color="#4169E1">if</font> (matfdcoloring){<A href="../../../../docs/manualpages/MatFD/MatFDColoringDestroy.html#MatFDColoringDestroy">MatFDColoringDestroy</A>(&amp;matfdcoloring);}
+<a name="line303">303: </a>  <font color="#4169E1">if</font> (usermonitor.drawcontours){
+<a name="line304">304: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;usermonitor.drawviewer);
+<a name="line305">305: </a>  }
+<a name="line306">306: </a>  <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;J);
+<a name="line307">307: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;T);
+<a name="line308">308: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;rhs);
+<a name="line309">309: </a>  <A href="../../../../docs/manualpages/TS/TSDestroy.html#TSDestroy">TSDestroy</A>(&amp;ts);
+<a name="line310">310: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;da);
+
+<a name="line312">312: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line313">313: </a>  <font color="#4169E1">return</font> 0;
+<a name="line314">314: </a>}
+<a name="line315">315: </a><font color="#B22222">/*****************************end main program********************************/</font>
+<a name="line316">316: </a><font color="#B22222">/*****************************************************************************/</font>
+<a name="line317">317: </a><font color="#B22222">/*****************************************************************************/</font>
+<a name="line318">318: </a><font color="#B22222">/*****************************************************************************/</font>
+<a name="line321">321: </a><strong><font color="#4169E1"><a name="calcfluxs"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calcfluxs(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> airtemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fract, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cloudTemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* flux)</font></strong>
+<a name="line322">322: </a>{
+<a name="line324">324: </a>  *flux = SIG*((EMMSFC*emma*pow(airtemp,4)) + (EMMSFC*fract*(1 - emma)*pow(cloudTemp,4)) - (EMMSFC*pow(sfctemp,4)));   //calculates flux using Stefan-Boltzmann relation
+<a name="line325">325: </a>  <font color="#4169E1">return</font>(0);
+<a name="line326">326: </a>}
+
+<a name="line330">330: </a><strong><font color="#4169E1"><a name="calcfluxa"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calcfluxa(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> airtemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* flux)</font></strong>   //this function is not currently called upon
+<a name="line331">331: </a>{
+<a name="line332">332: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emm = 0.001;
+<a name="line334">334: </a>    *flux = SIG*(- emm*(pow(airtemp,4)));     //calculates flux usinge Stefan-Boltzmann relation
+<a name="line335">335: </a>    <font color="#4169E1">return</font>(0);
+<a name="line336">336: </a>}
+<a name="line339">339: </a><strong><font color="#4169E1"><a name="sensibleflux"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> sensibleflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> airtemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wind, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* sheat)</font></strong>
+<a name="line340">340: </a>{
+<a name="line341">341: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> density = 1; //air density
+<a name="line342">342: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Cp = 1005;   //heat capicity <font color="#4169E1">for</font> dry air
+<a name="line343">343: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wndmix;      //temperature change from wind mixing: wind*Ch
+
+
+<a name="line347">347: </a>      wndmix = 0.0025 + 0.0042*wind;                               //regression equation valid <font color="#4169E1">for</font> neutral and stable BL
+<a name="line348">348: </a>      *sheat = density*Cp*wndmix*(airtemp - sfctemp);               //calculates sensible heat flux
+
+<a name="line350">350: </a>      <font color="#4169E1">return</font>(0);
+<a name="line351">351: </a>}
+
+<a name="line355">355: </a><strong><font color="#4169E1"><a name="latentflux"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> latentflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dewtemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wind, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure1, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* latentheat)</font></strong>
+<a name="line356">356: </a>{
+<a name="line357">357: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> density = 1;   //density of dry air
+<a name="line358">358: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> q;             //actual specific humitity
+<a name="line359">359: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> qs;            //saturation specific humidity
+<a name="line360">360: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wndmix;        //temperature change from wind mixing: wind*Ch
+<a name="line361">361: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> beta = .4;     //moisture availability
+<a name="line362">362: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mr      ;      //mixing ratio
+<a name="line363">363: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> lhcnst;        //latent heat of vaporization constant = 2501000 J/kg at 0c
+<a name="line364">364: </a>                                 //latent heat of saturation const = 2834000 J/kg
+<a name="line365">365: </a>                                 //latent heat of fusion const = 333700 J/kg
+
+<a name="line368">368: </a>      wind = mph2mpers(wind);              //converts wind from mph to meters per second
+<a name="line369">369: </a>      wndmix = 0.0025 + 0.0042*wind;       //regression equation valid <font color="#4169E1">for</font> neutral BL
+<a name="line370">370: </a>      lhcnst = Lconst(sfctemp);            //calculates latent heat of evaporation
+<a name="line371">371: </a>      mr  = calcmixingr(sfctemp,pressure1);//calculates saturation mixing ratio
+<a name="line372">372: </a>      qs = calc_q(mr);                     //calculates saturation specific humidty
+<a name="line373">373: </a>      mr = calcmixingr(dewtemp,pressure1); //calculates mixing ratio
+<a name="line374">374: </a>      q = calc_q(mr);                      //calculates specific humidty
+
+<a name="line376">376: </a>     *latentheat = density*wndmix*beta*lhcnst*(q - qs); //calculates latent heat flux
+<a name="line377">377: </a>     <font color="#4169E1">return</font>(0);
+<a name="line378">378: </a>}
+
+<a name="line382">382: </a><strong><font color="#4169E1"><a name="potential_temperature"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> potential_temperature(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> temp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure1, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure2, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* pottemp)</font></strong>
+<a name="line383">383: </a>{
+<a name="line384">384: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> kdry;    //poisson constant <font color="#4169E1">for</font> dry atmosphere
+<a name="line385">385: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> kmoist;  //poisson constant <font color="#4169E1">for</font> moist atmosphere
+<a name="line386">386: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pavg;    //average atmospheric pressure
+<a name="line387">387: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mixratio;//mixing ratio
+
+<a name="line390">390: </a>     mixratio = calcmixingr(sfctemp,pressure1);
+
+<a name="line392">392: </a>   <font color="#B22222">/*initialize poisson constant */</font>
+<a name="line393">393: </a>     kdry = 0.2854;
+<a name="line394">394: </a>     kmoist = 0.2854*(1 - 0.24*mixratio);
+
+<a name="line396">396: </a>     pavg = ((0.7*pressure1)+pressure2)/2;         //calculates simple average press
+<a name="line397">397: </a>     *pottemp = temp*(pow((pressure1/pavg),kdry)); //calculates potential temperature
+
+<a name="line399">399: </a>     <font color="#4169E1">return</font>(0);
+<a name="line400">400: </a>}
+<a name="line401">401: </a><strong><font color="#4169E1"><a name="calcmixingr"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> calcmixingr(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dtemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pressure1)</font></strong>
+<a name="line402">402: </a>{
+<a name="line403">403: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> e;        //vapor pressure
+<a name="line404">404: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mixratio; //mixing ratio
+
+<a name="line406">406: </a>     dtemp = dtemp - 273;                              //converts from Kelvin to Celsuis
+<a name="line407">407: </a>     e = 6.11*(pow(10,((7.5*dtemp)/(237.7+dtemp))));   //converts from dew point temp to vapor pressure
+<a name="line408">408: </a>     e = e*100;                                        //converts from hPa to Pa
+<a name="line409">409: </a>     mixratio = (0.622*e)/(pressure1 - e);             //computes mixing ratio
+<a name="line410">410: </a>     mixratio = mixratio*1;                            //convert to g/Kg
+
+<a name="line412">412: </a>     <font color="#4169E1">return</font> mixratio;
+<a name="line413">413: </a>}
+<a name="line414">414: </a><strong><font color="#4169E1"><a name="calc_q"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> calc_q(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> rv)</font></strong>
+<a name="line415">415: </a>{
+<a name="line416">416: </a>     <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> specific_humidity;        //define specific humidity variable
+<a name="line417">417: </a>     specific_humidity = rv/(1 + rv);      //calculates specific humidity
+<a name="line418">418: </a>     <font color="#4169E1">return</font> specific_humidity;
+<a name="line419">419: </a>}
+
+<a name="line423">423: </a><strong><font color="#4169E1"><a name="calc_gflux"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> calc_gflux(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> deep_grnd_temp, <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>* Gflux)</font></strong>
+<a name="line424">424: </a>{
+<a name="line425">425: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> k;                       //thermal conductivity parameter
+<a name="line426">426: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> n = 0.38;                   //value of soil porosity
+<a name="line427">427: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> dz = 1;                  //depth of layer between soil surface and deep soil layer
+<a name="line428">428: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> unit_soil_weight = 2700; //unit soil weight in kg/m^3
+
+
+<a name="line432">432: </a>      k = ((0.135*(1-n)*unit_soil_weight) + 64.7)/(unit_soil_weight - (0.947*(1-n)*unit_soil_weight));  //dry soil conductivity
+<a name="line433">433: </a>      *Gflux = (k*(deep_grnd_temp - sfctemp)/dz);   //calculates flux from deep ground layer
+<a name="line434">434: </a>      <font color="#4169E1">return</font>(0);
+<a name="line435">435: </a>}
+<a name="line438">438: </a><strong><font color="#4169E1"><a name="emission"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emission(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> pwat)</font></strong>
+<a name="line439">439: </a>{
+<a name="line440">440: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma;
+
+<a name="line442">442: </a>    emma = 0.725 + 0.17*log10(pwat);
+
+<a name="line444">444: </a>    <font color="#4169E1">return</font> emma;
+<a name="line445">445: </a>}
+<a name="line446">446: </a><strong><font color="#4169E1"><a name="cloud"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cloud(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fract)</font></strong>
+<a name="line447">447: </a>{
+<a name="line448">448: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> emma = 0;
+
+<a name="line450">450: </a>    <font color="#B22222">/*modifies radiative balance depending on cloud cover */</font>
+<a name="line451">451: </a>    <font color="#4169E1">if</font> (fract &gt;= 0.9)
+<a name="line452">452: </a>       emma = 1;
+<a name="line453">453: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (0.9 &gt; fract &amp;&amp; fract &gt;= 0.8)
+<a name="line454">454: </a>         emma = 0.9;
+<a name="line455">455: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (0.8 &gt; fract &amp;&amp; fract &gt;= 0.7)
+<a name="line456">456: </a>         emma = 0.85;
+<a name="line457">457: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (0.7 &gt; fract &amp;&amp; fract &gt;= 0.6)
+<a name="line458">458: </a>         emma = 0.75;
+<a name="line459">459: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (0.6 &gt; fract &amp;&amp; fract &gt;= 0.5)
+<a name="line460">460: </a>         emma = 0.65;
+<a name="line461">461: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (0.4 &gt; fract &amp;&amp; fract &gt;= 0.3)
+<a name="line462">462: </a>         emma = emma*1.086956;
+<a name="line463">463: </a>    <font color="#4169E1">return</font> emma;
+<a name="line464">464: </a>}
+<a name="line465">465: </a><strong><font color="#4169E1"><a name="Lconst"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Lconst(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> sfctemp)</font></strong>
+<a name="line466">466: </a>{
+<a name="line467">467: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Lheat;
+<a name="line468">468: </a>      sfctemp -=273;                              //converts from kelvin to celsius
+<a name="line469">469: </a>      Lheat = 4186.8*(597.31 - 0.5625*sfctemp);   //calculates latent heat constant
+<a name="line470">470: </a>      <font color="#4169E1">return</font> Lheat;
+<a name="line471">471: </a>}
+<a name="line472">472: </a><strong><font color="#4169E1"><a name="mph2mpers"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mph2mpers(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> wind)</font></strong>
+<a name="line473">473: </a>{
+<a name="line474">474: </a>     wind = ((wind*1.6*1000)/3600);                 //converts wind from mph to meters per second
+<a name="line475">475: </a>     <font color="#4169E1">return</font> wind;
+<a name="line476">476: </a>}
+<a name="line477">477: </a><strong><font color="#4169E1"><a name="fahr_to_cel"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> fahr_to_cel(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> temp)</font></strong>
+<a name="line478">478: </a>{
+<a name="line479">479: </a>   temp = (5*(temp-32))/9; //converts from farhrenheit to celsuis
+<a name="line480">480: </a>   <font color="#4169E1">return</font> temp;
+<a name="line481">481: </a>}
+<a name="line482">482: </a><strong><font color="#4169E1"><a name="cel_to_fahr"></a>extern <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cel_to_fahr(<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> temp)</font></strong>
+<a name="line483">483: </a>{
+<a name="line484">484: </a>   temp = ((temp*9)/5) + 32; //converts from celsuis to farhrenheit
+<a name="line485">485: </a>   <font color="#4169E1">return</font> temp;
+<a name="line486">486: </a>}
+<a name="line487">487: </a><strong><font color="#4169E1"><a name="readinput"></a>void readinput(struct in *put)</font></strong>
+<a name="line488">488: </a>{
+<a name="line489">489: </a>        int i;
+<a name="line490">490: </a>        char x;
+<a name="line491">491: </a>        FILE *ifp;
+
+<a name="line493">493: </a>        ifp = fopen(<font color="#666666">"ex5_control.txt"</font>, <font color="#666666">"r"</font>);
+
+<a name="line495">495: </a>        <font color="#4169E1">for</font> (i=0;i&lt;110;i++)
+<a name="line496">496: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line497">497: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;Ts);
+
+<a name="line499">499: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line500">500: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line501">501: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;Td);
+
+<a name="line503">503: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line504">504: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line505">505: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;Ta);
+
+<a name="line507">507: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line508">508: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line509">509: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;Tc);
+
+<a name="line511">511: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line512">512: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line513">513: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;fr);
+
+<a name="line515">515: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line516">516: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line517">517: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;wnd);
+
+<a name="line519">519: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line520">520: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line521">521: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;pwt);
+
+<a name="line523">523: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line524">524: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line525">525: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;wndDir);
+
+<a name="line527">527: </a>        <font color="#4169E1">for</font> (i=0;i&lt;43;i++)
+<a name="line528">528: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line529">529: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;time);
+
+<a name="line531">531: </a>        <font color="#4169E1">for</font> (i=0;i&lt;63;i++)
+<a name="line532">532: </a>                fscanf(ifp, <font color="#666666">"%c"</font>, &amp;x);
+<a name="line533">533: </a>        fscanf(ifp, <font color="#666666">"%lf"</font>, &amp;put-&gt;init);
+<a name="line534">534: </a>}
+
+<a name="line536">536: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+<a name="line539">539: </a><strong><font color="#4169E1"><a name="FormInitialSolution"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormInitialSolution(DM da,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xglobal,void *ctx)</font></strong>
+<a name="line540">540: </a>{
+<a name="line542">542: </a>  AppCtx         *user = (AppCtx*)ctx;       <font color="#B22222">/* user-defined application context */</font>
+<a name="line543">543: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,xs,ys,xm,ym,Mx,My;
+<a name="line544">544: </a>  Field          **X;
+<a name="line545">545: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    deltT;
+<a name="line546">546: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      hx,hy;
+<a name="line547">547: </a>  FILE           *ifp;
+<a name="line548">548: </a>  FILE           *ofp;
+
+<a name="line551">551: </a>  ofp = fopen(<font color="#666666">"swing"</font>, <font color="#666666">"w"</font>);
+<a name="line552">552: </a>  ifp = fopen(<font color="#666666">"grid.in"</font>, <font color="#666666">"r"</font>);
+<a name="line553">553: </a>  deltT = 0.8;
+
+<a name="line555">555: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,&amp;Mx,&amp;My,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,
+<a name="line556">556: </a>                     <A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>);
+
+<a name="line558">558: </a>  hx = 1/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(Mx-1);
+<a name="line559">559: </a>  hy = 1/(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(My-1);
+
+<a name="line561">561: </a>  <font color="#B22222">/* Get pointers to vector data */</font>
+<a name="line562">562: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,Xglobal,&amp;X);
+
+<a name="line564">564: </a>  <font color="#B22222">/* Get local grid boundaries */</font>
+<a name="line565">565: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;xm,&amp;ym,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line567">567: </a>  <font color="#B22222">/* Compute function over the locally owned part of the grid */</font>
+
+<a name="line569">569: </a>  <font color="#4169E1">if</font> (user-&gt;init == 1) {
+<a name="line570">570: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line571">571: </a>      <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line572">572: </a>          X[j][i].Ts = user-&gt;Ts - i*0.0001;
+<a name="line573">573: </a>          X[j][i].Ta = X[j][i].Ts - 5;
+<a name="line574">574: </a>          X[j][i].u  = 0;
+<a name="line575">575: </a>          X[j][i].v  = 0;
+<a name="line576">576: </a>          X[j][i].p  = 1.25;
+<a name="line577">577: </a>          <font color="#4169E1">if</font> ((j == 5 || j == 6) &amp;&amp; (i == 4 || i == 5)) X[j][i].p  += 0.00001;
+<a name="line578">578: </a>          <font color="#4169E1">if</font> ((j == 5 || j == 6) &amp;&amp; (i == 12 || i == 13)) X[j][i].p  += 0.00001;
+<a name="line579">579: </a>       }
+<a name="line580">580: </a>    }
+<a name="line581">581: </a>  }
+
+<a name="line583">583: </a>  <font color="#4169E1">else</font> {
+<a name="line584">584: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line585">585: </a>      <font color="#4169E1">for</font> (i=xs; i&lt;xs+xm; i++) {
+<a name="line586">586: </a>          X[j][i].Ts = user-&gt;Ts;
+<a name="line587">587: </a>          X[j][i].Ta = X[j][i].Ts - 5;
+<a name="line588">588: </a>          X[j][i].u  = 0;
+<a name="line589">589: </a>          X[j][i].v  = 0;
+<a name="line590">590: </a>          X[j][i].p  = 1.25;
+<a name="line591">591: </a>      }
+<a name="line592">592: </a>    }
+<a name="line593">593: </a>  }
+
+<a name="line595">595: </a>  <font color="#B22222">/* Restore vectors */</font>
+<a name="line596">596: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,Xglobal,&amp;X);
+<a name="line597">597: </a>  <font color="#4169E1">return</font>(0);
+<a name="line598">598: </a>}
+
+<a name="line602">602: </a><font color="#B22222">/*</font>
+<a name="line603">603: </a><font color="#B22222">   RhsFunc - Evaluates nonlinear function F(u).</font>
+
+<a name="line605">605: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line606">606: </a><font color="#B22222">.  ts - the <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> context</font>
+<a name="line607">607: </a><font color="#B22222">.  t - current time</font>
+<a name="line608">608: </a><font color="#B22222">.  Xglobal - input vector</font>
+<a name="line609">609: </a><font color="#B22222">.  F - output vector</font>
+<a name="line610">610: </a><font color="#B22222">.  ptr - optional user-defined context, as set by <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>()</font>
+
+<a name="line612">612: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line613">613: </a><font color="#B22222">.  F - rhs function vector</font>
+<a name="line614">614: </a><font color="#B22222"> */</font>
+<a name="line615">615: </a><strong><font color="#4169E1"><a name="RhsFunc"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> RhsFunc(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> t,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xglobal,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ctx)</font></strong>
+<a name="line616">616: </a>{
+<a name="line617">617: </a>  AppCtx         *user = (AppCtx*)ctx;       <font color="#B22222">/* user-defined application context */</font>
+<a name="line618">618: </a>  DM             da = user-&gt;da;
+<a name="line620">620: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,Mx,My,xs,ys,xm,ym;
+<a name="line621">621: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      dhx,dhy;
+<a name="line622">622: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            localT;
+<a name="line623">623: </a>  Field          **X,**Frhs;                      //structures that contain variables of interest and left hand side of governing equations respectively
+<a name="line624">624: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    csoil     = user-&gt;csoil;     //heat constant <font color="#4169E1">for</font> layer
+<a name="line625">625: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    dzlay     = user-&gt;dzlay;     //thickness of top soil layer
+<a name="line626">626: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    emma      = user-&gt;emma;      //emission parameter
+<a name="line627">627: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    wind      = user-&gt;wind;      //wind speed
+<a name="line628">628: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    dewtemp   = user-&gt;dewtemp;   //dew point temperature (moisture in air)
+<a name="line629">629: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    pressure1 = user-&gt;pressure1; //sea level pressure
+<a name="line630">630: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    airtemp   = user-&gt;airtemp;   //temperature of air near boundary layer inversion
+<a name="line631">631: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    fract     = user-&gt;fract;     //fraction of the sky covered by clouds
+<a name="line632">632: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Tc           = user-&gt;Tc;              //temperature at base of lowest cloud layer
+<a name="line633">633: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    lat           = user-&gt;lat;              //latitude
+<a name="line634">634: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Cp           = 1005.7;              //specific heat of air at constant pressure
+<a name="line635">635: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Rd           = 287.058;              //gas constant <font color="#4169E1">for</font> dry air
+<a name="line636">636: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    diffconst = 1000;              //diffusion coefficient
+<a name="line637">637: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    f           = 2*0.0000727*sin(lat);      //coriolis force
+<a name="line638">638: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    deep_grnd_temp = user-&gt;deep_grnd_temp; //temp in lowest ground layer
+<a name="line639">639: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Ts,u,v,p,P;
+<a name="line640">640: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    u_abs,u_plus,u_minus,v_abs,v_plus,v_minus;
+
+<a name="line642">642: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>         sfctemp1,fsfc1,Ra;
+<a name="line643">643: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>         sheat;           //sensible heat flux
+<a name="line644">644: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>         latentheat;      //latent heat flux
+<a name="line645">645: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>         groundflux;      //flux from conduction of deep ground layer in contact with top soil
+<a name="line646">646: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       xend,yend;
+
+<a name="line649">649: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(da,&amp;localT);
+<a name="line650">650: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(da,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,&amp;Mx,&amp;My,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,
+<a name="line651">651: </a>                     <A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_IGNORE.html#PETSC_IGNORE">PETSC_IGNORE</A>);
+
+<a name="line653">653: </a>  dhx = (<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(Mx-1)/(5000*(Mx-1));  // dhx = 1/dx; assume 2D space domain: [0.0, 1.e5] x [0.0, 1.e5]
+<a name="line654">654: </a>  dhy = (<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(My-1)/(5000*(Mx-1));  // dhy = 1/dy;
+
+
+<a name="line657">657: </a>  <font color="#B22222">/*</font>
+<a name="line658">658: </a><font color="#B22222">     Scatter ghost points to local vector,using the 2-step process</font>
+<a name="line659">659: </a><font color="#B22222">        DAGlobalToLocalBegin(),DAGlobalToLocalEnd().</font>
+<a name="line660">660: </a><font color="#B22222">     By placing code between these two statements, computations can be</font>
+<a name="line661">661: </a><font color="#B22222">     done while messages are in transition.</font>
+<a name="line662">662: </a><font color="#B22222">  */</font>
+<a name="line663">663: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(da,Xglobal,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localT);
+<a name="line664">664: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(da,Xglobal,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,localT);
+
+<a name="line666">666: </a>  <font color="#B22222">/* Get pointers to vector data */</font>
+<a name="line667">667: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,localT,&amp;X);
+<a name="line668">668: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArray.html#DMDAVecGetArray">DMDAVecGetArray</A>(da,F,&amp;Frhs);
+
+<a name="line670">670: </a>  <font color="#B22222">/* Get local grid boundaries */</font>
+<a name="line671">671: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;xm,&amp;ym,<A href="../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line673">673: </a>  <font color="#B22222">/* Compute function over the locally owned part of the grid */</font>
+<a name="line674">674: </a>  <font color="#B22222">/* the interior points */</font>
+<a name="line675">675: </a>  xend=xs+xm; yend=ys+ym;
+<a name="line676">676: </a>  <font color="#4169E1">for</font> (j=ys; j&lt;yend; j++) {
+<a name="line677">677: </a>    <font color="#4169E1">for</font> (i=xs; i&lt;xend; i++) {
+<a name="line678">678: </a>      Ts = X[j][i].Ts; u = X[j][i].u; v = X[j][i].v; p = X[j][i].p; //P = X[j][i].P;
+
+<a name="line680">680: </a>      sfctemp1 = (double)Ts;
+<a name="line681">681: </a>      sfctemp1 = (double)X[j][i].Ts;
+<a name="line682">682: </a>      calcfluxs(sfctemp1,airtemp,emma,fract,Tc,&amp;fsfc1);       //calculates surface net radiative flux
+<a name="line683">683: </a>      sensibleflux(sfctemp1,airtemp,wind,&amp;sheat);             //calculate sensible heat flux
+<a name="line684">684: </a>      latentflux(sfctemp1,dewtemp,wind,pressure1,&amp;latentheat);//calculates latent heat flux
+<a name="line685">685: </a>      calc_gflux(sfctemp1,deep_grnd_temp,&amp;groundflux);        //calculates flux from earth below surface soil layer by conduction
+<a name="line686">686: </a>      calcfluxa(sfctemp1,airtemp,emma,&amp;Ra);                                         //Calculates the change in downward radiative flux
+<a name="line687">687: </a>      fsfc1 = fsfc1 + latentheat + sheat + groundflux;                                         //adds radiative, sensible heat, latent heat, and ground heat flux yielding net flux
+
+<a name="line689">689: </a>      <font color="#B22222">/* convective coefficients for upwinding */</font>
+<a name="line690">690: </a>      u_abs = PetscAbsScalar(u);
+<a name="line691">691: </a>      u_plus  = .5*(u + u_abs); // u <font color="#4169E1">if</font> u&gt;0; 0 <font color="#4169E1">if</font> u&lt;0
+<a name="line692">692: </a>      u_minus = .5*(u - u_abs); // u <font color="#4169E1">if</font> u &lt;0; 0 <font color="#4169E1">if</font> u&gt;0
+
+<a name="line694">694: </a>      v_abs = PetscAbsScalar(v);
+<a name="line695">695: </a>      v_plus  = .5*(v + v_abs); // v <font color="#4169E1">if</font> v&gt;0; 0 <font color="#4169E1">if</font> v&lt;0
+<a name="line696">696: </a>      v_minus = .5*(v - v_abs); // v <font color="#4169E1">if</font> v &lt;0; 0 <font color="#4169E1">if</font> v&gt;0
+
+<a name="line698">698: </a>      <font color="#B22222">/* Solve governing equations */</font>
+<a name="line699">699: </a>      P = p*Rd*Ts;
+
+<a name="line701">701: </a>      <font color="#B22222">/* du/dt -&gt; time change of east-west component of the wind */</font>
+<a name="line702">702: </a>      Frhs[j][i].u = - u_plus*(u - X[j][i-1].u)*dhx - u_minus*(X[j][i+1].u - u)*dhx       // - u(du/dx)
+<a name="line703">703: </a>                        - v_plus*(u - X[j-1][i].u)*dhy - v_minus*(X[j+1][i].u - u)*dhy        // - v(du/dy)
+<a name="line704">704: </a>                              -(Rd/p)*(Ts*(X[j][i+1].p - X[j][i-1].p)*0.5*dhx  + p*0*(X[j][i+1].Ts - X[j][i-1].Ts)*0.5*dhx) // -(R/p)[Ts(dp/dx)+ p(dTs/dx)]
+<a name="line705">705: </a>//                        -(1/p)*(X[j][i+1].P - X[j][i-1].P)*dhx
+<a name="line706">706: </a>                        + f*v;
+
+<a name="line708">708: </a>      <font color="#B22222">/* dv/dt -&gt; time change of north-south component of the wind */</font>
+<a name="line709">709: </a>      Frhs[j][i].v = - u_plus*(v - X[j][i-1].v)*dhx - u_minus*(X[j][i+1].v - v)*dhx       // - u(dv/dx)
+<a name="line710">710: </a>                        - v_plus*(v - X[j-1][i].v)*dhy - v_minus*(X[j+1][i].v - v)*dhy        // - v(dv/dy)
+<a name="line711">711: </a>                              -(Rd/p)*(Ts*(X[j+1][i].p - X[j-1][i].p)*0.5*dhy + p*0*(X[j+1][i].Ts - X[j-1][i].Ts)*0.5*dhy) // -(R/p)[Ts(dp/dy)+ p(dTs/dy)]
+<a name="line712">712: </a>//                        -(1/p)*(X[j+1][i].P - X[j-1][i].P)*dhy
+<a name="line713">713: </a>                        -f*u;
+
+<a name="line715">715: </a>      <font color="#B22222">/* dT/dt -&gt; time change of temperature */</font>
+<a name="line716">716: </a>      Frhs[j][i].Ts = (fsfc1/(csoil*dzlay))                                            // Fnet/(Cp*dz)  diabatic change in T
+<a name="line717">717: </a>                      -u_plus*(Ts - X[j][i-1].Ts)*dhx - u_minus*(X[j][i+1].Ts - Ts)*dhx  // - u*(dTs/dx)  advection x
+<a name="line718">718: </a>                      -v_plus*(Ts - X[j-1][i].Ts)*dhy - v_minus*(X[j+1][i].Ts - Ts)*dhy  // - v*(dTs/dy)  advection y
+<a name="line719">719: </a>                      + diffconst*((X[j][i+1].Ts - 2*Ts + X[j][i-1].Ts)*dhx*dhx               // + D(Ts_xx + Ts_yy)  diffusion
+<a name="line720">720: </a>                                   + (X[j+1][i].Ts - 2*Ts + X[j-1][i].Ts)*dhy*dhy);
+
+<a name="line722">722: </a>      <font color="#B22222">/* dp/dt -&gt; time change of */</font>
+<a name="line723">723: </a>      Frhs[j][i].p = -u_plus*(p - X[j][i-1].p)*dhx - u_minus*(X[j][i+1].p - p)*dhx     // - u*(dp/dx)
+<a name="line724">724: </a>                     -v_plus*(p - X[j-1][i].p)*dhy - v_minus*(X[j+1][i].p - p)*dhy;     // - v*(dp/dy)
+
+<a name="line726">726: </a>      Frhs[j][i].Ta = Ra/Cp;        //dTa/dt time change of air temperature
+<a name="line727">727: </a>    }
+<a name="line728">728: </a>  }
+
+<a name="line730">730: </a>  <font color="#B22222">/* Restore vectors */</font>
+<a name="line731">731: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,localT,&amp;X);
+<a name="line732">732: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArray.html#DMDAVecRestoreArray">DMDAVecRestoreArray</A>(da,F,&amp;Frhs);
+<a name="line733">733: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(da,&amp;localT);
+<a name="line734">734: </a>  <font color="#4169E1">return</font>(0);
+<a name="line735">735: </a>}
+
+<a name="line739">739: </a><strong><font color="#4169E1"><a name="Monitor"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Monitor(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> step,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> time,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> T,void *ctx)</font></strong>
+<a name="line740">740: </a>{
+<a name="line742">742: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *array;
+<a name="line743">743: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       itime=(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)(time);
+<a name="line744">744: </a>  const <A href="../../../../docs/manualpages/TS/TSType.html#TSType">TSType</A>   type;
+<a name="line745">745: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      sundials;
+<a name="line746">746: </a>  MonitorCtx     *user = (MonitorCtx*)ctx;
+<a name="line747">747: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    viewer = user-&gt;drawviewer;
+<a name="line748">748: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank;
+<a name="line749">749: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      norm;
+
+<a name="line752">752: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,&amp;rank);
+
+<a name="line754">754: </a>  <A href="../../../../docs/manualpages/TS/TSGetType.html#TSGetType">TSGetType</A>(ts,&amp;type);
+<a name="line755">755: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<A href="../../../../docs/manualpages/TS/TSSUNDIALS.html#TSSUNDIALS">TSSUNDIALS</A>,&amp;sundials);
+<a name="line756">756: </a>  <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(T,<A href="../../../../docs/manualpages/Vec/NORM_INFINITY.html#NORM_INFINITY">NORM_INFINITY</A>,&amp;norm);
+<a name="line757">757: </a>  <font color="#4169E1">if</font> (sundials || itime%60 == 0){
+<a name="line758">758: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(T,&amp;array);
+<a name="line759">759: </a>    <font color="#4169E1">if</font> (!rank){printf(<font color="#666666">"step %4d, time %8.1f,  %6.4f, %6.4f, %6.4f, %6.4f, %6.4f, %6.4f\n"</font>,step,time,(((array[0]-273)*9)/5 + 32),(((array[1]-273)*9)/5 + 32),array[2],array[3],array[4],array[5]);}
+<a name="line760">760: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(T,&amp;array);
+
+<a name="line762">762: </a>    <font color="#4169E1">if</font> (user-&gt;drawcontours){
+<a name="line763">763: </a>      <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(T,viewer);
+<a name="line764">764: </a>    }
+<a name="line765">765: </a>  }
+<a name="line766">766: </a>  <font color="#4169E1">return</font>(0);
+<a name="line767">767: </a>}
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,1530 @@
+<center><a href="gamg.c">Actual source code: gamg.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/pc/impls/gamg/gamg.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2012-10-26T16:16:44+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.3-p4 2012-10-26</b></div>
+<pre width="80"><a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222"> GAMG geometric-algebric multigrid <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> - Mark Adams 2011</font>
+<a name="line3">  3: </a><font color="#B22222"> */</font>
+<a name="line4">  4: </a><font color="#A020F0">#include </font><font color="#666666">"petsc-private/matimpl.h"</font><font color="#A020F0"></font>
+<a name="line5">  5: </a><font color="#A020F0">#include &lt;../src/ksp/pc/impls/gamg/gamg.h&gt;           </font><font color="#B22222">/*I "petscpc.h" I*/</font><font color="#A020F0"></font>
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;petsc-private/kspimpl.h&gt;</font>
+
+<a name="line8">  8: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG </font>
+<a name="line9">  9: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> petsc_gamg_setup_events[NUM_SET];
+<a name="line10"> 10: </a><font color="#A020F0">#endif</font>
+
+<a name="line12"> 12: </a><font color="#A020F0">#if defined PETSC_USE_LOG</font>
+<a name="line13"> 13: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGGgraph_AGG;
+<a name="line14"> 14: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGGgraph_GEO;
+<a name="line15"> 15: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGCoarsen_AGG;
+<a name="line16"> 16: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGCoarsen_GEO;
+<a name="line17"> 17: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGProlongator_AGG;
+<a name="line18"> 18: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGProlongator_GEO;
+<a name="line19"> 19: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGOptprol_AGG;
+<a name="line20"> 20: </a><A href="../../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> PC_GAMGKKTProl_AGG;
+<a name="line21"> 21: </a><font color="#A020F0">#endif</font>
+
+<a name="line23"> 23: </a><strong><font color="#228B22">#define GAMG_MAXLEVELS 30</font></strong>
+
+<a name="line25"> 25: </a><font color="#B22222">/* #define GAMG_STAGES */</font>
+<a name="line26"> 26: </a><font color="#A020F0">#if (defined PETSC_GAMG_USE_LOG &amp;&amp; defined GAMG_STAGES)</font>
+<a name="line27"> 27: </a>static <A href="../../../../../docs/manualpages/Profiling/PetscLogStage.html#PetscLogStage">PetscLogStage</A> gamg_stages[GAMG_MAXLEVELS];
+<a name="line28"> 28: </a><font color="#A020F0">#endif</font>
+
+<a name="line30"> 30: </a>static <A href="../../../../../docs/manualpages/Sys/PetscFList.html#PetscFList">PetscFList</A> GAMGList = 0;
+
+<a name="line32"> 32: </a><font color="#B22222">/* ----------------------------------------------------------------------------- */</font>
+<a name="line35"> 35: </a><strong><font color="#4169E1"><a name="PCReset_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCReset_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc)</font></strong>
+<a name="line36"> 36: </a>{
+<a name="line37"> 37: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line38"> 38: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line39"> 39: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+
+<a name="line42"> 42: </a>  <font color="#4169E1">if</font>( pc_gamg-&gt;data ) { <font color="#B22222">/* this should not happen, cleaned up in SetUp */</font>
+<a name="line43"> 43: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( pc_gamg-&gt;data );
+<a name="line44"> 44: </a>  }
+<a name="line45"> 45: </a>  pc_gamg-&gt;data = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>; pc_gamg-&gt;data_sz = 0;
+<a name="line46"> 46: </a>  <font color="#4169E1">return</font>(0);
+<a name="line47"> 47: </a>}
+
+<a name="line49"> 49: </a><font color="#B22222">/* private 2x2 <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Nest for Stokes */</font>
+<a name="line50"> 50: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font>{
+<a name="line51"> 51: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A11,A21,A12,Amat;
+<a name="line52"> 52: </a>  <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>  prim_is,constr_is;
+<a name="line53"> 53: </a>}GAMGKKTMat;
+
+<a name="line57"> 57: </a><strong><font color="#4169E1"><a name="GAMGKKTMatCreate"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> GAMGKKTMatCreate( <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> iskkt, GAMGKKTMat *out )</font></strong>
+<a name="line58"> 58: </a>{
+<a name="line60"> 60: </a>  out-&gt;Amat = A;
+<a name="line61"> 61: </a>  <font color="#4169E1">if</font>( iskkt ){
+<a name="line62"> 62: </a>    <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line63"> 63: </a>    <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>       is_constraint, is_prime;
+<a name="line64"> 64: </a>    <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nmin,nmax;
+
+<a name="line66"> 66: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>( A, &amp;nmin, &amp;nmax );
+<a name="line67"> 67: </a>    <A href="../../../../../docs/manualpages/Mat/MatFindZeroDiagonals.html#MatFindZeroDiagonals">MatFindZeroDiagonals</A>( A, &amp;is_constraint );
+<a name="line68"> 68: </a>    <A href="../../../../../docs/manualpages/IS/ISComplement.html#ISComplement">ISComplement</A>( is_constraint, nmin, nmax, &amp;is_prime );
+<a name="line69"> 69: </a>    out-&gt;prim_is = is_prime;
+<a name="line70"> 70: </a>    out-&gt;constr_is = is_constraint;
+<a name="line71"> 71: </a>
+<a name="line72"> 72: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A>( A, is_prime, is_prime,      MAT_INITIAL_MATRIX, &amp;out-&gt;A11);
+<a name="line73"> 73: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A>( A, is_prime, is_constraint, MAT_INITIAL_MATRIX, &amp;out-&gt;A12);
+<a name="line74"> 74: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A>( A, is_constraint, is_prime, MAT_INITIAL_MATRIX, &amp;out-&gt;A21);
+<a name="line75"> 75: </a><strong><font color="#4169E1"><a name="etscPrintf"></a><A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)</font></strong>-&gt;comm,<font color="#666666">"[%d]%s N=%d N_11=%d\n"</font>,0,__FUNCT__,A-&gt;rmap-&gt;N,out-&gt;A11-&gt;rmap-&gt;N);
+<a name="line76"> 76: </a>  }
+<a name="line77"> 77: </a>  <font color="#4169E1">else</font> {
+<a name="line78"> 78: </a>    out-&gt;A11 = A;
+<a name="line79"> 79: </a>    out-&gt;A21 = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line80"> 80: </a>    out-&gt;A12 = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line81"> 81: </a>    out-&gt;prim_is = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line82"> 82: </a>    out-&gt;constr_is = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line83"> 83: </a>  }
+<a name="line84"> 84: </a>  <font color="#4169E1">return</font>(0);
+<a name="line85"> 85: </a>}
+
+<a name="line89"> 89: </a><strong><font color="#4169E1"><a name="GAMGKKTMatDestroy"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> GAMGKKTMatDestroy( GAMGKKTMat *mat )</font></strong>
+<a name="line90"> 90: </a>{
+<a name="line91"> 91: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+
+<a name="line94"> 94: </a>  <font color="#4169E1">if</font>( mat-&gt;A11 &amp;&amp; mat-&gt;A11 != mat-&gt;Amat ) {
+<a name="line95"> 95: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;mat-&gt;A11 );
+<a name="line96"> 96: </a>  }
+<a name="line97"> 97: </a>  <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;mat-&gt;A21 );
+<a name="line98"> 98: </a>  <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;mat-&gt;A12 );
+
+<a name="line100">100: </a>  <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;mat-&gt;prim_is );
+<a name="line101">101: </a>  <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;mat-&gt;constr_is );
+
+<a name="line103">103: </a>  <font color="#4169E1">return</font>(0);
+<a name="line104">104: </a>}
+
+<a name="line106">106: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line107">107: </a><font color="#B22222">/*</font>
+<a name="line108">108: </a><font color="#B22222">   createLevel: create coarse op with RAP.  repartition and/or reduce number </font>
+<a name="line109">109: </a><font color="#B22222">     of active processors.</font>
+
+<a name="line111">111: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line112">112: </a><font color="#B22222">   . pc - parameters + side effect: coarse data in 'pc_gamg-&gt;data' and </font>
+<a name="line113">113: </a><font color="#B22222">          'pc_gamg-&gt;data_sz' are changed via repartitioning/reduction.</font>
+<a name="line114">114: </a><font color="#B22222">   . Amat_fine - matrix on this fine (k) level</font>
+<a name="line115">115: </a><font color="#B22222">   . cr_bs - coarse block size</font>
+<a name="line116">116: </a><font color="#B22222">   . isLast - </font>
+<a name="line117">117: </a><font color="#B22222">   . stokes -</font>
+<a name="line118">118: </a><font color="#B22222">   In/Output Parameter:</font>
+<a name="line119">119: </a><font color="#B22222">   . a_P_inout - prolongation operator to the next level (k--&gt;k-1)</font>
+<a name="line120">120: </a><font color="#B22222">   . a_nactive_proc - number of active procs</font>
+<a name="line121">121: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line122">122: </a><font color="#B22222">   . a_Amat_crs - coarse matrix that is created (k-1)</font>
+<a name="line123">123: </a><font color="#B22222">*/</font>
+
+<a name="line127">127: </a><strong><font color="#4169E1"><a name="createLevel"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> createLevel( const <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc,</font></strong>
+<a name="line128">128: </a><strong><font color="#4169E1">                                   const <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Amat_fine,</font></strong>
+<a name="line129">129: </a><strong><font color="#4169E1">                                   const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> cr_bs,</font></strong>
+<a name="line130">130: </a><strong><font color="#4169E1">                                   const <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> isLast,</font></strong>
+<a name="line131">131: </a><strong><font color="#4169E1">                                   const <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> stokes,</font></strong>
+<a name="line132">132: </a><strong><font color="#4169E1">                                   <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *a_P_inout,</font></strong>
+<a name="line133">133: </a><strong><font color="#4169E1">                                   <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *a_Amat_crs,</font></strong>
+<a name="line134">134: </a><strong><font color="#4169E1">                                   <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> *a_nactive_proc</font></strong>
+<a name="line135">135: </a><strong><font color="#4169E1">                                   )</font></strong>
+<a name="line136">136: </a>{
+<a name="line137">137: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line138">138: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line139">139: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line140">140: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  repart = pc_gamg-&gt;repart;
+<a name="line141">141: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>   min_eq_proc = pc_gamg-&gt;min_eq_proc, coarse_max = pc_gamg-&gt;coarse_eq_limit;
+<a name="line142">142: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              Cmat,Pold=*a_P_inout;
+<a name="line143">143: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>         wcomm = ((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)Amat_fine)-&gt;comm;
+<a name="line144">144: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      mype,npe,new_npe,nactive=*a_nactive_proc;
+<a name="line145">145: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         ncrs_eq,ncrs_prim,f_bs;
+
+<a name="line148">148: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>( wcomm, &amp;mype );
+<a name="line149">149: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>( wcomm, &amp;npe );
+<a name="line150">150: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetBlockSize.html#MatGetBlockSize">MatGetBlockSize</A>( Amat_fine, &amp;f_bs );
+<a name="line151">151: </a>  <font color="#B22222">/* RAP */</font>
+<a name="line152">152: </a>  <A href="../../../../../docs/manualpages/Mat/MatPtAP.html#MatPtAP">MatPtAP</A>( Amat_fine, Pold, MAT_INITIAL_MATRIX, 2.0, &amp;Cmat );
+
+<a name="line154">154: </a>  <font color="#B22222">/* set 'ncrs_prim' (nodes), 'ncrs_eq' (equations)*/</font>
+<a name="line155">155: </a>  ncrs_prim = pc_gamg-&gt;data_sz/pc_gamg-&gt;data_cell_cols/pc_gamg-&gt;data_cell_rows;
+<a name="line156">156: </a>  assert(pc_gamg-&gt;data_sz%(pc_gamg-&gt;data_cell_cols*pc_gamg-&gt;data_cell_rows)==0);
+<a name="line157">157: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>( Cmat, &amp;ncrs_eq, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line158">158: </a>
+<a name="line159">159: </a>  <font color="#B22222">/* get number of PEs to make active 'new_npe', reduce, can be any integer 1-P */</font>
+<a name="line160">160: </a>  {
+<a name="line161">161: </a>    <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ncrs_eq_glob,ncrs_eq_ave;
+<a name="line162">162: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Cmat, &amp;ncrs_eq_glob, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line163">163: </a>    ncrs_eq_ave = ncrs_eq_glob/npe;
+<a name="line164">164: </a>    new_npe = (<A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>)((float)ncrs_eq_ave/(float)min_eq_proc + 0.5); <font color="#B22222">/* hardwire min. number of eq/proc */</font>
+<a name="line165">165: </a>    <font color="#4169E1">if</font>( new_npe == 0 || ncrs_eq_ave &lt; coarse_max ) new_npe = 1;
+<a name="line166">166: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> ( new_npe &gt;= nactive ) new_npe = nactive; <font color="#B22222">/* no change, rare */</font>
+<a name="line167">167: </a>    <font color="#4169E1">if</font>( isLast ) new_npe = 1;
+<a name="line168">168: </a>  }
+
+<a name="line170">170: </a>  <font color="#4169E1">if</font>( !repart &amp;&amp; new_npe==nactive ) {
+<a name="line171">171: </a>    *a_Amat_crs = Cmat; <font color="#B22222">/* output - no repartitioning or reduction - could bail here */</font>
+<a name="line172">172: </a>    }
+<a name="line173">173: </a>  <font color="#4169E1">else</font> {
+<a name="line174">174: </a>    const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *idx,ndata_rows=pc_gamg-&gt;data_cell_rows,ndata_cols=pc_gamg-&gt;data_cell_cols,node_data_sz=ndata_rows*ndata_cols;
+<a name="line175">175: </a>    <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *counts,*newproc_idx,ii,jj,kk,strideNew,*tidx,ncrs_prim_new,ncrs_eq_new,nloc_old;
+<a name="line176">176: </a>    <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>              is_eq_newproc,is_eq_newproc_prim,is_eq_num,is_eq_num_prim,isscat,new_eq_indices;
+<a name="line177">177: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>      vecscat;
+<a name="line178">178: </a>    <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *array;
+<a name="line179">179: </a>    <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>             src_crd, dest_crd;
+
+<a name="line181">181: </a>    nloc_old = ncrs_eq/cr_bs; assert(ncrs_eq%cr_bs==0);
+<a name="line182">182: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line183">183: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET12],0,0,0,0);
+<a name="line184">184: </a><font color="#A020F0">#endif</font>
+<a name="line185">185: </a>    <font color="#B22222">/* make 'is_eq_newproc' */</font>
+<a name="line186">186: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( npe*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;counts );
+<a name="line187">187: </a>    <font color="#4169E1">if</font>( repart &amp;&amp; !stokes ) {
+<a name="line188">188: </a>      <font color="#B22222">/* Repartition Cmat_{k} and move colums of P^{k}_{k-1} and coordinates of primal part accordingly */</font>
+<a name="line189">189: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>             adj;
+
+<a name="line191">191: </a>      <font color="#4169E1">if</font> (pc_gamg-&gt;verbose&gt;0) {
+<a name="line192">192: </a>        <font color="#4169E1">if</font> (pc_gamg-&gt;verbose==1) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s repartition: npe (active): %d --&gt; %d, neq = %d\n"</font>,mype,__FUNCT__,*a_nactive_proc,new_npe,ncrs_eq);
+<a name="line193">193: </a>        <font color="#4169E1">else</font> {
+<a name="line194">194: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n;
+<a name="line195">195: </a>          <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>( &amp;ncrs_eq, &amp;n, 1, MPIU_INT, MPI_SUM, wcomm );
+<a name="line196">196: </a>          <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s repartition: npe (active): %d --&gt; %d, neq = %d\n"</font>,mype,__FUNCT__,*a_nactive_proc,new_npe,n);
+<a name="line197">197: </a>        }
+<a name="line198">198: </a>      }
+
+<a name="line200">200: </a>      <font color="#B22222">/* get 'adj' */</font>
+<a name="line201">201: </a>      <font color="#4169E1">if</font>( cr_bs == 1 ) {
+<a name="line202">202: </a>        <A href="../../../../../docs/manualpages/Mat/MatConvert.html#MatConvert">MatConvert</A>( Cmat, <A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>, MAT_INITIAL_MATRIX, &amp;adj );
+<a name="line203">203: </a>      }
+<a name="line204">204: </a>      <font color="#4169E1">else</font>{
+<a name="line205">205: </a>        <font color="#B22222">/* make a scalar matrix to partition (no Stokes here) */</font>
+<a name="line206">206: </a>        <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> tMat;
+<a name="line207">207: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> Istart_crs,Iend_crs,ncols,jj,Ii;
+<a name="line208">208: </a>        const <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *vals;
+<a name="line209">209: </a>        const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *idx;
+<a name="line210">210: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *d_nnz, *o_nnz, M, N;
+<a name="line211">211: </a>        static <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> llev = 0;
+<a name="line212">212: </a>
+<a name="line213">213: </a>        <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( ncrs_prim*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;d_nnz );
+<a name="line214">214: </a>        <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( ncrs_prim*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;o_nnz );
+<a name="line215">215: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>( Cmat, &amp;Istart_crs, &amp;Iend_crs );
+<a name="line216">216: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Cmat, &amp;M, &amp;N );
+<a name="line217">217: </a>        <font color="#4169E1">for</font> ( Ii = Istart_crs, jj = 0 ; Ii &lt; Iend_crs ; Ii += cr_bs, jj++ ) {
+<a name="line218">218: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(Cmat,Ii,&amp;ncols,0,0);
+<a name="line219">219: </a>          d_nnz[jj] = ncols/cr_bs;
+<a name="line220">220: </a>          o_nnz[jj] = ncols/cr_bs;
+<a name="line221">221: </a>          <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(Cmat,Ii,&amp;ncols,0,0);
+<a name="line222">222: </a>          <font color="#4169E1">if</font>( d_nnz[jj] &gt; ncrs_prim ) d_nnz[jj] = ncrs_prim;
+<a name="line223">223: </a>          <font color="#4169E1">if</font>( o_nnz[jj] &gt; (M/cr_bs-ncrs_prim) ) o_nnz[jj] = M/cr_bs-ncrs_prim;
+<a name="line224">224: </a>        }
+
+<a name="line226">226: </a>        <A href="../../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>( wcomm, &amp;tMat );
+<a name="line227">227: </a>        <A href="../../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>( tMat, ncrs_prim, ncrs_prim,
+<a name="line228">228: </a>                            <A href="../../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A> );
+<a name="line229">229: </a>
+<a name="line230">230: </a>        <A href="../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(tMat,<A href="../../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>);
+<a name="line231">231: </a>        <A href="../../../../../docs/manualpages/Mat/MatSeqAIJSetPreallocation.html#MatSeqAIJSetPreallocation">MatSeqAIJSetPreallocation</A>(tMat,0,d_nnz);
+<a name="line232">232: </a>        <A href="../../../../../docs/manualpages/Mat/MatMPIAIJSetPreallocation.html#MatMPIAIJSetPreallocation">MatMPIAIJSetPreallocation</A>(tMat,0,d_nnz,0,o_nnz);
+<a name="line233">233: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( d_nnz );
+<a name="line234">234: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( o_nnz );
+
+<a name="line236">236: </a>        <font color="#4169E1">for</font> ( ii = Istart_crs; ii &lt; Iend_crs; ii++ ) {
+<a name="line237">237: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> dest_row = ii/cr_bs;
+<a name="line238">238: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetRow.html#MatGetRow">MatGetRow</A>(Cmat,ii,&amp;ncols,&amp;idx,&amp;vals);
+<a name="line239">239: </a>          <font color="#4169E1">for</font>( jj = 0 ; jj &lt; ncols ; jj++ ){
+<a name="line240">240: </a>            <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> dest_col = idx[jj]/cr_bs;
+<a name="line241">241: </a>            <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> v = 1.0;
+<a name="line242">242: </a>            <A href="../../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(tMat,1,&amp;dest_row,1,&amp;dest_col,&amp;v,<A href="../../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line243">243: </a>          }
+<a name="line244">244: </a>          <A href="../../../../../docs/manualpages/Mat/MatRestoreRow.html#MatRestoreRow">MatRestoreRow</A>(Cmat,ii,&amp;ncols,&amp;idx,&amp;vals);
+<a name="line245">245: </a>        }
+<a name="line246">246: </a>        <A href="../../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(tMat,MAT_FINAL_ASSEMBLY);
+<a name="line247">247: </a>        <A href="../../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(tMat,MAT_FINAL_ASSEMBLY);
+<a name="line248">248: </a>
+<a name="line249">249: </a>        <font color="#4169E1">if</font>( llev++ == -1 ) {
+<a name="line250">250: </a>          <A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer; char fname[32];
+<a name="line251">251: </a>          <A href="../../../../../docs/manualpages/Sys/PetscSNPrintf.html#PetscSNPrintf">PetscSNPrintf</A>(fname,<font color="#4169E1">sizeof</font> fname,<font color="#666666">"part_mat_%D.mat"</font>,llev);
+<a name="line252">252: </a>          <A href="../../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(wcomm,fname,FILE_MODE_WRITE,&amp;viewer);
+<a name="line253">253: </a>          <A href="../../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>( tMat, viewer );
+<a name="line254">254: </a>          <A href="../../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>( &amp;viewer );
+<a name="line255">255: </a>        }
+
+<a name="line257">257: </a>        <A href="../../../../../docs/manualpages/Mat/MatConvert.html#MatConvert">MatConvert</A>( tMat, <A href="../../../../../docs/manualpages/Mat/MATMPIADJ.html#MATMPIADJ">MATMPIADJ</A>, MAT_INITIAL_MATRIX, &amp;adj );
+
+<a name="line259">259: </a>        <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;tMat );
+<a name="line260">260: </a>      } <font color="#B22222">/* create 'adj' */</font>
+
+<a name="line262">262: </a>      { <font color="#B22222">/* partition: get newproc_idx */</font>
+<a name="line263">263: </a>        char prefix[256];
+<a name="line264">264: </a>        const char *pcpre;
+<a name="line265">265: </a>        const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *is_idx;
+<a name="line266">266: </a>        <A href="../../../../../docs/manualpages/Mat/MatPartitioning.html#MatPartitioning">MatPartitioning</A>  mpart;
+<a name="line267">267: </a>        <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> proc_is;
+<a name="line268">268: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> targetPE;
+<a name="line269">269: </a>
+<a name="line270">270: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningCreate.html#MatPartitioningCreate">MatPartitioningCreate</A>( wcomm, &amp;mpart );
+<a name="line271">271: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningSetAdjacency.html#MatPartitioningSetAdjacency">MatPartitioningSetAdjacency</A>( mpart, adj );
+<a name="line272">272: </a>        <A href="../../../../../docs/manualpages/PC/PCGetOptionsPrefix.html#PCGetOptionsPrefix">PCGetOptionsPrefix</A>( pc, &amp;pcpre );
+<a name="line273">273: </a>        <A href="../../../../../docs/manualpages/Sys/PetscSNPrintf.html#PetscSNPrintf">PetscSNPrintf</A>(prefix,<font color="#4169E1">sizeof</font> prefix,<font color="#666666">"%spc_gamg_"</font>,pcpre?pcpre:<font color="#666666">""</font>);
+<a name="line274">274: </a>        PetscObjectSetOptionsPrefix((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mpart,prefix);
+<a name="line275">275: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningSetFromOptions.html#MatPartitioningSetFromOptions">MatPartitioningSetFromOptions</A>( mpart );
+<a name="line276">276: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningSetNParts.html#MatPartitioningSetNParts">MatPartitioningSetNParts</A>( mpart, new_npe );
+<a name="line277">277: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningApply.html#MatPartitioningApply">MatPartitioningApply</A>( mpart, &amp;proc_is );
+<a name="line278">278: </a>        <A href="../../../../../docs/manualpages/MatOrderings/MatPartitioningDestroy.html#MatPartitioningDestroy">MatPartitioningDestroy</A>( &amp;mpart );
+<a name="line279">279: </a>
+<a name="line280">280: </a>        <font color="#B22222">/* collect <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> info */</font>
+<a name="line281">281: </a>        <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( ncrs_eq*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;newproc_idx );
+<a name="line282">282: </a>        <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>( proc_is, &amp;is_idx );
+<a name="line283">283: </a>        targetPE = 1; <font color="#B22222">/* bring to "front" of machine */</font>
+<a name="line284">284: </a>        <font color="#B22222">/*targetPE = npe/new_npe;*/</font> <font color="#B22222">/* spread partitioning across machine */</font>
+<a name="line285">285: </a>        <font color="#4169E1">for</font>( kk = jj = 0 ; kk &lt; nloc_old ; kk++ ){
+<a name="line286">286: </a>          <font color="#4169E1">for</font>( ii = 0 ; ii &lt; cr_bs ; ii++, jj++ ){
+<a name="line287">287: </a>            newproc_idx[jj] = is_idx[kk] * targetPE; <font color="#B22222">/* distribution */</font>
+<a name="line288">288: </a>          }
+<a name="line289">289: </a>        }
+<a name="line290">290: </a>        <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>( proc_is, &amp;is_idx );
+<a name="line291">291: </a>        <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;proc_is );
+<a name="line292">292: </a>      }
+<a name="line293">293: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;adj );
+
+<a name="line295">295: </a>      <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>( wcomm, ncrs_eq, newproc_idx, PETSC_COPY_VALUES, &amp;is_eq_newproc );
+<a name="line296">296: </a>
+<a name="line297">297: </a>      <font color="#4169E1">if</font>( newproc_idx != 0 ) {
+<a name="line298">298: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( newproc_idx );
+<a name="line299">299: </a>      }
+<a name="line300">300: </a>    } <font color="#B22222">/* repartitioning */</font>
+<a name="line301">301: </a>    <font color="#4169E1">else</font> { <font color="#B22222">/* simple aggreagtion of parts -- 'is_eq_newproc' */</font>
+
+<a name="line303">303: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> rfactor,targetPE;
+<a name="line304">304: </a>      <font color="#B22222">/* find factor */</font>
+<a name="line305">305: </a>      <font color="#4169E1">if</font>( new_npe == 1 ) rfactor = npe; <font color="#B22222">/* easy */</font>
+<a name="line306">306: </a>      <font color="#4169E1">else</font> {
+<a name="line307">307: </a>        <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> best_fact = 0.;
+<a name="line308">308: </a>        jj = -1;
+<a name="line309">309: </a>        <font color="#4169E1">for</font>( kk = 1 ; kk &lt;= npe ; kk++ ){
+<a name="line310">310: </a>          <font color="#4169E1">if</font>( npe%kk==0 ) { <font color="#B22222">/* a candidate */</font>
+<a name="line311">311: </a>            <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> nactpe = (<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)npe/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)kk, fact = nactpe/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)new_npe;
+<a name="line312">312: </a>            <font color="#4169E1">if</font>(fact &gt; 1.0) fact = 1./fact; <font color="#B22222">/* keep fact &lt; 1 */</font>
+<a name="line313">313: </a>            <font color="#4169E1">if</font>( fact &gt; best_fact ) {
+<a name="line314">314: </a>              best_fact = fact; jj = kk;
+<a name="line315">315: </a>            }
+<a name="line316">316: </a>          }
+<a name="line317">317: </a>        }
+<a name="line318">318: </a>        <font color="#4169E1">if</font>( jj != -1 ) rfactor = jj;
+<a name="line319">319: </a>        <font color="#4169E1">else</font> rfactor = 1; <font color="#B22222">/* does this happen .. a prime */</font>
+<a name="line320">320: </a>      }
+<a name="line321">321: </a>      new_npe = npe/rfactor;
+
+<a name="line323">323: </a>      <font color="#4169E1">if</font>( new_npe==nactive ) {
+<a name="line324">324: </a>        *a_Amat_crs = Cmat; <font color="#B22222">/* output - no repartitioning or reduction, bail out because nested here */</font>
+<a name="line325">325: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( counts );
+<a name="line326">326: </a>        <font color="#4169E1">if</font> (pc_gamg-&gt;verbose&gt;0){
+<a name="line327">327: </a>          <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s aggregate processors noop: new_npe=%d, neq(loc)=%d\n"</font>,mype,__FUNCT__,new_npe,ncrs_eq);
+<a name="line328">328: </a>        }
+<a name="line329">329: </a>        <font color="#4169E1">return</font>(0);
+<a name="line330">330: </a>      }
+
+<a name="line332">332: </a>      <font color="#4169E1">if</font> (pc_gamg-&gt;verbose) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s number of equations (loc) %d with simple aggregation\n"</font>,mype,__FUNCT__,ncrs_eq);
+<a name="line333">333: </a>      targetPE = mype/rfactor;
+<a name="line334">334: </a>      <A href="../../../../../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>( wcomm, ncrs_eq, targetPE, 0, &amp;is_eq_newproc );
+
+<a name="line336">336: </a>      <font color="#4169E1">if</font>( stokes ) {
+<a name="line337">337: </a>        <A href="../../../../../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>( wcomm, ncrs_prim*cr_bs, targetPE, 0, &amp;is_eq_newproc_prim );
+<a name="line338">338: </a>      }
+<a name="line339">339: </a>    } <font color="#B22222">/* end simple 'is_eq_newproc' */</font>
+
+<a name="line341">341: </a>    <font color="#B22222">/*</font>
+<a name="line342">342: </a><font color="#B22222">     Create an index set from the is_eq_newproc index set to indicate the mapping TO</font>
+<a name="line343">343: </a><font color="#B22222">     */</font>
+<a name="line344">344: </a>    <A href="../../../../../docs/manualpages/IS/ISPartitioningToNumbering.html#ISPartitioningToNumbering">ISPartitioningToNumbering</A>( is_eq_newproc, &amp;is_eq_num );
+<a name="line345">345: </a>    <font color="#4169E1">if</font>( stokes ) {
+<a name="line346">346: </a>      <A href="../../../../../docs/manualpages/IS/ISPartitioningToNumbering.html#ISPartitioningToNumbering">ISPartitioningToNumbering</A>( is_eq_newproc_prim, &amp;is_eq_num_prim );
+<a name="line347">347: </a>    }
+<a name="line348">348: </a>    <font color="#4169E1">else</font> is_eq_num_prim = is_eq_num;
+<a name="line349">349: </a>    <font color="#B22222">/*</font>
+<a name="line350">350: </a><font color="#B22222">      Determine how many equations/vertices are assigned to each processor</font>
+<a name="line351">351: </a><font color="#B22222">     */</font>
+<a name="line352">352: </a>    <A href="../../../../../docs/manualpages/IS/ISPartitioningCount.html#ISPartitioningCount">ISPartitioningCount</A>( is_eq_newproc, npe, counts );
+<a name="line353">353: </a>    ncrs_eq_new = counts[mype];
+<a name="line354">354: </a>    <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is_eq_newproc );
+<a name="line355">355: </a>    <font color="#4169E1">if</font>( stokes ) {
+<a name="line356">356: </a>      <A href="../../../../../docs/manualpages/IS/ISPartitioningCount.html#ISPartitioningCount">ISPartitioningCount</A>( is_eq_newproc_prim, npe, counts );
+<a name="line357">357: </a>      <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is_eq_newproc_prim );
+<a name="line358">358: </a>      ncrs_prim_new = counts[mype]/cr_bs; <font color="#B22222">/* nodes */</font>
+<a name="line359">359: </a>    }
+<a name="line360">360: </a>    <font color="#4169E1">else</font> ncrs_prim_new = ncrs_eq_new/cr_bs; <font color="#B22222">/* eqs */</font>
+
+<a name="line362">362: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( counts );
+<a name="line363">363: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line364">364: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET12],0,0,0,0);
+<a name="line365">365: </a><font color="#A020F0">#endif</font>
+
+<a name="line367">367: </a>    <font color="#B22222">/* move data (for primal equations only) */</font>
+<a name="line368">368: </a>    <font color="#B22222">/* Create a vector to contain the newly ordered element information */</font>
+<a name="line369">369: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreate.html#VecCreate">VecCreate</A>( wcomm, &amp;dest_crd );
+<a name="line370">370: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetSizes.html#VecSetSizes">VecSetSizes</A>( dest_crd, node_data_sz*ncrs_prim_new, <A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A> );
+<a name="line371">371: </a>    <A href="../../../../../docs/manualpages/Vec/VecSetFromOptions.html#VecSetFromOptions">VecSetFromOptions</A>( dest_crd );  <font color="#B22222">/* this is needed! */</font>
+<a name="line372">372: </a>    <font color="#B22222">/*</font>
+<a name="line373">373: </a><font color="#B22222">     There are 'ndata_rows*ndata_cols' data items per node, (one can think of the vectors of having </font>
+<a name="line374">374: </a><font color="#B22222">     a block size of ...).  Note, ISs are expanded into equation space by 'cr_bs'.</font>
+<a name="line375">375: </a><font color="#B22222">     */</font>
+<a name="line376">376: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( (ncrs_prim*node_data_sz)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;tidx );
+<a name="line377">377: </a>    <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>( is_eq_num_prim, &amp;idx );
+<a name="line378">378: </a>    <font color="#4169E1">for</font>(ii=0,jj=0; ii&lt;ncrs_prim ; ii++) {
+<a name="line379">379: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> id = idx[ii*cr_bs]/cr_bs; <font color="#B22222">/* get node back */</font>
+<a name="line380">380: </a>      <font color="#4169E1">for</font>( kk=0; kk&lt;node_data_sz ; kk++, jj++) tidx[jj] = id*node_data_sz + kk;
+<a name="line381">381: </a>    }
+<a name="line382">382: </a>    <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>( is_eq_num_prim, &amp;idx );
+<a name="line383">383: </a>    <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>( wcomm, node_data_sz*ncrs_prim, tidx, PETSC_COPY_VALUES, &amp;isscat );
+<a name="line384">384: </a>
+<a name="line385">385: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( tidx );
+<a name="line386">386: </a>    <font color="#B22222">/*</font>
+<a name="line387">387: </a><font color="#B22222">     Create a vector to contain the original vertex information for each element</font>
+<a name="line388">388: </a><font color="#B22222">     */</font>
+<a name="line389">389: </a>    <A href="../../../../../docs/manualpages/Vec/VecCreateSeq.html#VecCreateSeq">VecCreateSeq</A>( <A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, node_data_sz*ncrs_prim, &amp;src_crd );
+<a name="line390">390: </a>    <font color="#4169E1">for</font>( jj=0; jj&lt;ndata_cols ; jj++ ) {
+<a name="line391">391: </a>      const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> stride0=ncrs_prim*pc_gamg-&gt;data_cell_rows;
+<a name="line392">392: </a>      <font color="#4169E1">for</font>( ii=0 ; ii&lt;ncrs_prim ; ii++) {
+<a name="line393">393: </a>        <font color="#4169E1">for</font>( kk=0; kk&lt;ndata_rows ; kk++ ) {
+<a name="line394">394: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ix = ii*ndata_rows + kk + jj*stride0, jx = ii*node_data_sz + kk*ndata_cols + jj;
+<a name="line395">395: </a>          <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> tt = (<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)pc_gamg-&gt;data[ix];
+<a name="line396">396: </a>          <A href="../../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>( src_crd, 1, &amp;jx, &amp;tt, <A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A> );
+<a name="line397">397: </a>        }
+<a name="line398">398: </a>      }
+<a name="line399">399: </a>    }
+<a name="line400">400: </a>    <A href="../../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(src_crd);
+<a name="line401">401: </a>    <A href="../../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(src_crd);
+<a name="line402">402: </a>    <font color="#B22222">/*</font>
+<a name="line403">403: </a><font color="#B22222">      Scatter the element vertex information (still in the original vertex ordering)</font>
+<a name="line404">404: </a><font color="#B22222">      to the correct processor</font>
+<a name="line405">405: </a><font color="#B22222">    */</font>
+<a name="line406">406: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterCreate.html#VecScatterCreate">VecScatterCreate</A>( src_crd, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, dest_crd, isscat, &amp;vecscat);
+<a name="line407">407: </a>
+<a name="line408">408: </a>    <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;isscat );
+<a name="line409">409: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(vecscat,src_crd,dest_crd,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line410">410: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(vecscat,src_crd,dest_crd,<A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line411">411: </a>    <A href="../../../../../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>( &amp;vecscat );
+<a name="line412">412: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>( &amp;src_crd );
+<a name="line413">413: </a>    <font color="#B22222">/*</font>
+<a name="line414">414: </a><font color="#B22222">      Put the element vertex data into a new allocation of the gdata-&gt;ele</font>
+<a name="line415">415: </a><font color="#B22222">    */</font>
+<a name="line416">416: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( pc_gamg-&gt;data );
+<a name="line417">417: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( node_data_sz*ncrs_prim_new*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>), &amp;pc_gamg-&gt;data );
+<a name="line418">418: </a>    pc_gamg-&gt;data_sz = node_data_sz*ncrs_prim_new;
+<a name="line419">419: </a>    strideNew = ncrs_prim_new*ndata_rows;
+<a name="line420">420: </a>    <A href="../../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>( dest_crd, &amp;array );
+<a name="line421">421: </a>    <font color="#4169E1">for</font>( jj=0; jj&lt;ndata_cols ; jj++ ) {
+<a name="line422">422: </a>      <font color="#4169E1">for</font>( ii=0 ; ii&lt;ncrs_prim_new ; ii++) {
+<a name="line423">423: </a>        <font color="#4169E1">for</font>( kk=0; kk&lt;ndata_rows ; kk++ ) {
+<a name="line424">424: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ix = ii*ndata_rows + kk + jj*strideNew, jx = ii*node_data_sz + kk*ndata_cols + jj;
+<a name="line425">425: </a>          pc_gamg-&gt;data[ix] = PetscRealPart(array[jx]);
+<a name="line426">426: </a>        }
+<a name="line427">427: </a>      }
+<a name="line428">428: </a>    }
+<a name="line429">429: </a>    <A href="../../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>( dest_crd, &amp;array );
+<a name="line430">430: </a>    <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>( &amp;dest_crd );
+
+<a name="line432">432: </a>    <font color="#B22222">/* move A and P (columns) with new layout */</font>
+<a name="line433">433: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line434">434: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET13],0,0,0,0);
+<a name="line435">435: </a><font color="#A020F0">#endif</font>
+
+<a name="line437">437: </a>    <font color="#B22222">/*</font>
+<a name="line438">438: </a><font color="#B22222">      Invert for <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A></font>
+<a name="line439">439: </a><font color="#B22222">    */</font>
+<a name="line440">440: </a>    <A href="../../../../../docs/manualpages/IS/ISInvertPermutation.html#ISInvertPermutation">ISInvertPermutation</A>( is_eq_num, ncrs_eq_new, &amp;new_eq_indices );
+<a name="line441">441: </a>    <A href="../../../../../docs/manualpages/IS/ISSort.html#ISSort">ISSort</A>( new_eq_indices );  <font color="#B22222">/* is this needed? */</font>
+<a name="line442">442: </a>    <A href="../../../../../docs/manualpages/IS/ISSetBlockSize.html#ISSetBlockSize">ISSetBlockSize</A>( new_eq_indices, cr_bs );
+<a name="line443">443: </a>    <font color="#4169E1">if</font>(is_eq_num != is_eq_num_prim) {
+<a name="line444">444: </a>      <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is_eq_num_prim );  <font color="#B22222">/* could be same as 'is_eq_num' */</font>
+<a name="line445">445: </a>    }
+<a name="line446">446: </a>    <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is_eq_num );
+<a name="line447">447: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line448">448: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET13],0,0,0,0);
+<a name="line449">449: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET14],0,0,0,0);
+<a name="line450">450: </a><font color="#A020F0">#endif</font>
+<a name="line451">451: </a>    <font color="#B22222">/* 'a_Amat_crs' output */</font>
+<a name="line452">452: </a>    {
+<a name="line453">453: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat;
+<a name="line454">454: </a>      <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A>( Cmat, new_eq_indices, new_eq_indices, MAT_INITIAL_MATRIX, &amp;mat );
+<a name="line455">455: </a>
+<a name="line456">456: </a>      *a_Amat_crs = mat;
+
+<a name="line458">458: </a>      <font color="#4169E1">if</font>(!<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>){
+<a name="line459">459: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> cbs, rbs;
+<a name="line460">460: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetBlockSizes.html#MatGetBlockSizes">MatGetBlockSizes</A>( Cmat, &amp;rbs, &amp;cbs );
+<a name="line461">461: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(MPI_COMM_SELF,<font color="#666666">"[%d]%s Old <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> rbs=%d cbs=%d\n"</font>,mype,__FUNCT__,rbs,cbs);
+<a name="line462">462: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetBlockSizes.html#MatGetBlockSizes">MatGetBlockSizes</A>( mat, &amp;rbs, &amp;cbs );
+<a name="line463">463: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(MPI_COMM_SELF,<font color="#666666">"[%d]%s New <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> rbs=%d cbs=%d cr_bs=%d\n"</font>,mype,__FUNCT__,rbs,cbs,cr_bs);
+<a name="line464">464: </a>      }
+<a name="line465">465: </a>    }
+<a name="line466">466: </a>    <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Cmat );
+
+<a name="line468">468: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line469">469: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET14],0,0,0,0);
+<a name="line470">470: </a><font color="#A020F0">#endif</font>
+<a name="line471">471: </a>    <font color="#B22222">/* prolongator */</font>
+<a name="line472">472: </a>    {
+<a name="line473">473: </a>      <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> findices;
+<a name="line474">474: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> Istart,Iend;
+<a name="line475">475: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Pnew;
+<a name="line476">476: </a>      <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>( Pold, &amp;Istart, &amp;Iend );
+<a name="line477">477: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line478">478: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET15],0,0,0,0);
+<a name="line479">479: </a><font color="#A020F0">#endif</font>
+<a name="line480">480: </a>      <A href="../../../../../docs/manualpages/IS/ISCreateStride.html#ISCreateStride">ISCreateStride</A>(wcomm,Iend-Istart,Istart,1,&amp;findices);
+<a name="line481">481: </a>      <A href="../../../../../docs/manualpages/IS/ISSetBlockSize.html#ISSetBlockSize">ISSetBlockSize</A>(findices,f_bs);
+<a name="line482">482: </a>      <A href="../../../../../docs/manualpages/Mat/MatGetSubMatrix.html#MatGetSubMatrix">MatGetSubMatrix</A>( Pold, findices, new_eq_indices, MAT_INITIAL_MATRIX, &amp;Pnew );
+<a name="line483">483: </a>
+<a name="line484">484: </a>      <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;findices );
+
+<a name="line486">486: </a>      <font color="#4169E1">if</font>(!<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>){
+<a name="line487">487: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> cbs, rbs;
+<a name="line488">488: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetBlockSizes.html#MatGetBlockSizes">MatGetBlockSizes</A>( Pold, &amp;rbs, &amp;cbs );
+<a name="line489">489: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(MPI_COMM_SELF,<font color="#666666">"[%d]%s Pold rbs=%d cbs=%d\n"</font>,mype,__FUNCT__,rbs,cbs);
+<a name="line490">490: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetBlockSizes.html#MatGetBlockSizes">MatGetBlockSizes</A>( Pnew, &amp;rbs, &amp;cbs );
+<a name="line491">491: </a>        <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(MPI_COMM_SELF,<font color="#666666">"[%d]%s Pnew rbs=%d cbs=%d\n"</font>,mype,__FUNCT__,rbs,cbs);
+<a name="line492">492: </a>      }
+<a name="line493">493: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line494">494: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET15],0,0,0,0);
+<a name="line495">495: </a><font color="#A020F0">#endif</font>
+<a name="line496">496: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( a_P_inout );
+
+<a name="line498">498: </a>      <font color="#B22222">/* output - repartitioned */</font>
+<a name="line499">499: </a>      *a_P_inout = Pnew;
+<a name="line500">500: </a>    }
+<a name="line501">501: </a>    <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;new_eq_indices );
+
+<a name="line503">503: </a>    *a_nactive_proc = new_npe; <font color="#B22222">/* output */</font>
+<a name="line504">504: </a>  }
+
+<a name="line506">506: </a>  <font color="#B22222">/* outout matrix data */</font>
+<a name="line507">507: </a>  <font color="#4169E1">if</font>( !<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> ) {
+<a name="line508">508: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer; char fname[32]; static int llev=0; Cmat = *a_Amat_crs;
+<a name="line509">509: </a>    <font color="#4169E1">if</font>(llev==0) {
+<a name="line510">510: </a>      sprintf(fname,<font color="#666666">"Cmat_%d.m"</font>,llev++);
+<a name="line511">511: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIOpen.html#PetscViewerASCIIOpen">PetscViewerASCIIOpen</A>(wcomm,fname,&amp;viewer);
+<a name="line512">512: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerSetFormat.html#PetscViewerSetFormat">PetscViewerSetFormat</A>( viewer, PETSC_VIEWER_ASCII_MATLAB);
+<a name="line513">513: </a>      <A href="../../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>(Amat_fine, viewer );
+<a name="line514">514: </a>      <A href="../../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>( &amp;viewer );
+<a name="line515">515: </a>    }
+<a name="line516">516: </a>    sprintf(fname,<font color="#666666">"Cmat_%d.m"</font>,llev++);
+<a name="line517">517: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIOpen.html#PetscViewerASCIIOpen">PetscViewerASCIIOpen</A>(wcomm,fname,&amp;viewer);
+<a name="line518">518: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerSetFormat.html#PetscViewerSetFormat">PetscViewerSetFormat</A>( viewer, PETSC_VIEWER_ASCII_MATLAB);
+<a name="line519">519: </a>    <A href="../../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>(Cmat, viewer );
+<a name="line520">520: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>( &amp;viewer );
+<a name="line521">521: </a>  }
+
+<a name="line523">523: </a>  <font color="#4169E1">return</font>(0);
+<a name="line524">524: </a>}
+
+<a name="line526">526: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line527">527: </a><font color="#B22222">/*</font>
+<a name="line528">528: </a><font color="#B22222">   PCSetUp_GAMG - Prepares for the use of the GAMG preconditioner</font>
+<a name="line529">529: </a><font color="#B22222">                    by setting data structures and options.</font>
+
+<a name="line531">531: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line532">532: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line534">534: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>()</font>
+
+<a name="line536">536: </a><font color="#B22222">   Notes:</font>
+<a name="line537">537: </a><font color="#B22222">   The interface routine <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>() is not usually called directly by</font>
+<a name="line538">538: </a><font color="#B22222">   the user, but instead is called by <A href="../../../../../docs/manualpages/PC/PCApply.html#PCApply">PCApply</A>() if necessary.</font>
+<a name="line539">539: </a><font color="#B22222">*/</font>
+<a name="line542">542: </a><strong><font color="#4169E1"><a name="PCSetUp_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetUp_GAMG( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc )</font></strong>
+<a name="line543">543: </a>{
+<a name="line544">544: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line545">545: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line546">546: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line547">547: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              Pmat = pc-&gt;pmat;
+<a name="line548">548: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         fine_level,level,level1,bs,M,qq,lidx,nASMBlocksArr[GAMG_MAXLEVELS];
+<a name="line549">549: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>         wcomm = ((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm;
+<a name="line550">550: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      mype,npe,nactivepe;
+<a name="line551">551: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              Aarr[GAMG_MAXLEVELS],Parr[GAMG_MAXLEVELS];
+<a name="line552">552: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>        emaxs[GAMG_MAXLEVELS];
+<a name="line553">553: </a>  <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>              *ASMLocalIDsArr[GAMG_MAXLEVELS],removedEqs[GAMG_MAXLEVELS];
+<a name="line554">554: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         level_bs[GAMG_MAXLEVELS];
+<a name="line555">555: </a>  GAMGKKTMat       kktMatsArr[GAMG_MAXLEVELS];
+<a name="line556">556: </a>  PetscLogDouble   nnz0=0.,nnztot=0.;
+<a name="line557">557: </a>  <A href="../../../../../docs/manualpages/Mat/MatInfo.html#MatInfo">MatInfo</A>          info;
+<a name="line558">558: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        stokes = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line559">559: </a>
+<a name="line561">561: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(wcomm,&amp;mype);
+<a name="line562">562: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(wcomm,&amp;npe);
+<a name="line563">563: </a>  <font color="#4169E1">if</font> (pc_gamg-&gt;verbose&gt;2) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"[%d]%s pc_gamg-&gt;setup_count=%d pc-&gt;setupcalled=%d\n"</font>,mype,__FUNCT__,pc_gamg-&gt;setup_count,pc-&gt;setupcalled);
+<a name="line564">564: </a>  <font color="#4169E1">if</font>( pc_gamg-&gt;setup_count++ &gt; 0 ) {
+<a name="line565">565: </a>    PC_MG_Levels **mglevels = mg-&gt;levels;
+<a name="line566">566: </a>    <font color="#B22222">/* just do Galerkin grids */</font>
+<a name="line567">567: </a>    <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,dA,dB;
+<a name="line568">568: </a>    assert(pc-&gt;setupcalled);
+
+<a name="line570">570: </a>    <font color="#4169E1">if</font>( pc_gamg-&gt;Nlevels &gt; 1 ) {
+<a name="line571">571: </a>      <font color="#B22222">/* currently only handle case where mat and pmat are the same on coarser levels */</font>
+<a name="line572">572: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetOperators.html#KSPGetOperators">KSPGetOperators</A>(mglevels[pc_gamg-&gt;Nlevels-1]-&gt;smoothd,&amp;dA,&amp;dB,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line573">573: </a>      <font color="#B22222">/* (re)set to get dirty flag */</font>
+<a name="line574">574: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(mglevels[pc_gamg-&gt;Nlevels-1]-&gt;smoothd,dA,dB,SAME_NONZERO_PATTERN);
+<a name="line575">575: </a>
+<a name="line576">576: </a>      <font color="#4169E1">for</font> (level=pc_gamg-&gt;Nlevels-2; level&gt;-1; level--) {
+<a name="line577">577: </a>        <font color="#B22222">/* the first time through the matrix structure has changed from repartitioning */</font>
+<a name="line578">578: </a>        <font color="#4169E1">if</font>( pc_gamg-&gt;setup_count==2 <font color="#B22222">/*&amp;&amp; (pc_gamg-&gt;repart || level==0)*/</font>) {
+<a name="line579">579: </a>          <A href="../../../../../docs/manualpages/Mat/MatPtAP.html#MatPtAP">MatPtAP</A>(dB,mglevels[level+1]-&gt;interpolate,MAT_INITIAL_MATRIX,1.0,&amp;B);
+<a name="line580">580: </a>          <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;mglevels[level]-&gt;A);
+<a name="line581">581: </a>          mglevels[level]-&gt;A = B;
+<a name="line582">582: </a>        }
+<a name="line583">583: </a>        <font color="#4169E1">else</font> {
+<a name="line584">584: </a>          <A href="../../../../../docs/manualpages/KSP/KSPGetOperators.html#KSPGetOperators">KSPGetOperators</A>(mglevels[level]-&gt;smoothd,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>,&amp;B,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+<a name="line585">585: </a>          <A href="../../../../../docs/manualpages/Mat/MatPtAP.html#MatPtAP">MatPtAP</A>(dB,mglevels[level+1]-&gt;interpolate,MAT_REUSE_MATRIX,1.0,&amp;B);
+<a name="line586">586: </a>        }
+<a name="line587">587: </a>        <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>(mglevels[level]-&gt;smoothd,B,B,SAME_NONZERO_PATTERN);
+<a name="line588">588: </a>        dB = B;
+<a name="line589">589: </a>      }
+<a name="line590">590: </a>    }
+
+<a name="line592">592: </a>    PCSetUp_MG( pc );<A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+
+<a name="line594">594: </a>    <font color="#B22222">/* PCSetUp_MG seems to insists on setting this to GMRES */</font>
+<a name="line595">595: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>( mglevels[0]-&gt;smoothd, <A href="../../../../../docs/manualpages/KSP/KSPPREONLY.html#KSPPREONLY">KSPPREONLY</A> );
+
+<a name="line597">597: </a>    <font color="#4169E1">return</font>(0);
+<a name="line598">598: </a>  }
+<a name="line599">599: </a>  assert(pc-&gt;setupcalled == 0);
+
+<a name="line601">601: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsGetBool.html#PetscOptionsGetBool">PetscOptionsGetBool</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;prefix,<font color="#666666">"-pc_fieldsplit_detect_saddle_point"</font>,&amp;stokes,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line603">603: </a>  GAMGKKTMatCreate( Pmat, stokes, &amp;kktMatsArr[0] );
+
+<a name="line605">605: </a>  <font color="#4169E1">if</font>( pc_gamg-&gt;data == 0 ) {
+<a name="line606">606: </a>    <font color="#4169E1">if</font>( !pc_gamg-&gt;createdefaultdata ){
+<a name="line607">607: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(wcomm,PETSC_ERR_LIB,<font color="#666666">"'createdefaultdata' not set(?) need to support NULL data"</font>);
+<a name="line608">608: </a>    }
+<a name="line609">609: </a>    <font color="#4169E1">if</font>( stokes ) {
+<a name="line610">610: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(wcomm,PETSC_ERR_LIB,<font color="#666666">"Need data (eg, <A href="../../../../../docs/manualpages/PC/PCSetCoordinates.html#PCSetCoordinates">PCSetCoordinates</A>) for Stokes problems"</font>);
+<a name="line611">611: </a>    }
+<a name="line612">612: </a>    pc_gamg-&gt;createdefaultdata( pc, kktMatsArr[0].A11 );
+<a name="line613">613: </a>  }
+
+<a name="line615">615: </a>  <font color="#B22222">/* get basic dims */</font>
+<a name="line616">616: </a>  <font color="#4169E1">if</font>( stokes ) {
+<a name="line617">617: </a>    bs = pc_gamg-&gt;data_cell_rows; <font color="#B22222">/* this is agg-mg specific */</font>
+<a name="line618">618: </a>  }
+<a name="line619">619: </a>  <font color="#4169E1">else</font> {
+<a name="line620">620: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetBlockSize.html#MatGetBlockSize">MatGetBlockSize</A>( Pmat, &amp;bs );
+<a name="line621">621: </a>  }
+<a name="line622">622: </a>
+<a name="line623">623: </a>  <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Pmat, &amp;M, &amp;qq );
+<a name="line624">624: </a>  <font color="#4169E1">if</font> (pc_gamg-&gt;verbose) {
+<a name="line625">625: </a>    <font color="#4169E1">if</font>(pc_gamg-&gt;verbose==1)  <A href="../../../../../docs/manualpages/Mat/MatGetInfo.html#MatGetInfo">MatGetInfo</A>(Pmat,MAT_LOCAL,&amp;info);
+<a name="line626">626: </a>    <font color="#4169E1">else</font> <A href="../../../../../docs/manualpages/Mat/MatGetInfo.html#MatGetInfo">MatGetInfo</A>(Pmat,MAT_GLOBAL_SUM,&amp;info);
+<a name="line627">627: </a>
+<a name="line628">628: </a>    nnz0 = info.nz_used;
+<a name="line629">629: </a>    nnztot = info.nz_used;
+<a name="line630">630: </a>    <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s level %d N=%d, n data rows=%d, n data cols=%d, nnz/row (ave)=%d, np=%d\n"</font>,
+<a name="line631">631: </a>                mype,__FUNCT__,0,M,pc_gamg-&gt;data_cell_rows,pc_gamg-&gt;data_cell_cols,
+<a name="line632">632: </a>                (int)(nnz0/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)M),npe);
+<a name="line633">633: </a>  }
+
+<a name="line635">635: </a>  <font color="#B22222">/* Get A_i and R_i */</font>
+<a name="line636">636: </a>  <font color="#4169E1">for</font> ( level=0, Aarr[0]=Pmat, nactivepe = npe; <font color="#B22222">/* hard wired stopping logic */</font>
+<a name="line637">637: </a>        level &lt; (pc_gamg-&gt;Nlevels-1) &amp;&amp; (level==0 || M&gt;pc_gamg-&gt;coarse_eq_limit); <font color="#B22222">/* &amp;&amp; (npe==1 || nactivepe&gt;1); */</font>
+<a name="line638">638: </a>        level++ ){
+<a name="line639">639: </a>    level1 = level + 1;
+<a name="line640">640: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line641">641: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET1],0,0,0,0);
+<a name="line642">642: </a><font color="#A020F0">#if (defined GAMG_STAGES)</font>
+<a name="line643">643: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogStagePush.html#PetscLogStagePush">PetscLogStagePush</A>(gamg_stages[level]); <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line644">644: </a><font color="#A020F0">#endif</font>
+<a name="line645">645: </a><font color="#A020F0">#endif</font>
+<a name="line646">646: </a>    <font color="#B22222">/* deal with Stokes, get sub matrices */</font>
+<a name="line647">647: </a>    <font color="#4169E1">if</font>( level &gt; 0 ) {
+<a name="line648">648: </a>      GAMGKKTMatCreate( Aarr[level], stokes, &amp;kktMatsArr[level] );
+<a name="line649">649: </a>    }
+<a name="line650">650: </a>    { <font color="#B22222">/* construct prolongator */</font>
+<a name="line651">651: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Gmat;
+<a name="line652">652: </a>      PetscCoarsenData *agg_lists;
+<a name="line653">653: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Prol11,Prol22;
+
+<a name="line655">655: </a>      level_bs[level] = bs;
+<a name="line656">656: </a>      pc_gamg-&gt;graph( pc,kktMatsArr[level].A11, &amp;Gmat );
+<a name="line657">657: </a>      pc_gamg-&gt;coarsen( pc, &amp;Gmat, &amp;agg_lists );
+<a name="line658">658: </a>      pc_gamg-&gt;prolongator( pc, kktMatsArr[level].A11, Gmat, agg_lists, &amp;Prol11 );
+
+<a name="line660">660: </a>      <font color="#B22222">/* could have failed to create new level */</font>
+<a name="line661">661: </a>      <font color="#4169E1">if</font>( Prol11 ){
+<a name="line662">662: </a>        <font color="#B22222">/* get new block size of coarse matrices */</font>
+<a name="line663">663: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetBlockSizes.html#MatGetBlockSizes">MatGetBlockSizes</A>( Prol11, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, &amp;bs );
+
+<a name="line665">665: </a>        <font color="#4169E1">if</font>( stokes ) {
+<a name="line666">666: </a>          <font color="#4169E1">if</font>(!pc_gamg-&gt;formkktprol) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(wcomm,PETSC_ERR_USER,<font color="#666666">"Stokes not supportd by AMG method."</font>);
+<a name="line667">667: </a>          <font color="#B22222">/* R A12 == (T = A21 P)';  G = T' T; coarsen G; form plain agg with G */</font>
+<a name="line668">668: </a>          pc_gamg-&gt;formkktprol( pc, Prol11, kktMatsArr[level].A21, &amp;Prol22 );
+<a name="line669">669: </a>        }
+<a name="line670">670: </a>
+<a name="line671">671: </a>        <font color="#4169E1">if</font>( pc_gamg-&gt;optprol ){
+<a name="line672">672: </a>          <font color="#B22222">/* smooth */</font>
+<a name="line673">673: </a>          pc_gamg-&gt;optprol( pc, kktMatsArr[level].A11, &amp;Prol11 );
+<a name="line674">674: </a>        }
+<a name="line675">675: </a>
+<a name="line676">676: </a>        <font color="#4169E1">if</font>( stokes ) {
+<a name="line677">677: </a>          <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> is_row[2] = {kktMatsArr[level].prim_is,kktMatsArr[level].constr_is};
+<a name="line678">678: </a>          <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> a[4] = {Prol11, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>, Prol22 };
+<a name="line679">679: </a>          <A href="../../../../../docs/manualpages/Mat/MatCreateNest.html#MatCreateNest">MatCreateNest</A>(wcomm,2,is_row, 2, is_row, a, &amp;Parr[level1] );
+<a name="line680">680: </a>        }
+<a name="line681">681: </a>        <font color="#4169E1">else</font> {
+<a name="line682">682: </a>          Parr[level1] = Prol11;
+<a name="line683">683: </a>        }
+<a name="line684">684: </a>      }
+<a name="line685">685: </a>      <font color="#4169E1">else</font> Parr[level1] = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+
+<a name="line687">687: </a>      <font color="#4169E1">if</font> ( pc_gamg-&gt;use_aggs_in_gasm ) {
+<a name="line688">688: </a>        PetscCDGetASMBlocks(agg_lists, level_bs[level], &amp;nASMBlocksArr[level], &amp;ASMLocalIDsArr[level] );
+<a name="line689">689: </a>      }
+
+<a name="line691">691: </a>      PetscCDGetRemovedIS( agg_lists, &amp;removedEqs[level] );
+
+<a name="line693">693: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Gmat );
+<a name="line694">694: </a>      PetscCDDestroy( agg_lists );
+<a name="line695">695: </a>    } <font color="#B22222">/* construct prolongator scope */</font>
+<a name="line696">696: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line697">697: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET1],0,0,0,0);
+<a name="line698">698: </a><font color="#A020F0">#endif</font>
+<a name="line699">699: </a>    <font color="#B22222">/* cache eigen estimate */</font>
+<a name="line700">700: </a>    <font color="#4169E1">if</font>( pc_gamg-&gt;emax_id != -1 ){
+<a name="line701">701: </a>      <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flag;
+<a name="line702">702: </a>      <A href="../../../../../docs/manualpages/Sys/PetscObjectComposedDataGetReal.html#PetscObjectComposedDataGetReal">PetscObjectComposedDataGetReal</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)kktMatsArr[level].A11, pc_gamg-&gt;emax_id, emaxs[level], flag );
+<a name="line703">703: </a>      <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line704">704: </a>      <font color="#4169E1">if</font>( !flag ) emaxs[level] = -1.;
+<a name="line705">705: </a>    }
+<a name="line706">706: </a>    <font color="#4169E1">else</font> emaxs[level] = -1.;
+<a name="line707">707: </a>    <font color="#4169E1">if</font>(level==0) Aarr[0] = Pmat; <font color="#B22222">/* use Pmat for finest level setup */</font>
+<a name="line708">708: </a>    <font color="#4169E1">if</font>( !Parr[level1] ) {
+<a name="line709">709: </a>      <font color="#4169E1">if</font> (pc_gamg-&gt;verbose) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s stop gridding, level %d\n"</font>,mype,__FUNCT__,level);
+<a name="line710">710: </a>      <font color="#4169E1">break</font>;
+<a name="line711">711: </a>    }
+<a name="line712">712: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line713">713: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(petsc_gamg_setup_events[SET2],0,0,0,0);
+<a name="line714">714: </a><font color="#A020F0">#endif</font>
+
+<a name="line716">716: </a>    createLevel( pc, Aarr[level], bs, (<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>)(level==pc_gamg-&gt;Nlevels-2),
+<a name="line717">717: </a>                        stokes, &amp;Parr[level1], &amp;Aarr[level1], &amp;nactivepe );
+<a name="line718">718: </a>
+
+<a name="line720">720: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line721">721: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(petsc_gamg_setup_events[SET2],0,0,0,0);
+<a name="line722">722: </a><font color="#A020F0">#endif</font>
+<a name="line723">723: </a>    <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Aarr[level1], &amp;M, &amp;qq );
+
+<a name="line725">725: </a>    <font color="#4169E1">if</font> (pc_gamg-&gt;verbose &gt; 0){
+<a name="line726">726: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> NN = M;
+<a name="line727">727: </a>      <font color="#4169E1">if</font>(pc_gamg-&gt;verbose==1) {
+<a name="line728">728: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetInfo.html#MatGetInfo">MatGetInfo</A>(Aarr[level1],MAT_LOCAL,&amp;info);
+<a name="line729">729: </a>        <A href="../../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>( Aarr[level1], &amp;NN, &amp;qq );
+<a name="line730">730: </a>      }
+<a name="line731">731: </a>      <font color="#4169E1">else</font> <A href="../../../../../docs/manualpages/Mat/MatGetInfo.html#MatGetInfo">MatGetInfo</A>( Aarr[level1], MAT_GLOBAL_SUM, &amp;info );
+
+<a name="line733">733: </a>
+<a name="line734">734: </a>      nnztot += info.nz_used;
+<a name="line735">735: </a>      <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t\t[%d]%s %d) N=%d, n data cols=%d, nnz/row (ave)=%d, %d active pes\n"</font>,
+<a name="line736">736: </a>                  mype,__FUNCT__,(int)level1,M,pc_gamg-&gt;data_cell_cols,
+<a name="line737">737: </a>                  (int)(info.nz_used/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)NN), nactivepe );
+<a name="line738">738: </a>
+<a name="line739">739: </a>    }
+
+<a name="line741">741: </a>    <font color="#B22222">/* stop if one node -- could pull back for singular problems */</font>
+<a name="line742">742: </a>    <font color="#4169E1">if</font>( M/pc_gamg-&gt;data_cell_cols &lt; 2 ) {
+<a name="line743">743: </a>      level++;
+<a name="line744">744: </a>      <font color="#4169E1">break</font>;
+<a name="line745">745: </a>    }
+<a name="line746">746: </a><font color="#A020F0">#if (defined PETSC_GAMG_USE_LOG &amp;&amp; defined GAMG_STAGES)</font>
+<a name="line747">747: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogStagePop.html#PetscLogStagePop">PetscLogStagePop</A>(); <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line748">748: </a><font color="#A020F0">#endif</font>
+<a name="line749">749: </a>  } <font color="#B22222">/* levels */</font>
+
+<a name="line751">751: </a>  <font color="#4169E1">if</font>( pc_gamg-&gt;data ) {
+<a name="line752">752: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( pc_gamg-&gt;data ); <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line753">753: </a>    pc_gamg-&gt;data = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line754">754: </a>  }
+
+<a name="line756">756: </a>  <font color="#4169E1">if</font> (pc_gamg-&gt;verbose) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s %d levels, grid complexity = %g\n"</font>,0,__FUNCT__,level+1,nnztot/nnz0);
+<a name="line757">757: </a>  pc_gamg-&gt;Nlevels = level + 1;
+<a name="line758">758: </a>  fine_level = level;
+<a name="line759">759: </a>  <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>(pc,pc_gamg-&gt;Nlevels,<A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>);
+
+<a name="line761">761: </a>  <font color="#B22222">/* simple setup */</font>
+<a name="line762">762: </a>  <font color="#4169E1">if</font>( !<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> ){
+<a name="line763">763: </a>    PC_MG_Levels **mglevels = mg-&gt;levels;
+<a name="line764">764: </a>    <font color="#4169E1">for</font> (lidx=0,level=pc_gamg-&gt;Nlevels-1;
+<a name="line765">765: </a>         lidx&lt;fine_level;
+<a name="line766">766: </a>         lidx++, level--){
+<a name="line767">767: </a>      <A href="../../../../../docs/manualpages/PC/PCMGSetInterpolation.html#PCMGSetInterpolation">PCMGSetInterpolation</A>( pc, lidx+1, Parr[level] );
+<a name="line768">768: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( mglevels[lidx]-&gt;smoothd, Aarr[level], Aarr[level], SAME_NONZERO_PATTERN );
+<a name="line769">769: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Parr[level] );
+<a name="line770">770: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Aarr[level] );
+<a name="line771">771: </a>    }
+<a name="line772">772: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( mglevels[fine_level]-&gt;smoothd, Aarr[0], Aarr[0], SAME_NONZERO_PATTERN );
+<a name="line773">773: </a>
+<a name="line774">774: </a>    PCSetUp_MG( pc );  <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line775">775: </a>  }
+<a name="line776">776: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font>( pc_gamg-&gt;Nlevels &gt; 1 ) { <font color="#B22222">/* don't setup MG if one level */</font>
+<a name="line777">777: </a>    <font color="#B22222">/* set default smoothers &amp; set operators */</font>
+<a name="line778">778: </a>    <font color="#4169E1">for</font> ( lidx = 1, level = pc_gamg-&gt;Nlevels-2;
+<a name="line779">779: </a>          lidx &lt;= fine_level;
+<a name="line780">780: </a>          lidx++, level--) {
+<a name="line781">781: </a>      <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> smoother;
+<a name="line782">782: </a>      <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> subpc;
+
+<a name="line784">784: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>( pc, lidx, &amp;smoother );
+<a name="line785">785: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>( smoother, &amp;subpc );
+<a name="line786">786: </a>
+<a name="line787">787: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetNormType.html#KSPSetNormType">KSPSetNormType</A>( smoother, <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NONE.html#KSP_NORM_NONE">KSP_NORM_NONE</A> );
+<a name="line788">788: </a>      <font color="#B22222">/* set ops */</font>
+<a name="line789">789: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( smoother, Aarr[level], Aarr[level], SAME_NONZERO_PATTERN );
+<a name="line790">790: </a>      <A href="../../../../../docs/manualpages/PC/PCMGSetInterpolation.html#PCMGSetInterpolation">PCMGSetInterpolation</A>( pc, lidx, Parr[level+1] );
+
+<a name="line792">792: </a>      <font color="#B22222">/* create field split <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>, get subsmoother */</font>
+<a name="line793">793: </a>      <font color="#4169E1">if</font>( stokes ) {
+<a name="line794">794: </a>        <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> *ksps;
+<a name="line795">795: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nn;
+<a name="line796">796: </a>        <A href="../../../../../docs/manualpages/PC/PCFieldSplitSetIS.html#PCFieldSplitSetIS">PCFieldSplitSetIS</A>(subpc,<font color="#666666">"0"</font>,kktMatsArr[level].prim_is);
+<a name="line797">797: </a>        <A href="../../../../../docs/manualpages/PC/PCFieldSplitSetIS.html#PCFieldSplitSetIS">PCFieldSplitSetIS</A>(subpc,<font color="#666666">"1"</font>,kktMatsArr[level].constr_is);
+<a name="line798">798: </a>        <A href="../../../../../docs/manualpages/PC/PCFieldSplitGetSubKSP.html#PCFieldSplitGetSubKSP">PCFieldSplitGetSubKSP</A>(subpc,&amp;nn,&amp;ksps);
+<a name="line799">799: </a>        smoother = ksps[0];
+<a name="line800">800: </a>        <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>( smoother, &amp;subpc );
+<a name="line801">801: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( ksps );
+<a name="line802">802: </a>      }
+<a name="line803">803: </a>      GAMGKKTMatDestroy( &amp;kktMatsArr[level] );
+
+<a name="line805">805: </a>      <font color="#B22222">/* set defaults */</font>
+<a name="line806">806: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>( smoother, <A href="../../../../../docs/manualpages/KSP/KSPCHEBYSHEV.html#KSPCHEBYSHEV">KSPCHEBYSHEV</A> );
+
+<a name="line808">808: </a>      <font color="#B22222">/* override defaults and command line args (!) */</font>
+<a name="line809">809: </a>      <font color="#4169E1">if</font> ( pc_gamg-&gt;use_aggs_in_gasm ) {
+<a name="line810">810: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> sz;
+<a name="line811">811: </a>        <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> *is;
+
+<a name="line813">813: </a>        sz = nASMBlocksArr[level];
+<a name="line814">814: </a>        is = ASMLocalIDsArr[level];
+<a name="line815">815: </a>        <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>( subpc, <A href="../../../../../docs/manualpages/PC/PCGASM.html#PCGASM">PCGASM</A> );
+<a name="line816">816: </a>        <font color="#4169E1">if</font>(sz==0){
+<a name="line817">817: </a>          <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> is;
+<a name="line818">818: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> my0,kk;
+<a name="line819">819: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetOwnershipRange.html#MatGetOwnershipRange">MatGetOwnershipRange</A>( Aarr[level], &amp;my0, &amp;kk );
+<a name="line820">820: </a>          <A href="../../../../../docs/manualpages/IS/ISCreateGeneral.html#ISCreateGeneral">ISCreateGeneral</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, 1, &amp;my0, PETSC_COPY_VALUES, &amp;is );
+<a name="line821">821: </a>          <A href="../../../../../docs/manualpages/PC/PCGASMSetSubdomains.html#PCGASMSetSubdomains">PCGASMSetSubdomains</A>( subpc, 1, &amp;is, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line822">822: </a>          <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is );
+<a name="line823">823: </a>        }
+<a name="line824">824: </a>        <font color="#4169E1">else</font> {
+<a name="line825">825: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> kk;
+<a name="line826">826: </a>          <A href="../../../../../docs/manualpages/PC/PCGASMSetSubdomains.html#PCGASMSetSubdomains">PCGASMSetSubdomains</A>( subpc, sz, is, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line827">827: </a>          <font color="#4169E1">for</font>(kk=0;kk&lt;sz;kk++){
+<a name="line828">828: </a>            <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;is[kk] );
+<a name="line829">829: </a>          }
+<a name="line830">830: </a>          <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( is );
+<a name="line831">831: </a>        }
+<a name="line832">832: </a>        <A href="../../../../../docs/manualpages/PC/PCGASMSetOverlap.html#PCGASMSetOverlap">PCGASMSetOverlap</A>( subpc, 0 );
+
+<a name="line834">834: </a>        ASMLocalIDsArr[level] = <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A>;
+<a name="line835">835: </a>        nASMBlocksArr[level] = 0;
+<a name="line836">836: </a>        <A href="../../../../../docs/manualpages/PC/PCGASMSetType.html#PCGASMSetType">PCGASMSetType</A>( subpc, PC_GASM_BASIC );
+<a name="line837">837: </a>      }
+<a name="line838">838: </a>      <font color="#4169E1">else</font> {
+<a name="line839">839: </a>        <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>( subpc, <A href="../../../../../docs/manualpages/PC/PCJACOBI.html#PCJACOBI">PCJACOBI</A> );
+<a name="line840">840: </a>      }
+<a name="line841">841: </a>    }
+<a name="line842">842: </a>    {
+<a name="line843">843: </a>      <font color="#B22222">/* coarse grid */</font>
+<a name="line844">844: </a>      <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> smoother,*k2; <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> subpc,pc2; <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ii,first;
+<a name="line845">845: </a>      <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Lmat = Aarr[(level=pc_gamg-&gt;Nlevels-1)]; lidx = 0;
+<a name="line846">846: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>( pc, lidx, &amp;smoother );
+<a name="line847">847: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( smoother, Lmat, Lmat, SAME_NONZERO_PATTERN );
+<a name="line848">848: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetNormType.html#KSPSetNormType">KSPSetNormType</A>( smoother, <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NONE.html#KSP_NORM_NONE">KSP_NORM_NONE</A> );
+<a name="line849">849: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>( smoother, &amp;subpc );
+<a name="line850">850: </a>      <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>( subpc, <A href="../../../../../docs/manualpages/PC/PCBJACOBI.html#PCBJACOBI">PCBJACOBI</A> );
+<a name="line851">851: </a>      <A href="../../../../../docs/manualpages/PC/PCSetUp.html#PCSetUp">PCSetUp</A>( subpc );
+<a name="line852">852: </a>      <A href="../../../../../docs/manualpages/PC/PCBJacobiGetSubKSP.html#PCBJacobiGetSubKSP">PCBJacobiGetSubKSP</A>(subpc,&amp;ii,&amp;first,&amp;k2);      assert(ii==1);
+<a name="line853">853: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>(k2[0],&amp;pc2);
+<a name="line854">854: </a>      <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>( pc2, <A href="../../../../../docs/manualpages/PC/PCLU.html#PCLU">PCLU</A> );
+<a name="line855">855: </a>    }
+
+<a name="line857">857: </a>    <font color="#B22222">/* should be called in PCSetFromOptions_GAMG(), but cannot be called prior to <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>() */</font>
+<a name="line858">858: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectOptionsBegin.html#PetscObjectOptionsBegin">PetscObjectOptionsBegin</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc );
+<a name="line859">859: </a>    PCSetFromOptions_MG( pc );
+<a name="line860">860: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsEnd.html#PetscOptionsEnd">PetscOptionsEnd</A>();
+<a name="line861">861: </a>    <font color="#4169E1">if</font> (mg-&gt;galerkin != 2) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(wcomm,PETSC_ERR_USER,<font color="#666666">"GAMG does Galerkin manually so the -pc_mg_galerkin option must not be used."</font>);
+
+<a name="line863">863: </a>    <font color="#B22222">/* create cheby smoothers */</font>
+<a name="line864">864: </a>    <font color="#4169E1">for</font> ( lidx = 1, level = pc_gamg-&gt;Nlevels-2;
+<a name="line865">865: </a>          lidx &lt;= fine_level;
+<a name="line866">866: </a>          lidx++, level--) {
+<a name="line867">867: </a>      <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> smoother;
+<a name="line868">868: </a>      <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flag;
+<a name="line869">869: </a>      <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> subpc;
+
+<a name="line871">871: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>( pc, lidx, &amp;smoother );
+<a name="line872">872: </a>      <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>( smoother, &amp;subpc );
+
+<a name="line874">874: </a>      <font color="#B22222">/* create field split <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>, get subsmoother */</font>
+<a name="line875">875: </a>      <font color="#4169E1">if</font>( stokes ) {
+<a name="line876">876: </a>        <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> *ksps;
+<a name="line877">877: </a>        <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nn;
+<a name="line878">878: </a>        <A href="../../../../../docs/manualpages/PC/PCFieldSplitGetSubKSP.html#PCFieldSplitGetSubKSP">PCFieldSplitGetSubKSP</A>(subpc,&amp;nn,&amp;ksps);
+<a name="line879">879: </a>        smoother = ksps[0];
+<a name="line880">880: </a>        <A href="../../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>( smoother, &amp;subpc );
+<a name="line881">881: </a>        <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( ksps );
+<a name="line882">882: </a>      }
+
+<a name="line884">884: </a>      <font color="#B22222">/* do my own cheby */</font>
+<a name="line885">885: </a>      <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)smoother, <A href="../../../../../docs/manualpages/KSP/KSPCHEBYSHEV.html#KSPCHEBYSHEV">KSPCHEBYSHEV</A>, &amp;flag );
+<a name="line886">886: </a>      <font color="#4169E1">if</font>( flag ) {
+<a name="line887">887: </a>        <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> emax, emin;
+<a name="line888">888: </a>        <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)subpc, <A href="../../../../../docs/manualpages/PC/PCJACOBI.html#PCJACOBI">PCJACOBI</A>, &amp;flag );
+<a name="line889">889: </a>        <font color="#4169E1">if</font>( flag &amp;&amp; emaxs[level] &gt; 0.0 ) emax=emaxs[level]; <font color="#B22222">/* eigen estimate only for diagnal <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> */</font>
+<a name="line890">890: </a>        <font color="#4169E1">else</font>{ <font color="#B22222">/* eigen estimate 'emax' */</font>
+<a name="line891">891: </a>          <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> eksp; <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Lmat = Aarr[level];
+<a name="line892">892: </a>          <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> bb, xx;
+
+<a name="line894">894: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetVecs.html#MatGetVecs">MatGetVecs</A>( Lmat, &amp;bb, 0 );
+<a name="line895">895: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetVecs.html#MatGetVecs">MatGetVecs</A>( Lmat, &amp;xx, 0 );
+<a name="line896">896: </a>          {
+<a name="line897">897: </a>            <A href="../../../../../docs/manualpages/Sys/PetscRandom.html#PetscRandom">PetscRandom</A>    rctx;
+<a name="line898">898: </a>            <A href="../../../../../docs/manualpages/Sys/PetscRandomCreate.html#PetscRandomCreate">PetscRandomCreate</A>(wcomm,&amp;rctx);
+<a name="line899">899: </a>            <A href="../../../../../docs/manualpages/Sys/PetscRandomSetFromOptions.html#PetscRandomSetFromOptions">PetscRandomSetFromOptions</A>(rctx);
+<a name="line900">900: </a>            <A href="../../../../../docs/manualpages/Vec/VecSetRandom.html#VecSetRandom">VecSetRandom</A>(bb,rctx);
+<a name="line901">901: </a>            <A href="../../../../../docs/manualpages/Sys/PetscRandomDestroy.html#PetscRandomDestroy">PetscRandomDestroy</A>( &amp;rctx );
+<a name="line902">902: </a>          }
+
+<a name="line904">904: </a>          <font color="#4169E1">if</font>( removedEqs[level] ) {
+<a name="line905">905: </a>            <font color="#B22222">/* being very careful - zeroing out BC rows (this is not done in agg.c estimates) */</font>
+<a name="line906">906: </a>            <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *zeros;
+<a name="line907">907: </a>            <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ii,jj, *idx_bs, sz, bs=level_bs[level];
+<a name="line908">908: </a>            const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *idx;
+<a name="line909">909: </a>            <A href="../../../../../docs/manualpages/IS/ISGetLocalSize.html#ISGetLocalSize">ISGetLocalSize</A>( removedEqs[level], &amp;sz );
+<a name="line910">910: </a>            <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( bs*sz*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>), &amp;zeros );
+<a name="line911">911: </a>            <font color="#4169E1">for</font>(ii=0;ii&lt;bs*sz;ii++) zeros[ii] = 0.;
+<a name="line912">912: </a>            <A href="../../../../../docs/manualpages/Sys/PetscMalloc.html#PetscMalloc">PetscMalloc</A>( bs*sz*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>), &amp;idx_bs );
+<a name="line913">913: </a>            <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>( removedEqs[level], &amp;idx);
+<a name="line914">914: </a>            <font color="#4169E1">for</font>(ii=0;ii&lt;sz;ii++) {
+<a name="line915">915: </a>              <font color="#4169E1">for</font>(jj=0;jj&lt;bs;jj++) {
+<a name="line916">916: </a>                idx_bs[ii] = bs*idx[ii]+jj;
+<a name="line917">917: </a>              }
+<a name="line918">918: </a>            }
+<a name="line919">919: </a>            <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>( removedEqs[level], &amp;idx );
+<a name="line920">920: </a>            <font color="#4169E1">if</font>( sz &gt; 0 ) {
+<a name="line921">921: </a>              <A href="../../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>( bb, sz, idx_bs, zeros, <A href="../../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A> );
+<a name="line922">922: </a>            }
+<a name="line923">923: </a>            <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( idx_bs );
+<a name="line924">924: </a>            <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( zeros );
+<a name="line925">925: </a>            <A href="../../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(bb);
+<a name="line926">926: </a>            <A href="../../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(bb);
+<a name="line927">927: </a>          }
+<a name="line928">928: </a>          <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>( wcomm, &amp;eksp );
+<a name="line929">929: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetTolerances.html#KSPSetTolerances">KSPSetTolerances</A>( eksp, <A href="../../../../../docs/manualpages/Sys/PETSC_DEFAULT.html#PETSC_DEFAULT">PETSC_DEFAULT</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_DEFAULT.html#PETSC_DEFAULT">PETSC_DEFAULT</A>, <A href="../../../../../docs/manualpages/Sys/PETSC_DEFAULT.html#PETSC_DEFAULT">PETSC_DEFAULT</A>, 10 );
+<a name="line930">930: </a>
+<a name="line931">931: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetNormType.html#KSPSetNormType">KSPSetNormType</A>( eksp, <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NONE.html#KSP_NORM_NONE">KSP_NORM_NONE</A> );
+<a name="line932">932: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetOptionsPrefix.html#KSPSetOptionsPrefix">KSPSetOptionsPrefix</A>(eksp,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;prefix);
+<a name="line933">933: </a>          <A href="../../../../../docs/manualpages/KSP/KSPAppendOptionsPrefix.html#KSPAppendOptionsPrefix">KSPAppendOptionsPrefix</A>( eksp, <font color="#666666">"gamg_est_"</font>);
+<a name="line934">934: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>( eksp );
+
+<a name="line936">936: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetInitialGuessNonzero.html#KSPSetInitialGuessNonzero">KSPSetInitialGuessNonzero</A>( eksp, <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A> );
+<a name="line937">937: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( eksp, Lmat, Lmat, SAME_NONZERO_PATTERN ); <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line938">938: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetComputeSingularValues.html#KSPSetComputeSingularValues">KSPSetComputeSingularValues</A>( eksp,<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> );
+
+<a name="line940">940: </a>          <font color="#B22222">/* set <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> type to be same as smoother */</font>
+<a name="line941">941: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSetPC.html#KSPSetPC">KSPSetPC</A>( eksp, subpc ); <A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+
+<a name="line943">943: </a>          <font color="#B22222">/* solve - keep stuff out of logging */</font>
+<a name="line944">944: </a>          <A href="../../../../../docs/manualpages/Profiling/PetscLogEventDeactivate.html#PetscLogEventDeactivate">PetscLogEventDeactivate</A>(KSP_Solve);
+<a name="line945">945: </a>          <A href="../../../../../docs/manualpages/Profiling/PetscLogEventDeactivate.html#PetscLogEventDeactivate">PetscLogEventDeactivate</A>(PC_Apply);
+<a name="line946">946: </a>          <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>( eksp, bb, xx );
+<a name="line947">947: </a>          <A href="../../../../../docs/manualpages/Profiling/PetscLogEventActivate.html#PetscLogEventActivate">PetscLogEventActivate</A>(KSP_Solve);
+<a name="line948">948: </a>          <A href="../../../../../docs/manualpages/Profiling/PetscLogEventActivate.html#PetscLogEventActivate">PetscLogEventActivate</A>(PC_Apply);
+<a name="line949">949: </a>
+<a name="line950">950: </a>          <A href="../../../../../docs/manualpages/KSP/KSPComputeExtremeSingularValues.html#KSPComputeExtremeSingularValues">KSPComputeExtremeSingularValues</A>( eksp, &amp;emax, &amp;emin );
+<a name="line951">951: </a>
+<a name="line952">952: </a>          <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>( &amp;xx );
+<a name="line953">953: </a>          <A href="../../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>( &amp;bb );
+<a name="line954">954: </a>          <A href="../../../../../docs/manualpages/KSP/KSPDestroy.html#KSPDestroy">KSPDestroy</A>( &amp;eksp );
+<a name="line955">955: </a>
+<a name="line956">956: </a>          <font color="#4169E1">if</font>( pc_gamg-&gt;verbose &gt; 0 ) {
+<a name="line957">957: </a>            <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> N1, tt;
+<a name="line958">958: </a>            <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Aarr[level], &amp;N1, &amp;tt );
+<a name="line959">959: </a>            <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t\t\t%s <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> setup max eigen=%e min=%e on level %d (N=%d)\n"</font>,__FUNCT__,emax,emin,lidx,N1);
+<a name="line960">960: </a>          }
+<a name="line961">961: </a>        }
+<a name="line962">962: </a>        {
+<a name="line963">963: </a>          <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> N1, N0;
+<a name="line964">964: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Aarr[level], &amp;N1, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line965">965: </a>          <A href="../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>( Aarr[level+1], &amp;N0, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line966">966: </a>          <font color="#B22222">/* heuristic - is this crap? */</font>
+<a name="line967">967: </a>          emin = 1.*emax/((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)N1/(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)N0);
+<a name="line968">968: </a>          emax *= 1.05;
+<a name="line969">969: </a>        }
+<a name="line970">970: </a>        <A href="../../../../../docs/manualpages/KSP/KSPChebyshevSetEigenvalues.html#KSPChebyshevSetEigenvalues">KSPChebyshevSetEigenvalues</A>( smoother, emax, emin );
+<a name="line971">971: </a>      } <font color="#B22222">/* setup checby flag */</font>
+
+<a name="line973">973: </a>      <font color="#4169E1">if</font>( removedEqs[level] ) {
+<a name="line974">974: </a>        <A href="../../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>( &amp;removedEqs[level] );
+<a name="line975">975: </a>      }
+<a name="line976">976: </a>    } <font color="#B22222">/* non-coarse levels */</font>
+<a name="line977">977: </a>
+<a name="line978">978: </a>    <font color="#B22222">/* clean up */</font>
+<a name="line979">979: </a>    <font color="#4169E1">for</font>(level=1;level&lt;pc_gamg-&gt;Nlevels;level++){
+<a name="line980">980: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Parr[level] );
+<a name="line981">981: </a>      <A href="../../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>( &amp;Aarr[level] );
+<a name="line982">982: </a>    }
+
+<a name="line984">984: </a>    PCSetUp_MG( pc );<A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line985">985: </a>
+<a name="line986">986: </a>    <font color="#4169E1">if</font>( <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A> ){
+<a name="line987">987: </a>      <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> smoother;  <font color="#B22222">/* PCSetUp_MG seems to insists on setting this to GMRES on coarse grid */</font>
+<a name="line988">988: </a>      <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>( pc, 0, &amp;smoother );
+<a name="line989">989: </a>      <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>( smoother, <A href="../../../../../docs/manualpages/KSP/KSPPREONLY.html#KSPPREONLY">KSPPREONLY</A> );
+<a name="line990">990: </a>    }
+<a name="line991">991: </a>  }
+<a name="line992">992: </a>  <font color="#4169E1">else</font> {
+<a name="line993">993: </a>    <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> smoother;
+<a name="line994">994: </a>    <font color="#4169E1">if</font> (pc_gamg-&gt;verbose) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s one level solver used (system is seen as DD). Using default solver.\n"</font>,mype,__FUNCT__);
+<a name="line995">995: </a>    <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>( pc, 0, &amp;smoother );
+<a name="line996">996: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetOperators.html#KSPSetOperators">KSPSetOperators</A>( smoother, Aarr[0], Aarr[0], SAME_NONZERO_PATTERN );
+<a name="line997">997: </a>    <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>( smoother, <A href="../../../../../docs/manualpages/KSP/KSPPREONLY.html#KSPPREONLY">KSPPREONLY</A> );
+<a name="line998">998: </a>    PCSetUp_MG( pc );<A href="../../../../../docs/manualpages/Sys/CHKERRQ.html#CHKERRQ">CHKERRQ</A>( ierr );
+<a name="line999">999: </a>  }
+
+<a name="line1001">1001: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1002">1002: </a>}
+
+<a name="line1004">1004: </a><font color="#B22222">/* ------------------------------------------------------------------------- */</font>
+<a name="line1005">1005: </a><font color="#B22222">/*</font>
+<a name="line1006">1006: </a><font color="#B22222"> PCDestroy_GAMG - Destroys the private context for the GAMG preconditioner</font>
+<a name="line1007">1007: </a><font color="#B22222">   that was created with PCCreate_GAMG().</font>
+
+<a name="line1009">1009: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line1010">1010: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line1012">1012: </a><font color="#B22222">   Application Interface Routine: <A href="../../../../../docs/manualpages/PC/PCDestroy.html#PCDestroy">PCDestroy</A>()</font>
+<a name="line1013">1013: </a><font color="#B22222">*/</font>
+<a name="line1016">1016: </a><strong><font color="#4169E1"><a name="PCDestroy_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCDestroy_GAMG( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc )</font></strong>
+<a name="line1017">1017: </a>{
+<a name="line1018">1018: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line1019">1019: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1020">1020: </a>  PC_GAMG         *pc_gamg= (PC_GAMG*)mg-&gt;innerctx;
+
+<a name="line1023">1023: </a>  PCReset_GAMG( pc );
+<a name="line1024">1024: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>( pc_gamg );
+<a name="line1025">1025: </a>  PCDestroy_MG( pc );
+<a name="line1026">1026: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1027">1027: </a>}
+
+
+<a name="line1032">1032: </a><font color="#B22222">/*@</font>
+<a name="line1033">1033: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetProcEqLim.html#PCGAMGSetProcEqLim">PCGAMGSetProcEqLim</A> - Set number of equations to aim for on coarse grids via </font>
+<a name="line1034">1034: </a><font color="#B22222">   processor reduction.</font>
+
+<a name="line1036">1036: </a><font color="#B22222">   Not Collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1038">1038: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1039">1039: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1042">1042: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1043">1043: </a><font color="#B22222">.  -pc_gamg_process_eq_limit</font>
+
+<a name="line1045">1045: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1047">1047: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1049">1049: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1050">1050: </a><font color="#B22222">@*/</font>
+<a name="line1051">1051: </a><strong><font color="#4169E1"><a name="PCGAMGSetProcEqLim"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../../docs/manualpages/PC/PCGAMGSetProcEqLim.html#PCGAMGSetProcEqLim">PCGAMGSetProcEqLim</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1052">1052: </a>{
+<a name="line1054">1054: </a>
+<a name="line1057">1057: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetProcEqLim_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(pc,n));
+<a name="line1058">1058: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1059">1059: </a>}
+
+<a name="line1061">1061: </a>EXTERN_C_BEGIN
+<a name="line1064">1064: </a><strong><font color="#4169E1"><a name="PCGAMGSetProcEqLim_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetProcEqLim_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1065">1065: </a>{
+<a name="line1066">1066: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1067">1067: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1068">1068: </a>
+<a name="line1070">1070: </a>  <font color="#4169E1">if</font>(n&gt;0) pc_gamg-&gt;min_eq_proc = n;
+<a name="line1071">1071: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1072">1072: </a>}
+<a name="line1073">1073: </a>EXTERN_C_END
+
+<a name="line1077">1077: </a><font color="#B22222">/*@</font>
+<a name="line1078">1078: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetCoarseEqLim.html#PCGAMGSetCoarseEqLim">PCGAMGSetCoarseEqLim</A> - Set max number of equations on coarse grids.</font>
+
+<a name="line1080">1080: </a><font color="#B22222"> Collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1082">1082: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1083">1083: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1086">1086: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1087">1087: </a><font color="#B22222">.  -pc_gamg_coarse_eq_limit</font>
+
+<a name="line1089">1089: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1091">1091: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1093">1093: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1094">1094: </a><font color="#B22222"> @*/</font>
+<a name="line1095">1095: </a><strong><font color="#4169E1"><a name="PCGAMGSetCoarseEqLim"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetCoarseEqLim.html#PCGAMGSetCoarseEqLim">PCGAMGSetCoarseEqLim</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1096">1096: </a>{
+<a name="line1098">1098: </a>
+<a name="line1101">1101: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetCoarseEqLim_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(pc,n));
+<a name="line1102">1102: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1103">1103: </a>}
+
+<a name="line1105">1105: </a>EXTERN_C_BEGIN
+<a name="line1108">1108: </a><strong><font color="#4169E1"><a name="PCGAMGSetCoarseEqLim_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetCoarseEqLim_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1109">1109: </a>{
+<a name="line1110">1110: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1111">1111: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1112">1112: </a>
+<a name="line1114">1114: </a>  <font color="#4169E1">if</font>(n&gt;0) pc_gamg-&gt;coarse_eq_limit = n;
+<a name="line1115">1115: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1116">1116: </a>}
+<a name="line1117">1117: </a>EXTERN_C_END
+
+<a name="line1121">1121: </a><font color="#B22222">/*@</font>
+<a name="line1122">1122: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetRepartitioning.html#PCGAMGSetRepartitioning">PCGAMGSetRepartitioning</A> - Repartition the coarse grids</font>
+
+<a name="line1124">1124: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1126">1126: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1127">1127: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1130">1130: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1131">1131: </a><font color="#B22222">.  -pc_gamg_repartition</font>
+
+<a name="line1133">1133: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1135">1135: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1137">1137: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1138">1138: </a><font color="#B22222">@*/</font>
+<a name="line1139">1139: </a><strong><font color="#4169E1"><a name="PCGAMGSetRepartitioning"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetRepartitioning.html#PCGAMGSetRepartitioning">PCGAMGSetRepartitioning</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> n)</font></strong>
+<a name="line1140">1140: </a>{
+<a name="line1142">1142: </a>
+<a name="line1145">1145: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetRepartitioning_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>),(pc,n));
+<a name="line1146">1146: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1147">1147: </a>}
+
+<a name="line1149">1149: </a>EXTERN_C_BEGIN
+<a name="line1152">1152: </a><strong><font color="#4169E1"><a name="PCGAMGSetRepartitioning_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetRepartitioning_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> n)</font></strong>
+<a name="line1153">1153: </a>{
+<a name="line1154">1154: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1155">1155: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1156">1156: </a>
+<a name="line1158">1158: </a>  pc_gamg-&gt;repart = n;
+<a name="line1159">1159: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1160">1160: </a>}
+<a name="line1161">1161: </a>EXTERN_C_END
+
+<a name="line1165">1165: </a><font color="#B22222">/*@</font>
+<a name="line1166">1166: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetUseASMAggs.html#PCGAMGSetUseASMAggs">PCGAMGSetUseASMAggs</A> - </font>
+
+<a name="line1168">1168: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1170">1170: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1171">1171: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1174">1174: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1175">1175: </a><font color="#B22222">.  -pc_gamg_use_agg_gasm</font>
+
+<a name="line1177">1177: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1179">1179: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1181">1181: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1182">1182: </a><font color="#B22222">@*/</font>
+<a name="line1183">1183: </a><strong><font color="#4169E1"><a name="PCGAMGSetUseASMAggs"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetUseASMAggs.html#PCGAMGSetUseASMAggs">PCGAMGSetUseASMAggs</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> n)</font></strong>
+<a name="line1184">1184: </a>{
+<a name="line1186">1186: </a>
+<a name="line1189">1189: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetUseASMAggs_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>),(pc,n));
+<a name="line1190">1190: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1191">1191: </a>}
+
+<a name="line1193">1193: </a>EXTERN_C_BEGIN
+<a name="line1196">1196: </a><strong><font color="#4169E1"><a name="PCGAMGSetUseASMAggs_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetUseASMAggs_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> n)</font></strong>
+<a name="line1197">1197: </a>{
+<a name="line1198">1198: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1199">1199: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1200">1200: </a>
+<a name="line1202">1202: </a>  pc_gamg-&gt;use_aggs_in_gasm = n;
+<a name="line1203">1203: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1204">1204: </a>}
+<a name="line1205">1205: </a>EXTERN_C_END
+
+<a name="line1209">1209: </a><font color="#B22222">/*@</font>
+<a name="line1210">1210: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetNlevels.html#PCGAMGSetNlevels">PCGAMGSetNlevels</A> - </font>
+
+<a name="line1212">1212: </a><font color="#B22222">   Not collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1214">1214: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1215">1215: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1218">1218: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1219">1219: </a><font color="#B22222">.  -pc_mg_levels</font>
+
+<a name="line1221">1221: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1223">1223: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1225">1225: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1226">1226: </a><font color="#B22222">@*/</font>
+<a name="line1227">1227: </a><strong><font color="#4169E1"><a name="PCGAMGSetNlevels"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetNlevels.html#PCGAMGSetNlevels">PCGAMGSetNlevels</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1228">1228: </a>{
+<a name="line1230">1230: </a>
+<a name="line1233">1233: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetNlevels_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(pc,n));
+<a name="line1234">1234: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1235">1235: </a>}
+
+<a name="line1237">1237: </a>EXTERN_C_BEGIN
+<a name="line1240">1240: </a><strong><font color="#4169E1"><a name="PCGAMGSetNlevels_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetNlevels_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n)</font></strong>
+<a name="line1241">1241: </a>{
+<a name="line1242">1242: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1243">1243: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1244">1244: </a>
+<a name="line1246">1246: </a>  pc_gamg-&gt;Nlevels = n;
+<a name="line1247">1247: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1248">1248: </a>}
+<a name="line1249">1249: </a>EXTERN_C_END
+
+<a name="line1253">1253: </a><font color="#B22222">/*@</font>
+<a name="line1254">1254: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetThreshold.html#PCGAMGSetThreshold">PCGAMGSetThreshold</A> - Relative threshold to use for dropping edges in aggregation graph</font>
+
+<a name="line1256">1256: </a><font color="#B22222">   Not collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1258">1258: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1259">1259: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1262">1262: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1263">1263: </a><font color="#B22222">.  -pc_gamg_threshold</font>
+
+<a name="line1265">1265: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1267">1267: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1269">1269: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1270">1270: </a><font color="#B22222">@*/</font>
+<a name="line1271">1271: </a><strong><font color="#4169E1"><a name="PCGAMGSetThreshold"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetThreshold.html#PCGAMGSetThreshold">PCGAMGSetThreshold</A>(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> n)</font></strong>
+<a name="line1272">1272: </a>{
+<a name="line1274">1274: </a>
+<a name="line1277">1277: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetThreshold_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>),(pc,n));
+<a name="line1278">1278: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1279">1279: </a>}
+
+<a name="line1281">1281: </a>EXTERN_C_BEGIN
+<a name="line1284">1284: </a><strong><font color="#4169E1"><a name="PCGAMGSetThreshold_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetThreshold_GAMG(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> n)</font></strong>
+<a name="line1285">1285: </a>{
+<a name="line1286">1286: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1287">1287: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1288">1288: </a>
+<a name="line1290">1290: </a>  pc_gamg-&gt;threshold = n;
+<a name="line1291">1291: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1292">1292: </a>}
+<a name="line1293">1293: </a>EXTERN_C_END
+
+<a name="line1297">1297: </a><font color="#B22222">/*@</font>
+<a name="line1298">1298: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/PC/PCGAMGSetType.html#PCGAMGSetType">PCGAMGSetType</A> - Set solution method - calls sub create method</font>
+
+<a name="line1300">1300: </a><font color="#B22222">   Collective on <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A></font>
+
+<a name="line1302">1302: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1303">1303: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+
+<a name="line1306">1306: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line1307">1307: </a><font color="#B22222">.  -pc_gamg_type</font>
+
+<a name="line1309">1309: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1311">1311: </a><font color="#B22222">   Concepts: Unstructured multrigrid preconditioner</font>
+
+<a name="line1313">1313: </a><font color="#B22222">.seealso: ()</font>
+<a name="line1314">1314: </a><font color="#B22222">@*/</font>
+<a name="line1315">1315: </a><strong><font color="#4169E1"><a name="PCGAMGSetType"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../../docs/manualpages/PC/PCGAMGSetType.html#PCGAMGSetType">PCGAMGSetType</A>( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, const PCGAMGType type )</font></strong>
+<a name="line1316">1316: </a>{
+<a name="line1318">1318: </a>
+<a name="line1321">1321: </a>  PetscTryMethod(pc,<font color="#666666">"PCGAMGSetType_C"</font>,(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>,const PCGAMGType),(pc,type));
+<a name="line1322">1322: </a>
+<a name="line1323">1323: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1324">1324: </a>}
+<a name="line1325">1325: </a>
+<a name="line1326">1326: </a>EXTERN_C_BEGIN
+<a name="line1329">1329: </a><strong><font color="#4169E1"><a name="PCGAMGSetType_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCGAMGSetType_GAMG( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc, const PCGAMGType type )</font></strong>
+<a name="line1330">1330: </a>{
+<a name="line1331">1331: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr,(*r)(<A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>);
+<a name="line1332">1332: </a>
+<a name="line1334">1334: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFListFind.html#PetscFListFind">PetscFListFind</A>(GAMGList,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm,type,<A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>,(PetscVoidStarFunction)&amp;r);
+<a name="line1335">1335: </a>
+
+<a name="line1337">1337: </a>  <font color="#4169E1">if</font> (!r) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_UNKNOWN_TYPE,<font color="#666666">"Unknown GAMG type %s given"</font>,type);
+
+<a name="line1339">1339: </a>  <font color="#B22222">/* call sub create method */</font>
+<a name="line1340">1340: </a>  (*r)(pc);
+
+<a name="line1342">1342: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1343">1343: </a>}
+<a name="line1344">1344: </a>EXTERN_C_END
+
+<a name="line1348">1348: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> PCSetFromOptions_GAMG( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc )</font></strong>
+<a name="line1349">1349: </a>{
+<a name="line1350">1350: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line1351">1351: </a>  PC_MG           *mg = (PC_MG*)pc-&gt;data;
+<a name="line1352">1352: </a>  PC_GAMG         *pc_gamg = (PC_GAMG*)mg-&gt;innerctx;
+<a name="line1353">1353: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        flag;
+<a name="line1354">1354: </a>  <A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>         wcomm = ((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc)-&gt;comm;
+
+<a name="line1357">1357: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"GAMG options"</font>);
+<a name="line1358">1358: </a>  {
+<a name="line1359">1359: </a>    <font color="#B22222">/* -pc_gamg_verbose */</font>
+<a name="line1360">1360: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_gamg_verbose"</font>,<font color="#666666">"Verbose (debugging) output for <A href="../../../../../docs/manualpages/PC/PCGAMG.html#PCGAMG">PCGAMG</A>"</font>,
+<a name="line1361">1361: </a>                           <font color="#666666">"none"</font>, pc_gamg-&gt;verbose,
+<a name="line1362">1362: </a>                           &amp;pc_gamg-&gt;verbose, <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line1363">1363: </a>
+<a name="line1364">1364: </a>
+<a name="line1365">1365: </a>    <font color="#B22222">/* -pc_gamg_repartition */</font>
+<a name="line1366">1366: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-pc_gamg_repartition"</font>,
+<a name="line1367">1367: </a>                            <font color="#666666">"Repartion coarse grids (false)"</font>,
+<a name="line1368">1368: </a>                            <font color="#666666">"PCGAMGRepartitioning"</font>,
+<a name="line1369">1369: </a>                            pc_gamg-&gt;repart,
+<a name="line1370">1370: </a>                            &amp;pc_gamg-&gt;repart,
+<a name="line1371">1371: </a>                            &amp;flag);
+<a name="line1372">1372: </a>
+<a name="line1373">1373: </a>
+<a name="line1374">1374: </a>    <font color="#B22222">/* -pc_gamg_use_agg_gasm */</font>
+<a name="line1375">1375: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-pc_gamg_use_agg_gasm"</font>,
+<a name="line1376">1376: </a>                            <font color="#666666">"Use aggregation agragates for GASM smoother (false)"</font>,
+<a name="line1377">1377: </a>                            <font color="#666666">"PCGAMGUseASMAggs"</font>,
+<a name="line1378">1378: </a>                            pc_gamg-&gt;use_aggs_in_gasm,
+<a name="line1379">1379: </a>                            &amp;pc_gamg-&gt;use_aggs_in_gasm,
+<a name="line1380">1380: </a>                            &amp;flag);
+<a name="line1381">1381: </a>
+<a name="line1382">1382: </a>
+<a name="line1383">1383: </a>    <font color="#B22222">/* -pc_gamg_process_eq_limit */</font>
+<a name="line1384">1384: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_gamg_process_eq_limit"</font>,
+<a name="line1385">1385: </a>                           <font color="#666666">"Limit (goal) on number of equations per process on coarse grids"</font>,
+<a name="line1386">1386: </a>                           <font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCGAMGSetProcEqLim.html#PCGAMGSetProcEqLim">PCGAMGSetProcEqLim</A>"</font>,
+<a name="line1387">1387: </a>                           pc_gamg-&gt;min_eq_proc,
+<a name="line1388">1388: </a>                           &amp;pc_gamg-&gt;min_eq_proc,
+<a name="line1389">1389: </a>                           &amp;flag );
+<a name="line1390">1390: </a>
+<a name="line1391">1391: </a>
+<a name="line1392">1392: </a>    <font color="#B22222">/* -pc_gamg_coarse_eq_limit */</font>
+<a name="line1393">1393: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_gamg_coarse_eq_limit"</font>,
+<a name="line1394">1394: </a>                           <font color="#666666">"Limit on number of equations for the coarse grid"</font>,
+<a name="line1395">1395: </a>                           <font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCGAMGSetCoarseEqLim.html#PCGAMGSetCoarseEqLim">PCGAMGSetCoarseEqLim</A>"</font>,
+<a name="line1396">1396: </a>                           pc_gamg-&gt;coarse_eq_limit,
+<a name="line1397">1397: </a>                           &amp;pc_gamg-&gt;coarse_eq_limit,
+<a name="line1398">1398: </a>                           &amp;flag );
+<a name="line1399">1399: </a>
+
+<a name="line1401">1401: </a>    <font color="#B22222">/* -pc_gamg_threshold */</font>
+<a name="line1402">1402: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-pc_gamg_threshold"</font>,
+<a name="line1403">1403: </a>                            <font color="#666666">"Relative threshold to use for dropping edges in aggregation graph"</font>,
+<a name="line1404">1404: </a>                            <font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCGAMGSetThreshold.html#PCGAMGSetThreshold">PCGAMGSetThreshold</A>"</font>,
+<a name="line1405">1405: </a>                            pc_gamg-&gt;threshold,
+<a name="line1406">1406: </a>                            &amp;pc_gamg-&gt;threshold,
+<a name="line1407">1407: </a>                            &amp;flag );
+<a name="line1408">1408: </a>
+<a name="line1409">1409: </a>    <font color="#4169E1">if</font>(flag &amp;&amp; pc_gamg-&gt;verbose) <A href="../../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(wcomm,<font color="#666666">"\t[%d]%s threshold set %e\n"</font>,0,__FUNCT__,pc_gamg-&gt;threshold);
+
+<a name="line1411">1411: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-pc_mg_levels"</font>,
+<a name="line1412">1412: </a>                           <font color="#666666">"Set number of MG levels"</font>,
+<a name="line1413">1413: </a>                           <font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCGAMGSetNlevels.html#PCGAMGSetNlevels">PCGAMGSetNlevels</A>"</font>,
+<a name="line1414">1414: </a>                           pc_gamg-&gt;Nlevels,
+<a name="line1415">1415: </a>                           &amp;pc_gamg-&gt;Nlevels,
+<a name="line1416">1416: </a>                           &amp;flag );
+<a name="line1417">1417: </a>  }
+<a name="line1418">1418: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+
+<a name="line1420">1420: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1421">1421: </a>}
+
+<a name="line1423">1423: </a><font color="#B22222">/* -------------------------------------------------------------------------- */</font>
+<a name="line1424">1424: </a><font color="#B22222">/*MC</font>
+<a name="line1425">1425: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/PC/PCGAMG.html#PCGAMG">PCGAMG</A> - Geometric algebraic multigrid (AMG) preconditioning framework.</font>
+<a name="line1426">1426: </a><font color="#B22222">       - This is the entry point to GAMG, registered in pcregis.c</font>
+
+<a name="line1428">1428: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line1429">1429: </a><font color="#B22222">   Multigrid options(inherited)</font>
+<a name="line1430">1430: </a><font color="#B22222">+  -pc_mg_cycles &lt;1&gt;: 1 for V cycle, 2 for W-cycle (<A href="../../../../../docs/manualpages/PC/PCMGSetCycleType.html#PCMGSetCycleType">PCMGSetCycleType</A>)</font>
+<a name="line1431">1431: </a><font color="#B22222">.  -pc_mg_smoothup &lt;1&gt;: Number of post-smoothing steps (<A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothUp.html#PCMGSetNumberSmoothUp">PCMGSetNumberSmoothUp</A>)</font>
+<a name="line1432">1432: </a><font color="#B22222">.  -pc_mg_smoothdown &lt;1&gt;: Number of pre-smoothing steps (<A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothDown.html#PCMGSetNumberSmoothDown">PCMGSetNumberSmoothDown</A>)</font>
+<a name="line1433">1433: </a><font color="#B22222">-  -pc_mg_type &lt;multiplicative&gt;: (one of) additive multiplicative full cascade kascade</font>
+
+<a name="line1435">1435: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line1437">1437: </a><font color="#B22222">  Concepts: multigrid</font>
+
+<a name="line1439">1439: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/PC/PCCreate.html#PCCreate">PCCreate</A>(), <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCType.html#PCType">PCType</A> (for list of available types), <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A>, <A href="../../../../../docs/manualpages/PC/PCMGType.html#PCMGType">PCMGType</A>,</font>
+<a name="line1440">1440: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetLevels.html#PCMGSetLevels">PCMGSetLevels</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetLevels.html#PCMGGetLevels">PCMGGetLevels</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetType.html#PCMGSetType">PCMGSetType</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetCycleType.html#PCMGSetCycleType">PCMGSetCycleType</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothDown.html#PCMGSetNumberSmoothDown">PCMGSetNumberSmoothDown</A>(),</font>
+<a name="line1441">1441: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetNumberSmoothUp.html#PCMGSetNumberSmoothUp">PCMGSetNumberSmoothUp</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetCoarseSolve.html#PCMGGetCoarseSolve">PCMGGetCoarseSolve</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetResidual.html#PCMGSetResidual">PCMGSetResidual</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetInterpolation.html#PCMGSetInterpolation">PCMGSetInterpolation</A>(),</font>
+<a name="line1442">1442: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetRestriction.html#PCMGSetRestriction">PCMGSetRestriction</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmoother.html#PCMGGetSmoother">PCMGGetSmoother</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmootherUp.html#PCMGGetSmootherUp">PCMGGetSmootherUp</A>(), <A href="../../../../../docs/manualpages/PC/PCMGGetSmootherDown.html#PCMGGetSmootherDown">PCMGGetSmootherDown</A>(),</font>
+<a name="line1443">1443: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/PC/PCMGSetCyclesOnLevel.html#PCMGSetCyclesOnLevel">PCMGSetCyclesOnLevel</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetRhs.html#PCMGSetRhs">PCMGSetRhs</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetX.html#PCMGSetX">PCMGSetX</A>(), <A href="../../../../../docs/manualpages/PC/PCMGSetR.html#PCMGSetR">PCMGSetR</A>()</font>
+<a name="line1444">1444: </a><font color="#B22222">M*/</font>
+<a name="line1445">1445: </a>EXTERN_C_BEGIN
+<a name="line1448">1448: </a><strong><font color="#4169E1"><a name="PCCreate_GAMG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  PCCreate_GAMG( <A href="../../../../../docs/manualpages/PC/PC.html#PC">PC</A> pc )</font></strong>
+<a name="line1449">1449: </a>{
+<a name="line1450">1450: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line1451">1451: </a>  PC_GAMG         *pc_gamg;
+<a name="line1452">1452: </a>  PC_MG           *mg;
+<a name="line1453">1453: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line1454">1454: </a>  static long count = 0;
+<a name="line1455">1455: </a><font color="#A020F0">#endif</font>
+
+
+<a name="line1459">1459: </a>  <font color="#B22222">/* <A href="../../../../../docs/manualpages/PC/PCGAMG.html#PCGAMG">PCGAMG</A> is an inherited class of <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A>. Initialize pc as <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A> */</font>
+<a name="line1460">1460: </a>  <A href="../../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>( pc, <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A> );   <font color="#B22222">/* calls PCCreate_MG() and MGCreate_Private() */</font>
+<a name="line1461">1461: </a>  PetscObjectChangeTypeName( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc, <A href="../../../../../docs/manualpages/PC/PCGAMG.html#PCGAMG">PCGAMG</A> );
+
+<a name="line1463">1463: </a>  <font color="#B22222">/* create a supporting struct and attach it to pc */</font>
+<a name="line1464">1464: </a>  <A href="../../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>( pc, PC_GAMG, &amp;pc_gamg );
+<a name="line1465">1465: </a>  mg = (PC_MG*)pc-&gt;data;
+<a name="line1466">1466: </a>  mg-&gt;galerkin = 2;             <font color="#B22222">/* Use Galerkin, but it is computed externally */</font>
+<a name="line1467">1467: </a>  mg-&gt;innerctx = pc_gamg;
+
+<a name="line1469">1469: </a>  pc_gamg-&gt;setup_count = 0;
+<a name="line1470">1470: </a>  <font color="#B22222">/* these should be in subctx but repartitioning needs simple arrays */</font>
+<a name="line1471">1471: </a>  pc_gamg-&gt;data_sz = 0;
+<a name="line1472">1472: </a>  pc_gamg-&gt;data = 0;
+
+<a name="line1474">1474: </a>  <font color="#B22222">/* register AMG type */</font>
+<a name="line1475">1475: </a>  <font color="#4169E1">if</font>( !GAMGList ){
+<a name="line1476">1476: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFListAdd.html#PetscFListAdd">PetscFListAdd</A>(&amp;GAMGList,GAMGGEO,<font color="#666666">"PCCreateGAMG_GEO"</font>,(void(*)(void))PCCreateGAMG_GEO);
+<a name="line1477">1477: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFListAdd.html#PetscFListAdd">PetscFListAdd</A>(&amp;GAMGList,GAMGAGG,<font color="#666666">"PCCreateGAMG_AGG"</font>,(void(*)(void))PCCreateGAMG_AGG);
+<a name="line1478">1478: </a>  }
+
+<a name="line1480">1480: </a>  <font color="#B22222">/* overwrite the pointers of <A href="../../../../../docs/manualpages/PC/PCMG.html#PCMG">PCMG</A> by the functions of base class <A href="../../../../../docs/manualpages/PC/PCGAMG.html#PCGAMG">PCGAMG</A> */</font>
+<a name="line1481">1481: </a>  pc-&gt;ops-&gt;setfromoptions = PCSetFromOptions_GAMG;
+<a name="line1482">1482: </a>  pc-&gt;ops-&gt;setup          = PCSetUp_GAMG;
+<a name="line1483">1483: </a>  pc-&gt;ops-&gt;reset          = PCReset_GAMG;
+<a name="line1484">1484: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_GAMG;
+
+<a name="line1486">1486: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1487">1487: </a>                                            <font color="#666666">"PCGAMGSetProcEqLim_C"</font>,
+<a name="line1488">1488: </a>                                            <font color="#666666">"PCGAMGSetProcEqLim_GAMG"</font>,
+<a name="line1489">1489: </a>                                            PCGAMGSetProcEqLim_GAMG);
+<a name="line1490">1490: </a>
+
+<a name="line1492">1492: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1493">1493: </a>                                            <font color="#666666">"PCGAMGSetCoarseEqLim_C"</font>,
+<a name="line1494">1494: </a>                                            <font color="#666666">"PCGAMGSetCoarseEqLim_GAMG"</font>,
+<a name="line1495">1495: </a>                                            PCGAMGSetCoarseEqLim_GAMG);
+<a name="line1496">1496: </a>
+
+<a name="line1498">1498: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1499">1499: </a>                                            <font color="#666666">"PCGAMGSetRepartitioning_C"</font>,
+<a name="line1500">1500: </a>                                            <font color="#666666">"PCGAMGSetRepartitioning_GAMG"</font>,
+<a name="line1501">1501: </a>                                            PCGAMGSetRepartitioning_GAMG);
+<a name="line1502">1502: </a>
+
+<a name="line1504">1504: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1505">1505: </a>                                            <font color="#666666">"PCGAMGSetUseASMAggs_C"</font>,
+<a name="line1506">1506: </a>                                            <font color="#666666">"PCGAMGSetUseASMAggs_GAMG"</font>,
+<a name="line1507">1507: </a>                                            PCGAMGSetUseASMAggs_GAMG);
+<a name="line1508">1508: </a>
+
+<a name="line1510">1510: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1511">1511: </a>                                            <font color="#666666">"PCGAMGSetThreshold_C"</font>,
+<a name="line1512">1512: </a>                                            <font color="#666666">"PCGAMGSetThreshold_GAMG"</font>,
+<a name="line1513">1513: </a>                                            PCGAMGSetThreshold_GAMG);
+<a name="line1514">1514: </a>
+
+<a name="line1516">1516: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunctionDynamic.html#PetscObjectComposeFunctionDynamic">PetscObjectComposeFunctionDynamic</A>( (<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)pc,
+<a name="line1517">1517: </a>                                            <font color="#666666">"PCGAMGSetType_C"</font>,
+<a name="line1518">1518: </a>                                            <font color="#666666">"PCGAMGSetType_GAMG"</font>,
+<a name="line1519">1519: </a>                                            PCGAMGSetType_GAMG);
+<a name="line1520">1520: </a>
+
+<a name="line1522">1522: </a>  pc_gamg-&gt;repart = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line1523">1523: </a>  pc_gamg-&gt;use_aggs_in_gasm = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line1524">1524: </a>  pc_gamg-&gt;min_eq_proc = 100;
+<a name="line1525">1525: </a>  pc_gamg-&gt;coarse_eq_limit = 800;
+<a name="line1526">1526: </a>  pc_gamg-&gt;threshold = 0.001;
+<a name="line1527">1527: </a>  pc_gamg-&gt;Nlevels = GAMG_MAXLEVELS;
+<a name="line1528">1528: </a>  pc_gamg-&gt;verbose = 0;
+<a name="line1529">1529: </a>  pc_gamg-&gt;emax_id = -1;
+
+<a name="line1531">1531: </a>  <font color="#B22222">/* private events */</font>
+<a name="line1532">1532: </a><font color="#A020F0">#if defined PETSC_GAMG_USE_LOG</font>
+<a name="line1533">1533: </a>  <font color="#4169E1">if</font>( count++ == 0 ) {
+<a name="line1534">1534: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"GAMG: createProl"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET1]);
+<a name="line1535">1535: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  Graph"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[GRAPH]);
+<a name="line1536">1536: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>("    G.<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>", PC_CLASSID, &amp;petsc_gamg_setup_events[GRAPH_MAT]); */</font>
+<a name="line1537">1537: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>("    G.Filter", PC_CLASSID, &amp;petsc_gamg_setup_events[GRAPH_FILTER]); */</font>
+<a name="line1538">1538: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>("    G.Square", PC_CLASSID, &amp;petsc_gamg_setup_events[GRAPH_SQR]); */</font>
+<a name="line1539">1539: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  MIS/Agg"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET4]);
+<a name="line1540">1540: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  geo: growSupp"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET5]);
+<a name="line1541">1541: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  geo: triangle"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET6]);
+<a name="line1542">1542: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"    search&amp;set"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[FIND_V]);
+<a name="line1543">1543: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  SA: col data"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET7]);
+<a name="line1544">1544: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  SA: frmProl0"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET8]);
+<a name="line1545">1545: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  SA: smooth"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET9]);
+<a name="line1546">1546: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"GAMG: partLevel"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET2]);
+<a name="line1547">1547: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  repartition"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET12]);
+<a name="line1548">1548: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  Invert-Sort"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET13]);
+<a name="line1549">1549: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  Move A"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET14]);
+<a name="line1550">1550: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"  Move P"</font>, PC_CLASSID, &amp;petsc_gamg_setup_events[SET15]);
+
+<a name="line1552">1552: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(" PL move data", PC_CLASSID, &amp;petsc_gamg_setup_events[SET13]); */</font>
+<a name="line1553">1553: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>("GAMG: fix", PC_CLASSID, &amp;petsc_gamg_setup_events[SET10]); */</font>
+<a name="line1554">1554: </a>    <font color="#B22222">/* <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>("GAMG: set levels", PC_CLASSID, &amp;petsc_gamg_setup_events[SET11]); */</font>
+<a name="line1555">1555: </a>    <font color="#B22222">/* create timer stages */</font>
+<a name="line1556">1556: </a><font color="#A020F0">#if defined GAMG_STAGES</font>
+<a name="line1557">1557: </a>    {
+<a name="line1558">1558: </a>      char str[32];
+<a name="line1559">1559: </a>      sprintf(str,<font color="#666666">"MG Level %d (finest)"</font>,0);
+<a name="line1560">1560: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscLogStageRegister.html#PetscLogStageRegister">PetscLogStageRegister</A>(str, &amp;gamg_stages[0]);
+<a name="line1561">1561: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> lidx;
+<a name="line1562">1562: </a>      <font color="#4169E1">for</font> (lidx=1;lidx&lt;9;lidx++){
+<a name="line1563">1563: </a>        sprintf(str,<font color="#666666">"MG Level %d"</font>,lidx);
+<a name="line1564">1564: </a>        <A href="../../../../../docs/manualpages/Profiling/PetscLogStageRegister.html#PetscLogStageRegister">PetscLogStageRegister</A>(str, &amp;gamg_stages[lidx]);
+<a name="line1565">1565: </a>      }
+<a name="line1566">1566: </a>    }
+<a name="line1567">1567: </a><font color="#A020F0">#endif</font>
+<a name="line1568">1568: </a>  }
+<a name="line1569">1569: </a><font color="#A020F0">#endif</font>
+<a name="line1570">1570: </a>  <font color="#B22222">/* general events */</font>
+<a name="line1571">1571: </a><font color="#A020F0">#if defined PETSC_USE_LOG</font>
+<a name="line1572">1572: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGgraph_AGG"</font>, 0, &amp;PC_GAMGGgraph_AGG);
+<a name="line1573">1573: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGgraph_GEO"</font>, PC_CLASSID, &amp;PC_GAMGGgraph_GEO);
+<a name="line1574">1574: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGcoarse_AGG"</font>, PC_CLASSID, &amp;PC_GAMGCoarsen_AGG);
+<a name="line1575">1575: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGcoarse_GEO"</font>, PC_CLASSID, &amp;PC_GAMGCoarsen_GEO);
+<a name="line1576">1576: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGProl_AGG"</font>, PC_CLASSID, &amp;PC_GAMGProlongator_AGG);
+<a name="line1577">1577: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGProl_GEO"</font>, PC_CLASSID, &amp;PC_GAMGProlongator_GEO);
+<a name="line1578">1578: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"PCGAMGPOpt_AGG"</font>, PC_CLASSID, &amp;PC_GAMGOptprol_AGG);
+<a name="line1579">1579: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"GAMGKKTProl_AGG"</font>, PC_CLASSID, &amp;PC_GAMGKKTProl_AGG);
+<a name="line1580">1580: </a><font color="#A020F0">#endif</font>
+
+<a name="line1582">1582: </a>  <font color="#B22222">/* instantiate derived type */</font>
+<a name="line1583">1583: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"GAMG options"</font>);
+<a name="line1584">1584: </a>  {
+<a name="line1585">1585: </a>    char tname[256] = GAMGAGG;
+<a name="line1586">1586: </a>    <A href="../../../../../docs/manualpages/Sys/PetscOptionsList.html#PetscOptionsList">PetscOptionsList</A>(<font color="#666666">"-pc_gamg_type"</font>,<font color="#666666">"Type of GAMG method"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCGAMGSetType.html#PCGAMGSetType">PCGAMGSetType</A>"</font>,
+<a name="line1587">1587: </a>                            GAMGList, tname, tname, <font color="#4169E1">sizeof</font>(tname), <A href="../../../../../docs/manualpages/Sys/PETSC_NULL.html#PETSC_NULL">PETSC_NULL</A> );
+<a name="line1588">1588: </a>
+<a name="line1589">1589: </a>    <A href="../../../../../docs/manualpages/PC/PCGAMGSetType.html#PCGAMGSetType">PCGAMGSetType</A>( pc, tname );
+<a name="line1590">1590: </a>  }
+<a name="line1591">1591: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+
+<a name="line1593">1593: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1594">1594: </a>}
+<a name="line1595">1595: </a>EXTERN_C_END
+</pre>
+</body>
+
+</html>
