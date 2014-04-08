@@ -1,0 +1,40 @@
+# This will configure and build silo
+# User can configure the source path by speficfying SILO_SRC_DIR
+
+IF ( NOT SILO_SRC_DIR )
+    MESSAGE(FATAL_ERROR "Please specify SILO_SRC_DIR")
+ENDIF()
+
+MESSAGE("   SILO_SRC_DIR = ${SILO_SRC_DIR}")
+FILE(MAKE_DIRECTORY "${CMAKE_INSTALL_PREFIX}/silo")
+
+SET( CONFIGURE_OPTIONS --with-hdf5=${CMAKE_INSTALL_PREFIX}/hdf5/include,${CMAKE_INSTALL_PREFIX}/hdf5/lib --disable-debug )
+IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-debug )
+ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-debug )
+ELSE()
+    MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
+ENDIF()
+IF ( ENABLE_SHARED )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-shared )
+ELSE()
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-shared )
+ENDIF()
+IF ( ENABLE_STATIC )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-static )
+ELSE()
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-static )
+ENDIF()
+
+EXTERNALPROJECT_ADD(
+    SILO
+    SOURCE_DIR          "${SILO_SRC_DIR}"
+    UPDATE_COMMAND      ""
+    CONFIGURE_COMMAND   ${SILO_SRC_DIR}/configure --prefix=${CMAKE_INSTALL_PREFIX}/silo ${CONFIGURE_OPTIONS} ${ENV_VARS}
+    BUILD_COMMAND       make install -j ${PROCS_INSTALL}
+    BUILD_IN_SOURCE     0
+    INSTALL_COMMAND     ""
+    DEPENDS             HDF5
+)
+

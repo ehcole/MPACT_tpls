@@ -1,0 +1,46 @@
+# This will configure and build hypre
+# User can configure the source path by speficfying HYPRE_SRC_DIR
+
+IF ( NOT HYPRE_SRC_DIR )
+    MESSAGE(FATAL_ERROR "Please specify HYPRE_SRC_DIR")
+ENDIF()
+
+MESSAGE("   HYPRE_SRC_DIR = ${HYPRE_SRC_DIR}")
+FILE(MAKE_DIRECTORY "${CMAKE_INSTALL_PREFIX}/hypre")
+
+SET( CONFIGURE_OPTIONS --with-blas=yes --with-lapack=yes )
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-blas-lib="blas" )
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-blas-lib-dirs=${CMAKE_INSTALL_PREFIX}/lapack )
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-lapack-libs="lapack" )
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-lapack-lib-dirs=${CMAKE_INSTALL_PREFIX}/lapack )
+IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-debug )
+ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-optimize )
+ELSE()
+    MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
+ENDIF()
+IF ( ENABLE_SHARED )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-shared )
+ELSE()
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-shared )
+ENDIF()
+IF ( ENABLE_STATIC )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-static )
+ELSE()
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-static )
+ENDIF()
+
+EXTERNALPROJECT_ADD(
+    HYPRE
+    SOURCE_DIR          "${HYPRE_SRC_DIR}"
+    UPDATE_COMMAND      ""
+    CONFIGURE_COMMAND   ./configure --prefix=${CMAKE_INSTALL_PREFIX}/hypre ${CONFIGURE_OPTIONS} ${ENV_VARS}
+    BUILD_COMMAND       make -j ${PROCS_INSTALL}
+    BUILD_IN_SOURCE     1
+    INSTALL_COMMAND     make install
+    DEPENDS             LAPACK
+)
+
+
+

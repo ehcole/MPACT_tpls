@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 2.6)
-project(LAPACK Fortran)
+project(LAPACK)
+ENABLE_LANGUAGE(Fortran)
 
 # Configure the warning and code coverage suppression file
 configure_file( 

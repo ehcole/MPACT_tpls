@@ -1,0 +1,35 @@
+# This will configure and build chaco
+# User can configure the source path by speficfying CHACO_SRC_DIR
+
+IF ( NOT CHACO_SRC_DIR )
+    MESSAGE(FATAL_ERROR "Please specify CHACO_SRC_DIR")
+ENDIF()
+
+MESSAGE("   CHACO_SRC_DIR = ${CHACO_SRC_DIR}")
+
+IF ( ENABLE_SHARED AND ENABLED_STATIC )
+    MESSAGE(FATAL_ERROR "Compiling parmetis with both static and shared libraries is not yet supported")
+ELSEIF ( ENABLE_SHARED )
+    SET( CHACO_CFLAGS ${CMAKE_C_FLAGS} -shared )
+    SET( CHACO_CXXFLAGS ${CMAKE_CXX_FLAGS} -shared )
+    SET( CHACO_FFLAGS ${CMAKE_Fortran_FLAGS} -shared )
+ELSEIF ( ENABLE_STATIC )
+    SET( CHACO_CFLAGS ${CMAKE_C_FLAGS} -static )
+    SET( CHACO_CXXFLAGS ${CMAKE_CXX_FLAGS} -static )
+    SET( CHACO_FFLAGS ${CMAKE_Fortran_FLAGS} -static )
+ENDIF()
+SET( CHACO_VARS CC=${CMAKE_C_COMPILER} CFLAGS=${PARMETIS_CFLAGS} )
+SET( CHACO_VARS ${CHACO_VARS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${PARMETIS_CXXFLAGS} )
+SET( CHACO_VARS ${CHACO_VARS} FC=${CMAKE_Fortran_COMPILER} FCFLAGS=${PARMETIS_FFLAGS} )
+SET( CHACO_VARS ${CHACO_VARS} LDFLAGS=${LDFLAGS} )
+
+EXTERNALPROJECT_ADD(
+    CHACO
+    SOURCE_DIR          "${CHACO_SRC_DIR}/code"
+    UPDATE_COMMAND      ""
+    CONFIGURE_COMMAND   ""
+    BUILD_COMMAND       make ${CHACO_VARS} AR=ar lib
+    BUILD_IN_SOURCE     1
+    INSTALL_COMMAND     ${CMAKE_COMMAND} -E copy_directory "${CHACO_SRC_DIR}/code/libchaco.a" "${CMAKE_INSTALL_PREFIX}/chaco/libchaco.a"
+)
+

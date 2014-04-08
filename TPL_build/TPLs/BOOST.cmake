@@ -1,0 +1,52 @@
+# This will configure and build boost
+# User can configure the source path by speficfying BOOST_SRC_DIR
+
+IF ( NOT BOOST_SRC_DIR )
+    MESSAGE(FATAL_ERROR "Please specify BOOST_SRC_DIR")
+ENDIF()
+
+
+MESSAGE("   BOOST_SRC_DIR = ${BOOST_SRC_DIR}")
+FILE(MAKE_DIRECTORY "${CMAKE_INSTALL_PREFIX}/boost")
+
+SET( BOOST_BUILD_DIR "${CMAKE_BINARY_DIR}/BOOST-prefix/src/BOOST-build" )
+
+IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
+    SET(CONFIGURE_OPTIONS debug )
+ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
+    SET(CONFIGURE_OPTIONS release )
+ELSE()
+    MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
+ENDIF()
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --build-dir="${BOOST_BUILD_DIR}" )
+IF ( ENABLE_SHARED AND ENABLED_STATIC )
+    MESSAGE(FATAL_ERROR "Compiling parmetis with both static and shared libraries is not yet supported")
+ELSEIF ( ENABLE_SHARED )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} link=shared )
+ELSEIF ( ENABLE_STATIC )
+    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} link=static )
+ENDIF()
+
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --without-mpi --without-python )
+
+IF( USING_GCC )
+    SET( TOOLSET gcc )
+ELSEIF( MSVC OR MSVC_IDE OR MSVC60 OR MSVC70 OR MSVC71 OR MSVC80 OR CMAKE_COMPILER_2005 OR MSVC90 OR MSVC10 )
+    SET( TOOLSET msvc )
+ELSEIF( (${CMAKE_C_COMPILER_ID} MATCHES "Intel") OR (${CMAKE_CXX_COMPILER_ID} MATCHES "Intel") ) 
+    SET( TOOLSET intel-linux )
+ELSE()
+    MESSAGE(WARNING "BOOST toolset not set")
+ENDIF()
+
+
+EXTERNALPROJECT_ADD(
+    BOOST
+    SOURCE_DIR          "${BOOST_SRC_DIR}"
+    UPDATE_COMMAND      ""
+    CONFIGURE_COMMAND   ./bootstrap.sh --with-toolset=${TOOLSET}
+    BUILD_COMMAND       ./b2 install --prefix="${CMAKE_INSTALL_PREFIX}/boost" ${CONFIGURE_OPTIONS} -j ${PROCS_INSTALL}
+    BUILD_IN_SOURCE     1
+    INSTALL_COMMAND     ""
+)
+
