@@ -18,3 +18,8 @@ EXTERNALPROJECT_ADD(
     BUILD_COMMAND       make install -j ${PROCS_INSTALL}
 )
 
+SET( BLAS_DIR   "${CMAKE_INSTALL_PREFIX}/lapack" )
+SET( LAPACK_DIR "${CMAKE_INSTALL_PREFIX}/lapack" )
+SET( BLAS_LIBS   "blas" )
+SET( LAPACK_LIBS "lapack" )
+
