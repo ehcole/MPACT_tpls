@@ -10,10 +10,12 @@ MESSAGE("   HDF5_SRC_DIR = ${HDF5_SRC_DIR}")
 FILE(MAKE_DIRECTORY "${CMAKE_INSTALL_PREFIX}/hdf5")
 
 
+SET( CONFIGURE_OPTIONS --enable-cxx --enable-fortran --disable-parallel --enable-unsupported )
+SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-zlib='${ZLIB_DIR}/include','${ZLIB_DIR}/lib' )
 IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
-    SET(CONFIGURE_OPTIONS --disable-production --enable-debug )
+    SET(CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-production --enable-debug )
 ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
-    SET(CONFIGURE_OPTIONS --enable-production --disable-debug )
+    SET(CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-production --disable-debug )
 ELSE()
     MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
 ENDIF()
@@ -32,9 +34,10 @@ EXTERNALPROJECT_ADD(
     HDF5
     SOURCE_DIR          "${HDF5_SRC_DIR}"
     UPDATE_COMMAND      ""
-    CONFIGURE_COMMAND   ${HDF5_SRC_DIR}/configure --prefix=${CMAKE_INSTALL_PREFIX}/hdf5 ${CONFIGURE_OPTIONS}  ${ENV_VARS}
+    CONFIGURE_COMMAND   ${HDF5_SRC_DIR}/configure --prefix=${CMAKE_INSTALL_PREFIX}/hdf5 ${CONFIGURE_OPTIONS} ${ENV_VARS}
     BUILD_COMMAND       make install -j ${PROCS_INSTALL}
     BUILD_IN_SOURCE     0
     INSTALL_COMMAND     ""
+    DEPENDS             ZLIB
 )
 
