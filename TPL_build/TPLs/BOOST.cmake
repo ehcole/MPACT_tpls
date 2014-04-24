@@ -62,11 +62,13 @@ EXTERNALPROJECT_ADD(
     DOWNLOAD_DIR        "${BOOST_CMAKE_DOWNLOAD_DIR}"
     SOURCE_DIR          "${BOOST_CMAKE_SOURCE_DIR}"
     UPDATE_COMMAND      ""
-    CONFIGURE_COMMAND   ./bootstrap.sh --with-toolset=${TOOLSET} ${CONFIGURE_OPTIONS} 
+    #CONFIGURE_COMMAND   ./bootstrap.sh --with-toolset=${TOOLSET} ${CONFIGURE_OPTIONS} 
+    CONFIGURE_COMMAND   ./bootstrap.sh --with-toolset=${TOOLSET} ${CONFIGURE_OPTIONS} --prefix="${CMAKE_INSTALL_PREFIX}/boost" 
     #BUILD_COMMAND       ./b2 install --prefix="${CMAKE_INSTALL_PREFIX}/boost" ${BUILD_OPTIONS} -j ${PROCS_INSTALL}
-    BUILD_COMMAND       ./b2 ${BUILD_OPTIONS} -j ${PROCS_INSTALL}
+    BUILD_COMMAND       ./b2 install ${BUILD_OPTIONS} -j ${PROCS_INSTALL}
     BUILD_IN_SOURCE     1
     INSTALL_COMMAND     ""
     #DEPENDS ZLIB
 )
+
 
