@@ -1,3 +1,5 @@
+INCLUDE( ADD_TPL.cmake )
+
 # Macro to identify the compiler
 MACRO( IDENTIFY_COMPILER )
     # SET the C/C++ compiler
@@ -44,6 +46,36 @@ ENDMACRO()
 
 # Macro to set the compile/link flags
 MACRO( SET_COMPILE_FLAGS )
+    # Set the default flags for each build type
+    IF ( USING_MICROSOFT )
+        SET(CMAKE_C_FLAGS_DEBUG       "-D_DEBUG /DEBUG /Od /EHsc /MDd /Zi" )
+        SET(CMAKE_C_FLAGS_RELEASE     "/O3 /EHsc /MD"                      )
+        SET(CMAKE_CXX_FLAGS_DEBUG     "-D_DEBUG /DEBUG /Od /EHsc /MDd /Zi" )
+        SET(CMAKE_CXX_FLAGS_RELEASE   "/O3 /EHsc /MD"                      )
+        SET(CMAKE_Fortran_FLAGS_DEBUG ""                                   )
+        SET(CMAKE_Fortran_FLAGS_RELEASE ""                                 )
+    ELSE()
+        SET(CMAKE_C_FLAGS_DEBUG       "-g -D_DEBUG -O0" )
+        SET(CMAKE_C_FLAGS_RELEASE     "-O3"             )
+        SET(CMAKE_CXX_FLAGS_DEBUG     "-g -D_DEBUG -O0" )
+        SET(CMAKE_CXX_FLAGS_RELEASE   "-O3"             )
+        SET(CMAKE_Fortran_FLAGS_DEBUG "-g -O0"          )
+        SET(CMAKE_Fortran_FLAGS_RELEASE "-O3"           )
+    ENDIF()
+    # Set the compiler flags to use
+    IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" OR ${CMAKE_BUILD_TYPE} STREQUAL "DEBUG")
+        SET(CMAKE_C_FLAGS       ${CMAKE_C_FLAGS_DEBUG}       )
+        SET(CMAKE_CXX_FLAGS     ${CMAKE_CXX_FLAGS_DEBUG}     )
+        SET(CMAKE_Fortran_FLAGS ${CMAKE_Fortran_FLAGS_DEBUG} )
+    ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" OR ${CMAKE_BUILD_TYPE} STREQUAL "RELEASE")
+        SET(CMAKE_C_FLAGS       ${CMAKE_C_FLAGS_RELEASE}       )
+        SET(CMAKE_CXX_FLAGS     ${CMAKE_CXX_FLAGS_RELEASE}     )
+        SET(CMAKE_Fortran_FLAGS ${CMAKE_Fortran_FLAGS_RELEASE} )
+    ELSE()
+        MESSAGE(FATAL_ERROR "Unknown value for CMAKE_BUILD_TYPE = ${CMAKE_BUILD_TYPE}")
+    ENDIF()
+
+    # Add user flags
     SET( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CFLAGS}" )
     SET( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXXFLAGS}" )
     SET( CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${FFLAGS}" )
@@ -69,11 +101,49 @@ MACRO( SET_COMPILE_FLAGS )
     ENDIF()
     SET( ENV_VARS CC=${CMAKE_C_COMPILER} CFLAGS=${CMAKE_C_FLAGS} )
     SET( ENV_VARS ${ENV_VARS} CXX=${CMAKE_CXX_COMPILER} CXXFLAGS=${CMAKE_CXX_FLAGS} )
+    SET( ENV_VARS ${ENV_VARS} F77=${CMAKE_Fortran_COMPILER} FFLAGS=${CMAKE_Fortran_FLAGS} )
     SET( ENV_VARS ${ENV_VARS} FC=${CMAKE_Fortran_COMPILER} FCFLAGS=${CMAKE_Fortran_FLAGS} )
     SET( ENV_VARS ${ENV_VARS} LDFLAGS=${ENV_LDFLAGS} )
     SET( CMAKE_ARGS "${CMAKE_ARGS};-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER};-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}" )
     SET( CMAKE_ARGS "${CMAKE_ARGS};-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER};-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS};" )
     SET( CMAKE_ARGS "${CMAKE_ARGS};-DCMAKE_Fortran_COMPILER=${CMAKE_Fortran_COMPILER};-DCMAKE_Fortran_FLAGS=${CMAKE_Fortran_FLAGS};" )
     SET( CMAKE_ARGS "${CMAKE_ARGS};-DCMAKE_SHARED_LINKER_FLAGS=${CMAKE_SHARED_LINKER_FLAGS}" )
+    # Write variables to cmake file
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "\n# Set the compilers and compile flags\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE})\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(ENABLE_STATIC ${ENABLE_STATIC})\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(ENABLE_SHARED ${ENABLE_SHARED})\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(BUILD_STATIC_LIBS ${ENABLE_STATIC})\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(BUILD_SHARED_LIBS ${ENABLE_SHARED})\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_C_COMPILER \"${CMAKE_C_COMPILER}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_CXX_COMPILER \"${CMAKE_CXX_COMPILER}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_Fortran_COMPILER \"${CMAKE_Fortran_COMPILER}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_C_FLAGS \"${CMAKE_C_FLAGS}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_CXX_FLAGS \"${CMAKE_CXX_FLAGS}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_Fortran_FLAGS \"${CMAKE_Fortran_FLAGS}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_STATIC_LINKER_FLAGS \"${CMAKE_STATIC_LINKER_FLAGS}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(CMAKE_SHARED_LINKER_FLAGS \"${CMAKE_SHARED_LINKER_FLAGS}\")\n" )
+    FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(LDFLAGS \"${LDFLAGS}\")\n" )
 ENDMACRO()
+
+
+# Macro to set the compile/link flags
+MACRO( SET_DEFAULT_TPL TPL VAR VAL )
+    IF ( (NOT ${TPL}_URL) AND (NOT ${TPL}_SRC_DIR) AND (NOT ${TPL}_INSTALL_DIR) )
+        SET( ${TPL}_${VAR} "${VAL}" )
+    ENDIF()
+ENDMACRO()
+
+
+# Macro to verify that a path has been set
+MACRO( VERIFY_PATH PATH_NAME )
+    IF ("${PATH_NAME}" STREQUAL "")
+        MESSAGE ( FATAL_ERROR "Path is not set: ${PATH_NAME}" )
+    ENDIF()
+    IF ( NOT EXISTS ${PATH_NAME} )
+        MESSAGE ( FATAL_ERROR "Path does not exist: ${PATH_NAME}" )
+    ENDIF()
+ENDMACRO()
+
+
 
