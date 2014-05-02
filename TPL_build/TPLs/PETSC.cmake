@@ -35,10 +35,10 @@ FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(PETSC_INSTALL_DIR \"${PET
 # Configure petsc
 IF ( CMAKE_BUILD_PETSC )
     IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
-        SET( PETSC_ARCH linux-gnu-opt )
+        SET( PETSC_ARCH linux-gnu-dbg )
         SET( BUILD_OPTS --with-debugging=1 )
     ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
-        SET( PETSC_ARCH linux-gnu-dbg )
+        SET( PETSC_ARCH linux-gnu-opt )
         SET( BUILD_OPTS --with-debugging=0 )
     ELSE()
         MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
