@@ -142,6 +142,7 @@ how that that TPL is built.
                        It is the responsibility of the user to ensure the TPL was installed
                        properly with the correct complier and compiler options to be 
                        compatible with the other software that will be installed.  
+    TPL_TEST         - Run the TPL tests as part of the build (if they exist).  Default is false. 
 
 
 Special TPL FLAGS:
@@ -179,9 +180,6 @@ Additionally all TPLs are setup to perform out of source builds.  If a given TPL
 support out of source builds (e.g. boost), then the source directory will be copied to a
 temporary directory for building.  This insures that we can perform multiple builds in 
 parallel (e.g. Debug and Release) without corrupting the build or src trees.  
-
-
-
 
 
 

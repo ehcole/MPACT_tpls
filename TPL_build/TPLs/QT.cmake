@@ -104,9 +104,9 @@ IF ( CMAKE_BUILD_QT )
         LOG                 0
     )
     ADD_TPL_SAVE_LOGS( QT )
+    ADD_TPL_CLEAN( QT )
 ELSE()
     ADD_TPL_EMPTY( QT )
 ENDIF()
-ADD_TPL_CLEAN( QT )
 
 

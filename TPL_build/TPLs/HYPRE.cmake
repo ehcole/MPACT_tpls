@@ -87,9 +87,9 @@ IF ( CMAKE_BUILD_HYPRE )
         LOG                 0
     )
     ADD_TPL_SAVE_LOGS( HYPRE )
+    ADD_TPL_CLEAN( HYPRE )
 ELSE()
     ADD_TPL_EMPTY( HYPRE )
 ENDIF()
-ADD_TPL_CLEAN( HYPRE )
 
 
