@@ -49,7 +49,7 @@ echo "Changed directory to '$PWD'"
 
 echo
 echo "***"
-echo "*** Doing configure of the CMake ExternalProject TPL build  ..."
+echo "*** A) Doing configure of the CMake ExternalProject TPL build  ..."
 echo "***"
 echo
 
@@ -68,14 +68,14 @@ cmake \
   -D LDFLAGS="" \
   -D ENABLE_STATIC:BOOL=ON \
   -D ENABLE_SHARED:BOOL=OFF \
-  -D NAME_LEGACY:BOOL=ON \
   -D CMAKE_INSTALL_PREFIX:PATH=${VERA_TPL_INSTALL_DIR} \
-  -D PROCS_INSTALL=16 \
+  -D PROCS_INSTALL=4 \
+  ${EXTRA_ARGS} \
   ${VERA_TPL_BUILD_DIR}
 
 echo
 echo "***"
-echo "*** Doing build and install using the CMake ExternalProject TPL build  ..."
+echo "*** B) Doing build and install using the CMake ExternalProject TPL build  ..."
 echo "***"
 echo
 
