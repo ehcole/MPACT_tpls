@@ -43,45 +43,51 @@ IF ( CMAKE_BUILD_PETSC )
     ELSE()
         MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
     ENDIF()
-    SET( CONFIGURE_OPTIONS --PETSC_ARCH=${PETSC_ARCH} --PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --prefix=${CMAKE_INSTALL_PREFIX}/common/petsc-${PETSC_VERSION} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-x=0 )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-pthread=0 )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/common/hypre-${HYPRE_VERSION} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-batch=0 )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-openmp )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} ${BUILD_OPTS} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-blas-lib=${BLAS_LIBS} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-lapack-lib=${LAPACK_LIBS} )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} "--CFLAGS=-fPIC -fopenmp ${CMAKE_C_FLAGS}"  )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} "--CXXFLAGS=-fPIC -fopenmp ${CMAKE_CXX_FLAGS}"  )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} "--FFLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}" )
+    SET( CONFIGURE_OPTIONS
+      --PETSC_ARCH=${PETSC_ARCH} --PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR}
+      --prefix=${CMAKE_INSTALL_PREFIX}/common/petsc-${PETSC_VERSION}
+      --with-x=0
+      --with-pthread=0
+      --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/common/hypre-${HYPRE_VERSION}
+      --with-batch=0
+      --with-openmp
+      ${BUILD_OPTS}
+      --with-blas-lib=${BLAS_LIBS}
+      --with-lapack-lib=${LAPACK_LIBS}
+      "--CFLAGS=-fPIC -fopenmp ${CMAKE_C_FLAGS}" 
+      "--CXXFLAGS=-fPIC -fopenmp ${CMAKE_CXX_FLAGS}" 
+      "--FFLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
+      )
     IF ( ENABLE_SHARED AND ENABLE_STATIC )
         MESSAGE(FATAL_ERROR "Compiling petsc with both static and shared libraries is not yet supported")
     ELSEIF ( ENABLE_SHARED )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-shared-libraries )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --LDFLAGS=${CMAKE_SHARED_LINKER_FLAGS} )
+      LIST(APPEND CONFIGURE_OPTIONS
+        --with-shared-libraries --LDFLAGS=${CMAKE_SHARED_LINKER_FLAGS} )
     ELSEIF ( ENABLE_STATIC )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-known-mpi-shared=0)
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-shared-libraries=0)
+      LIST(APPEND CONFIGURE_OPTIONS
+        --with-known-mpi-shared=0 --with-shared-libraries=0)
     ENDIF()
+    LIST(APPEND CONFIGURE_OPTIONS --with-dynamic-loading=0)
 ENDIF()
 
 # Build petsc
-IF ( CMAKE_BUILD_PETSC )
+IF (CMAKE_BUILD_PETSC)
+    PRINT_VAR(CONFIGURE_OPTIONS)
     EXTERNALPROJECT_ADD( 
         PETSC
         URL                 "${PETSC_CMAKE_URL}"
         DOWNLOAD_DIR        "${PETSC_CMAKE_DOWNLOAD_DIR}"
         SOURCE_DIR          "${PETSC_CMAKE_SOURCE_DIR}"
         UPDATE_COMMAND      ""
-        CONFIGURE_COMMAND   ${PETSC_BUILD_DIR}/configure --prefix=${CMAKE_INSTALL_PREFIX}/common/petsc-${PETSC_VERSION} ${CONFIGURE_OPTIONS}
-        BUILD_COMMAND       make -j ${PROCS_INSTALL} PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR} PETSC_ARCH=${PETSC_ARCH} VERBOSE=1
+        CONFIGURE_COMMAND   ${PETSC_BUILD_DIR}/configure
+          --prefix=${CMAKE_INSTALL_PREFIX}/common/petsc-${PETSC_VERSION} ${CONFIGURE_OPTIONS}
+        BUILD_COMMAND       make -j ${PROCS_INSTALL} PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR}
+          PETSC_ARCH=${PETSC_ARCH} VERBOSE=1
         BUILD_IN_SOURCE     1
         INSTALL_COMMAND     make PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR} PETSC_ARCH=${PETSC_ARCH} install
         DEPENDS             LAPACK  HYPRE
         LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1   LOG_TEST 1   LOG_INSTALL 1
-    )
+      )
     ADD_TPL_SAVE_LOGS( PETSC )
     ADD_TPL_CLEAN( PETSC )
 ELSE()
