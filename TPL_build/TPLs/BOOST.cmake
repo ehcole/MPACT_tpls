@@ -88,6 +88,7 @@ IF ( CMAKE_BUILD_BOOST )
             LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1   LOG_TEST 1   LOG_INSTALL 1
         )
     ELSE()
+        PRINT_VAR(CONFIGURE_OPTIONS)
         EXTERNALPROJECT_ADD(
             BOOST
             URL                 "${BOOST_CMAKE_URL}"
