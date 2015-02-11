@@ -9,6 +9,12 @@
 # The env vars LOADED_TRIBITS_DEV_ENV and VERA_TPL_INSTALL_DIR must be set
 # before calling this script!
 #
+# By default this script blows away the TPL_build dir in the current scratch
+# directory.  If you need to reinstall only one TPL, you can run with:
+#
+#   env VERA_TPL_LEAVE_BUILD_DIR=1 \
+#     ${VERA_BASE_DIR}/vera_tpls/TPL_build/install_tpls.sh [other options]
+#
 
 EXTRA_ARGS=$@
 
@@ -35,14 +41,23 @@ echo
 echo "VERA TPL build dir: '$VERA_TPL_BUILD_DIR'"
 
 if [ -e $PWD/TPL_build ] ; then
-  echo
-  echo "Removing existing TPL_build directory ..."
-  rm -rf $PWD/TPL_build
+  if [ "$VERA_TPL_LEAVE_BUILD_DIR" == "" ] ; then
+    echo
+    echo "Removing existing TPL_build directory ..."
+    rm -rf $PWD/TPL_build
+  else
+    echo "Leaving the build dir TPL_build alone!"
+  fi
 fi
-
-echo
-echo "Creating new TPL_build directory ..."
-mkdir TPL_build
+  
+if [ -e $PWD/TPL_build ] ; then
+  echo
+  echo "TPL_build directory already exists!"
+else
+  echo
+  echo "Creating new TPL_build directory ..."
+  mkdir TPL_build
+fi
 cd TPL_build
 
 echo "Changed directory to '$PWD'"
