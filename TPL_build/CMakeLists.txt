@@ -7,6 +7,17 @@ MESSAGE("Configuring TPLS")
 MESSAGE("================")
 
 
+SET(ENABLE_SHARED  ON
+  CACHE BOOL
+  "If set to ON to build shared libs and OFF to build static libs")
+
+IF (ENABLE_SHARED)
+  SET(ENABLE_STATIC  OFF)
+ELSE()
+  SET(ENABLE_STATIC  ON)
+ENDIF()
+
+
 # Check if we are asking for help
 IF ( HELP )
   UNSET( HELP CACHE )
