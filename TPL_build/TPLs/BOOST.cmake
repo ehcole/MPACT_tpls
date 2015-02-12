@@ -69,6 +69,13 @@ IF ( CMAKE_BUILD_BOOST )
     #SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --without-mpi --without-python )
 ENDIF()
 
+IF (ENABLE_SHARED)
+  SET(BOOST_REMOVE_SHARED_LIBS_CMND echo "nothing")
+ELSE()
+  SET(BOOST_REMOVE_SHARED_LIBS_CMND
+    "${PROJECT_SOURCE_DIR}/remove_shared_libs.sh" "${BOOST_INSTALL_DIR}")
+ENDIF()
+PRINT_VAR(BOOST_REMOVE_SHARED_LIBS_CMND)
 
 # Build boost
 IF ( CMAKE_BUILD_BOOST ) 
@@ -82,8 +89,9 @@ IF ( CMAKE_BUILD_BOOST )
             CONFIGURE_COMMAND   ls  "${BOOST_CMAKE_SOURCE_DIR}"
             BUILD_COMMAND       ""
             BUILD_IN_SOURCE     0
-            INSTALL_COMMAND     ${CMAKE_COMMAND} -E copy_directory "${BOOST_CMAKE_SOURCE_DIR}/include"
-                                "${BOOST_CMAKE_INSTALL_DIR}/include"
+            INSTALL_COMMAND     ${CMAKE_COMMAND} -E copy_directory
+               "${BOOST_CMAKE_SOURCE_DIR}/include"
+               "${BOOST_CMAKE_INSTALL_DIR}/include"
             WORKING_DIRECTORY   "${BOOST_CMAKE_SOURCE_DIR}"
             LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1   LOG_TEST 1   LOG_INSTALL 1
         )
@@ -98,7 +106,7 @@ IF ( CMAKE_BUILD_BOOST )
             CONFIGURE_COMMAND   ./bootstrap.sh --with-toolset=${TOOLSET} ${CONFIGURE_OPTIONS} --prefix=${BOOST_CMAKE_INSTALL_DIR}
             BUILD_COMMAND       ./b2 install ${BUILD_OPTIONS} -j ${PROCS_INSTALL}
             BUILD_IN_SOURCE     1
-            INSTALL_COMMAND     ""
+            INSTALL_COMMAND     ${BOOST_REMOVE_SHARED_LIBS_CMND}
             #DEPENDS ZLIB
             LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1   LOG_TEST 1   LOG_INSTALL 1
         )
