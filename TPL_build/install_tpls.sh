@@ -80,7 +80,7 @@ cmake \
   -D FFLAGS="-fPIC -O3" \
   -D CFLAGS="-fPIC -O3" \
   -D CXXFLAGS="-fPIC -O3" \
-  -D LDFLAGS="-ldl" \
+  -D LDFLAGS="" \
   -D ENABLE_SHARED=ON \
   -D CMAKE_INSTALL_PREFIX=${VERA_TPL_INSTALL_DIR} \
   -D PROCS_INSTALL=4 \

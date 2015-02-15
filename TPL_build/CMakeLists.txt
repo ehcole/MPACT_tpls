@@ -66,7 +66,7 @@ SET( LAPACK_VERSION  3.3.1   )
 SET( MOAB_VERSION    4.5.0   )
 SET( PETSC_VERSION   3.3-p4  )
 SET( QT_VERSION      4.8.2   )
-SET( SILO_VERSION    4.8     )
+SET( SILO_VERSION    4.10.2  )
 SET( ZLIB_VERSION    1.2.7   )
 
 # Create a cmake file that can be included from other projects
