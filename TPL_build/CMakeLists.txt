@@ -60,13 +60,13 @@ ENDIF()
 MESSAGE("Installing TPLs in: ${CMAKE_INSTALL_PREFIX}")
 
 SET( BOOST_VERSION   1.49.0  )
-SET( HDF5_VERSION    1.8.14  )
+SET( HDF5_VERSION    1.8.10  )
 SET( HYPRE_VERSION   2.8.0b  )
 SET( LAPACK_VERSION  3.3.1   )
 SET( MOAB_VERSION    4.5.0   )
 SET( PETSC_VERSION   3.3-p4  )
 SET( QT_VERSION      4.8.2   )
-SET( SILO_VERSION    4.8     )
+SET( SILO_VERSION    4.10.2  )
 SET( ZLIB_VERSION    1.2.7   )
 
 # Create a cmake file that can be included from other projects

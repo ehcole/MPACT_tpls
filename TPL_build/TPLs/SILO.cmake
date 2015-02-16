@@ -36,24 +36,14 @@ FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(SILO_INSTALL_DIR \"${SILO
 # Configure silo
 IF ( CMAKE_BUILD_SILO )
     SET( CONFIGURE_OPTIONS )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --prefix=${CMAKE_INSTALL_PREFIX}/silo-${SILO_VERSION}  )
-    SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --with-hdf5=${HDF5_INSTALL_DIR}/include,${HDF5_INSTALL_DIR}/lib )
-    IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-debug )
-    ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-debug )
+    LIST(APPEND CONFIGURE_OPTIONS --prefix=${CMAKE_INSTALL_PREFIX}/silo-${SILO_VERSION}  )
+    LIST(APPEND CONFIGURE_OPTIONS --with-hdf5=${HDF5_INSTALL_DIR}/include,${HDF5_INSTALL_DIR}/lib )
+    IF (ENABLE_SHARED)
+        LIST(APPEND CONFIGURE_OPTIONS --disable-static --enable-shared)
+        #LIST(APPEND CONFIGURE_OPTIONS --enable-static=no --enable-shared=yes)
     ELSE()
-        MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
-    ENDIF()
-    IF ( ENABLE_SHARED )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-shared )
-    ELSE()
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-shared )
-    ENDIF()
-    IF ( ENABLE_STATIC )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-static )
-    ELSE()
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --disable-static )
+        LIST(APPEND CONFIGURE_OPTIONS --enable-static --disable-shared)
+        #LIST(APPEND CONFIGURE_OPTIONS --enable-static=yes --enable-shared=no)
     ENDIF()
 ENDIF()
 
@@ -67,9 +57,9 @@ IF ( CMAKE_BUILD_SILO )
         SOURCE_DIR          "${SILO_CMAKE_SOURCE_DIR}"
         UPDATE_COMMAND      ""
         CONFIGURE_COMMAND   "${SILO_CMAKE_SOURCE_DIR}/configure" ${CONFIGURE_OPTIONS} ${ENV_SERIAL_VARS}
-        BUILD_COMMAND       make install -j ${PROCS_INSTALL} VERBOSE=1
+        BUILD_COMMAND       make -j ${PROCS_INSTALL} VERBOSE=1
         BUILD_IN_SOURCE     0
-        INSTALL_COMMAND     ""
+        INSTALL_COMMAND     make install -j ${PROCS_INSTALL} VERBOSE=1
         DEPENDS             HDF5
         LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1   LOG_TEST 1   LOG_INSTALL 1
     )

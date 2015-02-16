@@ -53,24 +53,11 @@ IF ( CMAKE_BUILD_HDF5 )
         MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
     ENDIF()
     IF ( ENABLE_SHARED )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-shared )
+        LIST(APPEND CONFIGURE_OPTIONS --enable-shared=yes --enable-static=no )
     ELSE()
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} )
-    ENDIF()
-    IF ( ENABLE_STATIC )
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-static --enable-shared )
-    ELSE()
-        SET( CONFIGURE_OPTIONS ${CONFIGURE_OPTIONS} --enable-static )
+        LIST(APPEND CONFIGURE_OPTIONS --enable-shared=no --enable-static=yes )
     ENDIF()
 ENDIF()
-
-IF (ENABLE_SHARED)
-  SET(HDF5_INSTALL_CMND make install)
-ELSE()
-  SET(HDF5_INSTALL_CMND
-    "${PROJECT_SOURCE_DIR}/install_and_remove_shared_libs.sh" "${HDF5_INSTALL_DIR}")
-ENDIF()
-PRINT_VAR(HDF5_INSTALL_CMND)
 
 # Build hdf5
 IF ( CMAKE_BUILD_HDF5 )
@@ -83,10 +70,9 @@ IF ( CMAKE_BUILD_HDF5 )
         CONFIGURE_COMMAND   ${HDF5_CMAKE_SOURCE_DIR}/configure
           --prefix=${CMAKE_INSTALL_PREFIX}/hdf5-${HDF5_VERSION}
           ${CONFIGURE_OPTIONS} ${ENV_SERIAL_VARS}
-        BUILD_COMMAND       make install -j ${PROCS_INSTALL} VERBOSE=1
-        INSTALL_COMMAND     ${HDF5_INSTALL_CMND}
+        BUILD_COMMAND       make -j ${PROCS_INSTALL} VERBOSE=1
         BUILD_IN_SOURCE     0
-        INSTALL_COMMAND     ""
+        INSTALL_COMMAND    make install -j ${PROCS_INSTALL} VERBOSE=1
         DEPENDS             ZLIB
         LOG_DOWNLOAD 1   LOG_UPDATE 1   LOG_CONFIGURE 1   LOG_BUILD 1
         LOG_TEST 1   LOG_INSTALL 1
