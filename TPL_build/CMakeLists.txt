@@ -113,14 +113,24 @@ SET_DEFAULT_TPL( QT     SRC_DIR  ${TPL_SRC_DIR}/qt/${QT_VERSION}         )
 SET_DEFAULT_TPL( SILO   SRC_DIR  ${TPL_SRC_DIR}/silo/${SILO_VERSION}     )
 SET_DEFAULT_TPL( ZLIB   SRC_DIR  ${TPL_SRC_DIR}/zlib/${ZLIB_VERSION}     )
 
-
-# Configure TPLs
+MESSAGE("")
+MESSAGE("Marking TPLs specified through 'TPL_LIST' to build from source!")
+# Mark the TPLs to be built from source
 FOREACH( TPL ${TPL_LIST} )
+  MESSAGE("-- " "Building the TPL '${TPL}' from source!")
+  SET(CMAKE_BUILD_${TPL}  TRUE)
+ENDFOREACH()
+
+MESSAGE("")
+MESSAGE("Process all TPL *.cmake files")
+FOREACH( TPL ${TPL_LIST_FULL_SORTED} )
   FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "\n")
+  MESSAGE("")
   MESSAGE_TPL("Configuring ${TPL}")
   INCLUDE(TPLs/${TPL}.cmake)
 ENDFOREACH()
 FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "\n")
+MESSAGE("")
 
 
 # Add distclean
