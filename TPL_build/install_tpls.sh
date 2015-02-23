@@ -29,11 +29,13 @@ if [ "$LOADED_TRIBITS_DEV_ENV" == "" ] ; then
   echo "May be you did not source load_dev_env.[sh,csh]?"
   exit 1
 fi
+echo "LOADED_TRIBITS_DEV_ENV = $LOADED_TRIBITS_DEV_ENV"
 
 if [ "$VERA_TPL_INSTALL_DIR" == "" ] ; then
   echo "Error, VERA_TPL_INSTALL_DIR is not set!"
   exit 1
 fi
+echo "VERA_TPL_INSTALL_DIR = $VERA_TPL_INSTALL_DIR"
 
 _SCRIPT_DIR=`echo $0 | sed "s/\(.*\)\/.*install_tpls.sh/\1/g"`
 VERA_TPL_BUILD_DIR=$(readlink -f $_SCRIPT_DIR)
