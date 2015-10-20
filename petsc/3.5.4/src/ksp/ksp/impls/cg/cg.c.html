@@ -1,0 +1,469 @@
+<center><a href="cg.c">Actual source code: cg.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ksp/ksp/impls/cg/cg.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:32:37+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/ksp/ksp/impls/cg/cg.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">    This file implements the conjugate gradient method in PETSc as part of</font>
+<a name="line4">  4: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>. You can use this as a starting point for implementing your own</font>
+<a name="line5">  5: </a><font color="#B22222">    Krylov method that is not provided with PETSc.</font>
+
+<a name="line7">  7: </a><font color="#B22222">    The following basic routines are required for each Krylov method.</font>
+<a name="line8">  8: </a><font color="#B22222">        KSPCreate_XXX()          - Creates the Krylov context</font>
+<a name="line9">  9: </a><font color="#B22222">        KSPSetFromOptions_XXX()  - Sets runtime options</font>
+<a name="line10"> 10: </a><font color="#B22222">        KSPSolve_XXX()           - Runs the Krylov method</font>
+<a name="line11"> 11: </a><font color="#B22222">        KSPDestroy_XXX()         - Destroys the Krylov context, freeing all</font>
+<a name="line12"> 12: </a><font color="#B22222">                                   memory it needed</font>
+<a name="line13"> 13: </a><font color="#B22222">    Here the "_XXX" denotes a particular implementation, in this case</font>
+<a name="line14"> 14: </a><font color="#B22222">    we use _CG (e.g. KSPCreate_CG, KSPDestroy_CG). These routines are</font>
+<a name="line15"> 15: </a><font color="#B22222">    are actually called vai the common user interface routines</font>
+<a name="line16"> 16: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(), <A href="../../../../../docs/manualpages/KSP/KSPSetFromOptions.html#KSPSetFromOptions">KSPSetFromOptions</A>(), <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>(), and <A href="../../../../../docs/manualpages/KSP/KSPDestroy.html#KSPDestroy">KSPDestroy</A>() so the</font>
+<a name="line17"> 17: </a><font color="#B22222">    application code interface remains identical for all preconditioners.</font>
+
+<a name="line19"> 19: </a><font color="#B22222">    Other basic routines for the <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> objects include</font>
+<a name="line20"> 20: </a><font color="#B22222">        KSPSetUp_XXX()</font>
+<a name="line21"> 21: </a><font color="#B22222">        KSPView_XXX()             - Prints details of solver being used.</font>
+
+<a name="line23"> 23: </a><font color="#B22222">    Detailed notes:</font>
+<a name="line24"> 24: </a><font color="#B22222">    By default, this code implements the CG (Conjugate Gradient) method,</font>
+<a name="line25"> 25: </a><font color="#B22222">    which is valid for real symmetric (and complex Hermitian) positive</font>
+<a name="line26"> 26: </a><font color="#B22222">    definite matrices. Note that for the complex Hermitian case, the</font>
+<a name="line27"> 27: </a><font color="#B22222">    <A href="../../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>() arguments within the code MUST remain in the order given</font>
+<a name="line28"> 28: </a><font color="#B22222">    for correct computation of inner products.</font>
+
+<a name="line30"> 30: </a><font color="#B22222">    Reference: Hestenes and Steifel, 1952.</font>
+
+<a name="line32"> 32: </a><font color="#B22222">    By switching to the indefinite vector inner product, <A href="../../../../../docs/manualpages/Vec/VecTDot.html#VecTDot">VecTDot</A>(), the</font>
+<a name="line33"> 33: </a><font color="#B22222">    same code is used for the complex symmetric case as well.  The user</font>
+<a name="line34"> 34: </a><font color="#B22222">    must call <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>(ksp,KSP_CG_SYMMETRIC) or use the option</font>
+<a name="line35"> 35: </a><font color="#B22222">    -ksp_cg_type symmetric to invoke this variant for the complex case.</font>
+<a name="line36"> 36: </a><font color="#B22222">    Note, however, that the complex symmetric code is NOT valid for</font>
+<a name="line37"> 37: </a><font color="#B22222">    all such matrices ... and thus we don't recommend using this method.</font>
+<a name="line38"> 38: </a><font color="#B22222">*/</font>
+<a name="line39"> 39: </a><font color="#B22222">/*</font>
+<a name="line40"> 40: </a><font color="#B22222">       cgimpl.h defines the simple data structured used to store information</font>
+<a name="line41"> 41: </a><font color="#B22222">    related to the type of matrix (e.g. complex symmetric) being solved and</font>
+<a name="line42"> 42: </a><font color="#B22222">    data used during the optional Lanczo process used to compute eigenvalues</font>
+<a name="line43"> 43: </a><font color="#B22222">*/</font>
+<a name="line44"> 44: </a><font color="#A020F0">#include &lt;../src/ksp/ksp/impls/cg/cgimpl.h&gt;       </font><font color="#B22222">/*I "petscksp.h" I*/</font><font color="#A020F0"></font>
+<a name="line45"> 45: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPComputeExtremeSingularValues_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*)</font></strong>;
+<a name="line46"> 46: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPComputeEigenvalues_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>*)</font></strong>;
+
+<a name="line48"> 48: </a><font color="#B22222">/*</font>
+<a name="line49"> 49: </a><font color="#B22222">     KSPSetUp_CG - Sets up the workspace needed by the CG method.</font>
+
+<a name="line51"> 51: </a><font color="#B22222">      This is called once, usually automatically by <A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A>() or <A href="../../../../../docs/manualpages/KSP/KSPSetUp.html#KSPSetUp">KSPSetUp</A>()</font>
+<a name="line52"> 52: </a><font color="#B22222">     but can be called directly by <A href="../../../../../docs/manualpages/KSP/KSPSetUp.html#KSPSetUp">KSPSetUp</A>()</font>
+<a name="line53"> 53: </a><font color="#B22222">*/</font>
+<a name="line56"> 56: </a><strong><font color="#4169E1"><a name="KSPSetUp_CG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPSetUp_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line57"> 57: </a>{
+<a name="line58"> 58: </a>  KSP_CG         *cgP = (KSP_CG*)ksp-&gt;data;
+<a name="line60"> 60: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       maxit = ksp-&gt;max_it,nwork = 3;
+
+<a name="line63"> 63: </a>  <font color="#B22222">/* get work vectors needed by CG */</font>
+<a name="line64"> 64: </a>  <font color="#4169E1">if</font> (cgP-&gt;singlereduction) nwork += 2;
+<a name="line65"> 65: </a>  KSPSetWorkVecs(ksp,nwork);
+
+<a name="line67"> 67: </a>  <font color="#B22222">/*</font>
+<a name="line68"> 68: </a><font color="#B22222">     If user requested computations of eigenvalues then allocate work</font>
+<a name="line69"> 69: </a><font color="#B22222">     work space needed</font>
+<a name="line70"> 70: </a><font color="#B22222">  */</font>
+<a name="line71"> 71: </a>  <font color="#4169E1">if</font> (ksp-&gt;calc_sings) {
+<a name="line72"> 72: </a>    <font color="#B22222">/* get space to store tridiagonal matrix for Lanczos */</font>
+<a name="line73"> 73: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc4.html#PetscMalloc4">PetscMalloc4</A>(maxit+1,&amp;cgP-&gt;e,maxit+1,&amp;cgP-&gt;d,maxit+1,&amp;cgP-&gt;ee,maxit+1,&amp;cgP-&gt;dd);
+<a name="line74"> 74: </a>    PetscLogObjectMemory((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp,2*(maxit+1)*(<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)+<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)));
+
+<a name="line76"> 76: </a>    ksp-&gt;ops-&gt;computeextremesingularvalues = KSPComputeExtremeSingularValues_CG;
+<a name="line77"> 77: </a>    ksp-&gt;ops-&gt;computeeigenvalues           = KSPComputeEigenvalues_CG;
+<a name="line78"> 78: </a>  }
+<a name="line79"> 79: </a>  <font color="#4169E1">return</font>(0);
+<a name="line80"> 80: </a>}
+
+<a name="line82"> 82: </a><font color="#B22222">/*</font>
+<a name="line83"> 83: </a><font color="#B22222">       KSPSolve_CG - This routine actually applies the conjugate gradient  method</font>
+
+<a name="line85"> 85: </a><font color="#B22222">   This routine is MUCH too messy. I has too many options (norm type and single reduction) embedded making the code confusing and likely to be buggy.</font>
+
+<a name="line87"> 87: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line88"> 88: </a><font color="#B22222">.     ksp - the Krylov space object that was set to use conjugate gradient, by, for</font>
+<a name="line89"> 89: </a><font color="#B22222">            example, <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(<A href="../../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>,<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> *ksp); <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSPCG.html#KSPCG">KSPCG</A>);</font>
+<a name="line90"> 90: </a><font color="#B22222">*/</font>
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="KSPSolve_CG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  KSPSolve_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line94"> 94: </a>{
+<a name="line96"> 96: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,stored_max_it,eigs;
+<a name="line97"> 97: </a>  <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    dpi = 0.0,a = 1.0,beta,betaold = 1.0,b = 0,*e = 0,*d = 0,delta,dpiold;
+<a name="line98"> 98: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      dp  = 0.0;
+<a name="line99"> 99: </a>  <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X,B,Z,R,P,S,W;
+<a name="line100">100: </a>  KSP_CG         *cg;
+<a name="line101">101: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            Amat,Pmat;
+<a name="line102">102: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      diagonalscale;
+
+<a name="line105">105: </a>  <A href="../../../../../docs/manualpages/PC/PCGetDiagonalScale.html#PCGetDiagonalScale">PCGetDiagonalScale</A>(ksp-&gt;pc,&amp;diagonalscale);
+<a name="line106">106: </a>  <font color="#4169E1">if</font> (diagonalscale) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_SUP,<font color="#666666">"Krylov method %s does not support diagonal scaling"</font>,((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp)-&gt;type_name);
+
+<a name="line108">108: </a>  cg            = (KSP_CG*)ksp-&gt;data;
+<a name="line109">109: </a>  eigs          = ksp-&gt;calc_sings;
+<a name="line110">110: </a>  stored_max_it = ksp-&gt;max_it;
+<a name="line111">111: </a>  X             = ksp-&gt;vec_sol;
+<a name="line112">112: </a>  B             = ksp-&gt;vec_rhs;
+<a name="line113">113: </a>  R             = ksp-&gt;work[0];
+<a name="line114">114: </a>  Z             = ksp-&gt;work[1];
+<a name="line115">115: </a>  P             = ksp-&gt;work[2];
+<a name="line116">116: </a>  <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line117">117: </a>    S = ksp-&gt;work[3];
+<a name="line118">118: </a>    W = ksp-&gt;work[4];
+<a name="line119">119: </a>  } <font color="#4169E1">else</font> {
+<a name="line120">120: </a>    S = 0;                      <font color="#B22222">/* unused */</font>
+<a name="line121">121: </a>    W = Z;
+<a name="line122">122: </a>  }
+
+<a name="line124">124: </a><strong><font color="#228B22">#define VecXDot(x,y,a) (((cg-&gt;type) == (KSP_CG_HERMITIAN)) ? <A href="../../../../../docs/manualpages/Vec/VecDot.html#VecDot">VecDot</A>(x,y,a) : <A href="../../../../../docs/manualpages/Vec/VecTDot.html#VecTDot">VecTDot</A>(x,y,a))</font></strong>
+
+<a name="line126">126: </a>  <font color="#4169E1">if</font> (eigs) {e = cg-&gt;e; d = cg-&gt;d; e[0] = 0.0; }
+<a name="line127">127: </a>  <A href="../../../../../docs/manualpages/PC/PCGetOperators.html#PCGetOperators">PCGetOperators</A>(ksp-&gt;pc,&amp;Amat,&amp;Pmat);
+
+<a name="line129">129: </a>  ksp-&gt;its = 0;
+<a name="line130">130: </a>  <font color="#4169E1">if</font> (!ksp-&gt;guess_zero) {
+<a name="line131">131: </a>    KSP_MatMult(ksp,Amat,X,R);            <font color="#B22222">/*     r &lt;- b - Ax     */</font>
+<a name="line132">132: </a>    <A href="../../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(R,-1.0,B);
+<a name="line133">133: </a>  } <font color="#4169E1">else</font> {
+<a name="line134">134: </a>    <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(B,R);                         <font color="#B22222">/*     r &lt;- b (x is 0) */</font>
+<a name="line135">135: </a>  }
+
+<a name="line137">137: </a>  <font color="#4169E1">switch</font> (ksp-&gt;normtype) {
+<a name="line138">138: </a>  <font color="#4169E1">case</font> <A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A>:
+<a name="line139">139: </a>    KSP_PCApply(ksp,R,Z);                   <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line140">140: </a>    <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(Z,<A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;dp);                <font color="#B22222">/*    dp &lt;- z'*z = e'*A'*B'*B*A'*e'     */</font>
+<a name="line141">141: </a>    <font color="#4169E1">break</font>;
+<a name="line142">142: </a>  <font color="#4169E1">case</font> <A href="../../../../../docs/manualpages/KSP/KSP_NORM_UNPRECONDITIONED.html#KSP_NORM_UNPRECONDITIONED">KSP_NORM_UNPRECONDITIONED</A>:
+<a name="line143">143: </a>    <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(R,<A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;dp);                <font color="#B22222">/*    dp &lt;- r'*r = e'*A'*A*e            */</font>
+<a name="line144">144: </a>    <font color="#4169E1">break</font>;
+<a name="line145">145: </a>  <font color="#4169E1">case</font> <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>:
+<a name="line146">146: </a>    KSP_PCApply(ksp,R,Z);                   <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line147">147: </a>    <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line148">148: </a>      KSP_MatMult(ksp,Amat,Z,S);
+<a name="line149">149: </a>      VecXDot(Z,S,&amp;delta);
+<a name="line150">150: </a>    }
+<a name="line151">151: </a>    VecXDot(Z,R,&amp;beta);                     <font color="#B22222">/*  beta &lt;- z'*r       */</font>
+<a name="line152">152: </a>    <font color="#4169E1">if</font> (PetscIsInfOrNanScalar(beta)) {
+<a name="line153">153: </a>      <font color="#4169E1">if</font> (ksp-&gt;errorifnotconverged) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_NOT_CONVERGED,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A> has not converged due to Nan or Inf inner product"</font>);
+<a name="line154">154: </a>      <font color="#4169E1">else</font> {
+<a name="line155">155: </a>        ksp-&gt;reason = KSP_DIVERGED_NANORINF;
+<a name="line156">156: </a>        <font color="#4169E1">return</font>(0);
+<a name="line157">157: </a>      }
+<a name="line158">158: </a>    }
+<a name="line159">159: </a>    dp = PetscSqrtReal(PetscAbsScalar(beta));                           <font color="#B22222">/*    dp &lt;- r'*z = r'*B*r = e'*A'*B*A*e */</font>
+<a name="line160">160: </a>    <font color="#4169E1">break</font>;
+<a name="line161">161: </a>  <font color="#4169E1">case</font> <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NONE.html#KSP_NORM_NONE">KSP_NORM_NONE</A>:
+<a name="line162">162: </a>    dp = 0.0;
+<a name="line163">163: </a>    <font color="#4169E1">break</font>;
+<a name="line164">164: </a><strong><font color="#FF0000">  default:</font></strong> <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_SUP,<font color="#666666">"%s"</font>,KSPNormTypes[ksp-&gt;normtype]);
+<a name="line165">165: </a>  }
+<a name="line166">166: </a>  KSPLogResidualHistory(ksp,dp);
+<a name="line167">167: </a>  <A href="../../../../../docs/manualpages/KSP/KSPMonitor.html#KSPMonitor">KSPMonitor</A>(ksp,0,dp);
+<a name="line168">168: </a>  ksp-&gt;rnorm = dp;
+
+<a name="line170">170: </a>  (*ksp-&gt;converged)(ksp,0,dp,&amp;ksp-&gt;reason,ksp-&gt;cnvP);      <font color="#B22222">/* test for convergence */</font>
+<a name="line171">171: </a>  <font color="#4169E1">if</font> (ksp-&gt;reason) <font color="#4169E1">return</font>(0);
+
+<a name="line173">173: </a>  <font color="#4169E1">if</font> (ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A> &amp;&amp; (ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>)) {
+<a name="line174">174: </a>    KSP_PCApply(ksp,R,Z);                   <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line175">175: </a>  }
+<a name="line176">176: </a>  <font color="#4169E1">if</font> (ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>) {
+<a name="line177">177: </a>    <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line178">178: </a>      KSP_MatMult(ksp,Amat,Z,S);
+<a name="line179">179: </a>      VecXDot(Z,S,&amp;delta);
+<a name="line180">180: </a>    }
+<a name="line181">181: </a>    VecXDot(Z,R,&amp;beta);         <font color="#B22222">/*  beta &lt;- z'*r       */</font>
+<a name="line182">182: </a>    <font color="#4169E1">if</font> (PetscIsInfOrNanScalar(beta)) {
+<a name="line183">183: </a>      <font color="#4169E1">if</font> (ksp-&gt;errorifnotconverged) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_NOT_CONVERGED,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A> has not converged due to Nan or Inf inner product"</font>);
+<a name="line184">184: </a>      <font color="#4169E1">else</font> {
+<a name="line185">185: </a>        ksp-&gt;reason = KSP_DIVERGED_NANORINF;
+<a name="line186">186: </a>        <font color="#4169E1">return</font>(0);
+<a name="line187">187: </a>      }
+<a name="line188">188: </a>    }
+<a name="line189">189: </a>  }
+
+<a name="line191">191: </a>  i = 0;
+<a name="line192">192: </a>  <font color="#4169E1">do</font> {
+<a name="line193">193: </a>    ksp-&gt;its = i+1;
+<a name="line194">194: </a>    <font color="#4169E1">if</font> (beta == 0.0) {
+<a name="line195">195: </a>      ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_CONVERGED_ATOL.html#KSP_CONVERGED_ATOL">KSP_CONVERGED_ATOL</A>;
+<a name="line196">196: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(ksp,<font color="#666666">"converged due to beta = 0\n"</font>);
+<a name="line197">197: </a>      <font color="#4169E1">break</font>;
+<a name="line198">198: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line199">199: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((i &gt; 0) &amp;&amp; (beta*betaold &lt; 0.0)) {
+<a name="line200">200: </a>      ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_INDEFINITE_PC.html#KSP_DIVERGED_INDEFINITE_PC">KSP_DIVERGED_INDEFINITE_PC</A>;
+<a name="line201">201: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(ksp,<font color="#666666">"diverging due to indefinite preconditioner\n"</font>);
+<a name="line202">202: </a>      <font color="#4169E1">break</font>;
+<a name="line203">203: </a><font color="#A020F0">#endif</font>
+<a name="line204">204: </a>    }
+<a name="line205">205: </a>    <font color="#4169E1">if</font> (!i) {
+<a name="line206">206: </a>      <A href="../../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(Z,P);         <font color="#B22222">/*     p &lt;- z          */</font>
+<a name="line207">207: </a>      b    = 0.0;
+<a name="line208">208: </a>    } <font color="#4169E1">else</font> {
+<a name="line209">209: </a>      b = beta/betaold;
+<a name="line210">210: </a>      <font color="#4169E1">if</font> (eigs) {
+<a name="line211">211: </a>        <font color="#4169E1">if</font> (ksp-&gt;max_it != stored_max_it) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_SUP,<font color="#666666">"Can not change maxit AND calculate eigenvalues"</font>);
+<a name="line212">212: </a>        e[i] = PetscSqrtReal(PetscAbsScalar(b))/a;
+<a name="line213">213: </a>      }
+<a name="line214">214: </a>      <A href="../../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(P,b,Z);    <font color="#B22222">/*     p &lt;- z + b* p   */</font>
+<a name="line215">215: </a>    }
+<a name="line216">216: </a>    dpiold = dpi;
+<a name="line217">217: </a>    <font color="#4169E1">if</font> (!cg-&gt;singlereduction || !i) {
+<a name="line218">218: </a>      KSP_MatMult(ksp,Amat,P,W);          <font color="#B22222">/*     w &lt;- Ap         */</font>
+<a name="line219">219: </a>      VecXDot(P,W,&amp;dpi);                  <font color="#B22222">/*     dpi &lt;- p'w     */</font>
+<a name="line220">220: </a>    } <font color="#4169E1">else</font> {
+<a name="line221">221: </a>      <A href="../../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(W,beta/betaold,S);                  <font color="#B22222">/*     w &lt;- Ap         */</font>
+<a name="line222">222: </a>      dpi  = delta - beta*beta*dpiold/(betaold*betaold);             <font color="#B22222">/*     dpi &lt;- p'w     */</font>
+<a name="line223">223: </a>    }
+<a name="line224">224: </a>    betaold = beta;
+<a name="line225">225: </a>    <font color="#4169E1">if</font> (PetscIsInfOrNanScalar(dpi)) {
+<a name="line226">226: </a>      <font color="#4169E1">if</font> (ksp-&gt;errorifnotconverged) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_NOT_CONVERGED,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A> has not converged due to Nan or Inf inner product"</font>);
+<a name="line227">227: </a>      <font color="#4169E1">else</font> {
+<a name="line228">228: </a>        ksp-&gt;reason = KSP_DIVERGED_NANORINF;
+<a name="line229">229: </a>        <font color="#4169E1">return</font>(0);
+<a name="line230">230: </a>      }
+<a name="line231">231: </a>    }
+
+<a name="line233">233: </a>    <font color="#4169E1">if</font> ((dpi == 0.0) || ((i &gt; 0) &amp;&amp; (PetscRealPart(dpi*dpiold) &lt;= 0.0))) {
+<a name="line234">234: </a>      ksp-&gt;reason = KSP_DIVERGED_INDEFINITE_MAT;
+<a name="line235">235: </a>      <A href="../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(ksp,<font color="#666666">"diverging due to indefinite or negative definite matrix\n"</font>);
+<a name="line236">236: </a>      <font color="#4169E1">break</font>;
+<a name="line237">237: </a>    }
+<a name="line238">238: </a>    a = beta/dpi;                                 <font color="#B22222">/*     a = beta/p'w   */</font>
+<a name="line239">239: </a>    <font color="#4169E1">if</font> (eigs) d[i] = PetscSqrtReal(PetscAbsScalar(b))*e[i] + 1.0/a;
+<a name="line240">240: </a>    <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(X,a,P);          <font color="#B22222">/*     x &lt;- x + ap     */</font>
+<a name="line241">241: </a>    <A href="../../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(R,-a,W);                      <font color="#B22222">/*     r &lt;- r - aw    */</font>
+<a name="line242">242: </a>    <font color="#4169E1">if</font> (ksp-&gt;normtype == <A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A> &amp;&amp; ksp-&gt;chknorm &lt; i+2) {
+<a name="line243">243: </a>      KSP_PCApply(ksp,R,Z);               <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line244">244: </a>      <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line245">245: </a>        KSP_MatMult(ksp,Amat,Z,S);
+<a name="line246">246: </a>      }
+<a name="line247">247: </a>      <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(Z,<A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;dp);              <font color="#B22222">/*    dp &lt;- z'*z       */</font>
+<a name="line248">248: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ksp-&gt;normtype == <A href="../../../../../docs/manualpages/KSP/KSP_NORM_UNPRECONDITIONED.html#KSP_NORM_UNPRECONDITIONED">KSP_NORM_UNPRECONDITIONED</A> &amp;&amp; ksp-&gt;chknorm &lt; i+2) {
+<a name="line249">249: </a>      <A href="../../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(R,<A href="../../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;dp);              <font color="#B22222">/*    dp &lt;- r'*r       */</font>
+<a name="line250">250: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ksp-&gt;normtype == <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>) {
+<a name="line251">251: </a>      KSP_PCApply(ksp,R,Z);               <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line252">252: </a>      <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line253">253: </a>        <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> tmp[2];
+<a name="line254">254: </a>        <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         vecs[2];
+<a name="line255">255: </a>        vecs[0] = S; vecs[1] = R;
+<a name="line256">256: </a>        KSP_MatMult(ksp,Amat,Z,S);
+<a name="line257">257: </a>        <A href="../../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(Z,2,vecs,tmp);
+<a name="line258">258: </a>        delta = tmp[0]; beta = tmp[1];
+<a name="line259">259: </a>      } <font color="#4169E1">else</font> {
+<a name="line260">260: </a>        VecXDot(Z,R,&amp;beta);     <font color="#B22222">/*  beta &lt;- r'*z       */</font>
+<a name="line261">261: </a>      }
+<a name="line262">262: </a>      <font color="#4169E1">if</font> (PetscIsInfOrNanScalar(beta)) {
+<a name="line263">263: </a>        <font color="#4169E1">if</font> (ksp-&gt;errorifnotconverged) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_NOT_CONVERGED,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A> has not converged due to Nan or Inf inner product"</font>);
+<a name="line264">264: </a>        <font color="#4169E1">else</font> {
+<a name="line265">265: </a>          ksp-&gt;reason = KSP_DIVERGED_NANORINF;
+<a name="line266">266: </a>          <font color="#4169E1">return</font>(0);
+<a name="line267">267: </a>        }
+<a name="line268">268: </a>      }
+<a name="line269">269: </a>      dp = PetscSqrtReal(PetscAbsScalar(beta));
+<a name="line270">270: </a>    } <font color="#4169E1">else</font> {
+<a name="line271">271: </a>      dp = 0.0;
+<a name="line272">272: </a>    }
+<a name="line273">273: </a>    ksp-&gt;rnorm = dp;
+<a name="line274">274: </a>    KSPLogResidualHistory(ksp,dp);
+<a name="line275">275: </a>    <A href="../../../../../docs/manualpages/KSP/KSPMonitor.html#KSPMonitor">KSPMonitor</A>(ksp,i+1,dp);
+<a name="line276">276: </a>    (*ksp-&gt;converged)(ksp,i+1,dp,&amp;ksp-&gt;reason,ksp-&gt;cnvP);
+<a name="line277">277: </a>    <font color="#4169E1">if</font> (ksp-&gt;reason) <font color="#4169E1">break</font>;
+
+<a name="line279">279: </a>    <font color="#4169E1">if</font> ((ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A> &amp;&amp; (ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>)) || (ksp-&gt;chknorm &gt;= i+2)) {
+<a name="line280">280: </a>      KSP_PCApply(ksp,R,Z);                   <font color="#B22222">/*     z &lt;- Br         */</font>
+<a name="line281">281: </a>      <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line282">282: </a>        KSP_MatMult(ksp,Amat,Z,S);
+<a name="line283">283: </a>      }
+<a name="line284">284: </a>    }
+<a name="line285">285: </a>    <font color="#4169E1">if</font> ((ksp-&gt;normtype != <A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>) || (ksp-&gt;chknorm &gt;= i+2)) {
+<a name="line286">286: </a>      <font color="#4169E1">if</font> (cg-&gt;singlereduction) {
+<a name="line287">287: </a>        <A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> tmp[2];
+<a name="line288">288: </a>        <A href="../../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         vecs[2];
+<a name="line289">289: </a>        vecs[0] = S; vecs[1] = R;
+<a name="line290">290: </a>        <A href="../../../../../docs/manualpages/Vec/VecMDot.html#VecMDot">VecMDot</A>(Z,2,vecs,tmp);
+<a name="line291">291: </a>        delta = tmp[0]; beta = tmp[1];
+<a name="line292">292: </a>      } <font color="#4169E1">else</font> {
+<a name="line293">293: </a>        VecXDot(Z,R,&amp;beta);        <font color="#B22222">/*  beta &lt;- z'*r       */</font>
+<a name="line294">294: </a>      }
+<a name="line295">295: </a>      <font color="#4169E1">if</font> (PetscIsInfOrNanScalar(beta)) {
+<a name="line296">296: </a>        <font color="#4169E1">if</font> (ksp-&gt;errorifnotconverged) <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp),PETSC_ERR_NOT_CONVERGED,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPSolve.html#KSPSolve">KSPSolve</A> has not converged due to Nan or Inf inner product"</font>);
+<a name="line297">297: </a>        <font color="#4169E1">else</font> {
+<a name="line298">298: </a>          ksp-&gt;reason = KSP_DIVERGED_NANORINF;
+<a name="line299">299: </a>          <font color="#4169E1">return</font>(0);
+<a name="line300">300: </a>        }
+<a name="line301">301: </a>      }
+<a name="line302">302: </a>    }
+
+<a name="line304">304: </a>    i++;
+<a name="line305">305: </a>  } <font color="#4169E1">while</font> (i&lt;ksp-&gt;max_it);
+<a name="line306">306: </a>  <font color="#4169E1">if</font> (i &gt;= ksp-&gt;max_it) ksp-&gt;reason = <A href="../../../../../docs/manualpages/KSP/KSP_DIVERGED_ITS.html#KSP_DIVERGED_ITS">KSP_DIVERGED_ITS</A>;
+<a name="line307">307: </a>  <font color="#4169E1">return</font>(0);
+<a name="line308">308: </a>}
+
+<a name="line312">312: </a><strong><font color="#4169E1"><a name="KSPDestroy_CG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPDestroy_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line313">313: </a>{
+<a name="line314">314: </a>  KSP_CG         *cg = (KSP_CG*)ksp-&gt;data;
+
+<a name="line318">318: </a>  <font color="#B22222">/* free space used for singular value calculations */</font>
+<a name="line319">319: </a>  <font color="#4169E1">if</font> (ksp-&gt;calc_sings) {
+<a name="line320">320: </a>    <A href="../../../../../docs/manualpages/Sys/PetscFree4.html#PetscFree4">PetscFree4</A>(cg-&gt;e,cg-&gt;d,cg-&gt;ee,cg-&gt;dd);
+<a name="line321">321: </a>  }
+<a name="line322">322: </a>  KSPDestroyDefault(ksp);
+<a name="line323">323: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp,<font color="#666666">"KSPCGSetType_C"</font>,NULL);
+<a name="line324">324: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp,<font color="#666666">"KSPCGUseSingleReduction_C"</font>,NULL);
+<a name="line325">325: </a>  <font color="#4169E1">return</font>(0);
+<a name="line326">326: </a>}
+
+<a name="line328">328: </a><font color="#B22222">/*</font>
+<a name="line329">329: </a><font color="#B22222">     KSPView_CG - Prints information about the current Krylov method being used</font>
+
+<a name="line331">331: </a><font color="#B22222">      Currently this only prints information to a file (or stdout) about the</font>
+<a name="line332">332: </a><font color="#B22222">      symmetry of the problem. If your Krylov method has special options or</font>
+<a name="line333">333: </a><font color="#B22222">      flags that information should be printed here.</font>
+
+<a name="line335">335: </a><font color="#B22222">*/</font>
+<a name="line338">338: </a><strong><font color="#4169E1"><a name="KSPView_CG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPView_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp,<A href="../../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line339">339: </a>{
+<a name="line340">340: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line341">341: </a>  KSP_CG         *cg = (KSP_CG*)ksp-&gt;data;
+<a name="line343">343: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      iascii;
+
+<a name="line346">346: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERASCII,&amp;iascii);
+<a name="line347">347: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line348">348: </a>    <A href="../../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  CG or CGNE: variant %s\n"</font>,KSPCGTypes[cg-&gt;type]);
+<a name="line349">349: </a>  }
+<a name="line350">350: </a><font color="#A020F0">#endif</font>
+<a name="line351">351: </a>  <font color="#4169E1">return</font>(0);
+<a name="line352">352: </a>}
+
+<a name="line354">354: </a><font color="#B22222">/*</font>
+<a name="line355">355: </a><font color="#B22222">    KSPSetFromOptions_CG - Checks the options database for options related to the</font>
+<a name="line356">356: </a><font color="#B22222">                           conjugate gradient method.</font>
+<a name="line357">357: </a><font color="#B22222">*/</font>
+<a name="line360">360: </a><strong><font color="#4169E1"><a name="KSPSetFromOptions_CG"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPSetFromOptions_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line361">361: </a>{
+<a name="line363">363: </a>  KSP_CG         *cg = (KSP_CG*)ksp-&gt;data;
+
+<a name="line366">366: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> CG and CGNE options"</font>);
+<a name="line367">367: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line368">368: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-ksp_cg_type"</font>,<font color="#666666">"Matrix is Hermitian or complex symmetric"</font>,<font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>"</font>,KSPCGTypes,(<A href="../../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)cg-&gt;type,
+<a name="line369">369: </a>                          (<A href="../../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;cg-&gt;type,NULL);
+<a name="line370">370: </a><font color="#A020F0">#endif</font>
+<a name="line371">371: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ksp_cg_single_reduction"</font>,<font color="#666666">"Merge inner products into single <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>()"</font>,
+<a name="line372">372: </a>                          <font color="#666666">"<A href="../../../../../docs/manualpages/KSP/KSPCGUseSingleReduction.html#KSPCGUseSingleReduction">KSPCGUseSingleReduction</A>"</font>,cg-&gt;singlereduction,&amp;cg-&gt;singlereduction,NULL);
+<a name="line373">373: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line374">374: </a>  <font color="#4169E1">return</font>(0);
+<a name="line375">375: </a>}
+
+<a name="line377">377: </a><font color="#B22222">/*</font>
+<a name="line378">378: </a><font color="#B22222">    KSPCGSetType_CG - This is an option that is SPECIFIC to this particular Krylov method.</font>
+<a name="line379">379: </a><font color="#B22222">                      This routine is registered below in KSPCreate_CG() and called from the</font>
+<a name="line380">380: </a><font color="#B22222">                      routine <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>() (see the file cgtype.c).</font>
+<a name="line381">381: </a><font color="#B22222">*/</font>
+<a name="line384">384: </a><strong><font color="#4169E1"><a name="KSPCGSetType_CG"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  KSPCGSetType_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp,<A href="../../../../../docs/manualpages/KSP/KSPCGType.html#KSPCGType">KSPCGType</A> type)</font></strong>
+<a name="line385">385: </a>{
+<a name="line386">386: </a>  KSP_CG *cg = (KSP_CG*)ksp-&gt;data;
+
+<a name="line389">389: </a>  cg-&gt;type = type;
+<a name="line390">390: </a>  <font color="#4169E1">return</font>(0);
+<a name="line391">391: </a>}
+
+<a name="line395">395: </a><strong><font color="#4169E1"><a name="KSPCGUseSingleReduction_CG"></a>static <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  KSPCGUseSingleReduction_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp,<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg)</font></strong>
+<a name="line396">396: </a>{
+<a name="line397">397: </a>  KSP_CG *cg = (KSP_CG*)ksp-&gt;data;
+
+<a name="line400">400: </a>  cg-&gt;singlereduction = flg;
+<a name="line401">401: </a>  <font color="#4169E1">return</font>(0);
+<a name="line402">402: </a>}
+
+<a name="line404">404: </a><font color="#B22222">/*</font>
+<a name="line405">405: </a><font color="#B22222">    KSPCreate_CG - Creates the data structure for the Krylov method CG and sets the</font>
+<a name="line406">406: </a><font color="#B22222">       function pointers for all the routines it needs to call (KSPSolve_CG() etc)</font>
+
+<a name="line408">408: </a><font color="#B22222">    It must be wrapped in EXTERN_C_BEGIN to be dynamically linkable in C++</font>
+<a name="line409">409: </a><font color="#B22222">*/</font>
+<a name="line410">410: </a><font color="#B22222">/*MC</font>
+<a name="line411">411: </a><font color="#B22222">     <A href="../../../../../docs/manualpages/KSP/KSPCG.html#KSPCG">KSPCG</A> - The preconditioned conjugate gradient (PCG) iterative method</font>
+
+<a name="line413">413: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line414">414: </a><font color="#B22222">+   -ksp_cg_type Hermitian - (for complex matrices only) indicates the matrix is Hermitian, see <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>()</font>
+<a name="line415">415: </a><font color="#B22222">.   -ksp_cg_type symmetric - (for complex matrices only) indicates the matrix is symmetric</font>
+<a name="line416">416: </a><font color="#B22222">-   -ksp_cg_single_reduction - performs both inner products needed in the algorithm with a single <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>() call, see <A href="../../../../../docs/manualpages/KSP/KSPCGUseSingleReduction.html#KSPCGUseSingleReduction">KSPCGUseSingleReduction</A>()</font>
+
+<a name="line418">418: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line420">420: </a><font color="#B22222">   Notes: The PCG method requires both the matrix and preconditioner to be symmetric positive (or negative) (semi) definite</font>
+<a name="line421">421: </a><font color="#B22222">          Only left preconditioning is supported.</font>
+
+<a name="line423">423: </a><font color="#B22222">   For complex numbers there are two different CG methods. One for Hermitian symmetric matrices and one for non-Hermitian symmetric matrices. Use</font>
+<a name="line424">424: </a><font color="#B22222">   <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>() to indicate which type you are using.</font>
+
+<a name="line426">426: </a><font color="#B22222">   Developer Notes: KSPSolve_CG() should actually query the matrix to determine if it is Hermitian symmetric or not and NOT require the user to</font>
+<a name="line427">427: </a><font color="#B22222">   indicate it to the <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> object.</font>
+
+<a name="line429">429: </a><font color="#B22222">   References:</font>
+<a name="line430">430: </a><font color="#B22222">   Methods of Conjugate Gradients for Solving Linear Systems, Magnus R. Hestenes and Eduard Stiefel,</font>
+<a name="line431">431: </a><font color="#B22222">   Journal of Research of the National Bureau of Standards Vol. 49, No. 6, December 1952 Research Paper 2379</font>
+<a name="line432">432: </a><font color="#B22222">   pp. 409--436.</font>
+
+<a name="line434">434: </a><font color="#B22222">.seealso:  <A href="../../../../../docs/manualpages/KSP/KSPCreate.html#KSPCreate">KSPCreate</A>(), <A href="../../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(), <A href="../../../../../docs/manualpages/KSP/KSPType.html#KSPType">KSPType</A> (for list of available types), <A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>,</font>
+<a name="line435">435: </a><font color="#B22222">           <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>(), <A href="../../../../../docs/manualpages/KSP/KSPCGUseSingleReduction.html#KSPCGUseSingleReduction">KSPCGUseSingleReduction</A>(), <A href="../../../../../docs/manualpages/KSP/KSPPIPECG.html#KSPPIPECG">KSPPIPECG</A>, <A href="../../../../../docs/manualpages/KSP/KSPGROPPCG.html#KSPGROPPCG">KSPGROPPCG</A></font>
+
+<a name="line437">437: </a><font color="#B22222">M*/</font>
+<a name="line440">440: </a><strong><font color="#4169E1"><a name="KSPCreate_CG"></a>PETSC_EXTERN <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> KSPCreate_CG(<A href="../../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> ksp)</font></strong>
+<a name="line441">441: </a>{
+<a name="line443">443: </a>  KSP_CG         *cg;
+
+<a name="line446">446: </a>  <A href="../../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(ksp,&amp;cg);
+<a name="line447">447: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line448">448: </a>  cg-&gt;type = KSP_CG_SYMMETRIC;
+<a name="line449">449: </a><font color="#A020F0">#else</font>
+<a name="line450">450: </a>  cg-&gt;type = KSP_CG_HERMITIAN;
+<a name="line451">451: </a><font color="#A020F0">#endif</font>
+<a name="line452">452: </a>  ksp-&gt;data = (void*)cg;
+
+<a name="line454">454: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_PRECONDITIONED.html#KSP_NORM_PRECONDITIONED">KSP_NORM_PRECONDITIONED</A>,PC_LEFT,3);
+<a name="line455">455: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_UNPRECONDITIONED.html#KSP_NORM_UNPRECONDITIONED">KSP_NORM_UNPRECONDITIONED</A>,PC_LEFT,2);
+<a name="line456">456: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_NATURAL.html#KSP_NORM_NATURAL">KSP_NORM_NATURAL</A>,PC_LEFT,2);
+<a name="line457">457: </a>  <A href="../../../../../docs/manualpages/KSP/KSPSetSupportedNorm.html#KSPSetSupportedNorm">KSPSetSupportedNorm</A>(ksp,<A href="../../../../../docs/manualpages/KSP/KSP_NORM_NONE.html#KSP_NORM_NONE">KSP_NORM_NONE</A>,PC_LEFT,2);
+
+<a name="line459">459: </a>  <font color="#B22222">/*</font>
+<a name="line460">460: </a><font color="#B22222">       Sets the functions that are associated with this data structure</font>
+<a name="line461">461: </a><font color="#B22222">       (in C++ this is the same as defining virtual functions)</font>
+<a name="line462">462: </a><font color="#B22222">  */</font>
+<a name="line463">463: </a>  ksp-&gt;ops-&gt;setup          = KSPSetUp_CG;
+<a name="line464">464: </a>  ksp-&gt;ops-&gt;solve          = KSPSolve_CG;
+<a name="line465">465: </a>  ksp-&gt;ops-&gt;destroy        = KSPDestroy_CG;
+<a name="line466">466: </a>  ksp-&gt;ops-&gt;view           = KSPView_CG;
+<a name="line467">467: </a>  ksp-&gt;ops-&gt;setfromoptions = KSPSetFromOptions_CG;
+<a name="line468">468: </a>  ksp-&gt;ops-&gt;buildsolution  = KSPBuildSolutionDefault;
+<a name="line469">469: </a>  ksp-&gt;ops-&gt;buildresidual  = KSPBuildResidualDefault;
+
+<a name="line471">471: </a>  <font color="#B22222">/*</font>
+<a name="line472">472: </a><font color="#B22222">      Attach the function KSPCGSetType_CG() to this object. The routine</font>
+<a name="line473">473: </a><font color="#B22222">      <A href="../../../../../docs/manualpages/KSP/KSPCGSetType.html#KSPCGSetType">KSPCGSetType</A>() checks for this attached function and calls it if it finds</font>
+<a name="line474">474: </a><font color="#B22222">      it. (Sort of like a dynamic member function that can be added at run time</font>
+<a name="line475">475: </a><font color="#B22222">  */</font>
+<a name="line476">476: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp,<font color="#666666">"KSPCGSetType_C"</font>,KSPCGSetType_CG);
+<a name="line477">477: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ksp,<font color="#666666">"KSPCGUseSingleReduction_C"</font>,KSPCGUseSingleReduction_CG);
+<a name="line478">478: </a>  <font color="#4169E1">return</font>(0);
+<a name="line479">479: </a>}
+
+
+
+
+</pre>
+</body>
+
+</html>

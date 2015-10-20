@@ -1,0 +1,408 @@
+<center><a href="patch.c">Actual source code: patch.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/dm/impls/patch/patch.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:29:01+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/dm/impls/patch/patch.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a><font color="#A020F0">#include &lt;petsc-private/dmpatchimpl.h&gt;   </font><font color="#B22222">/*I      "petscdmpatch.h"   I*/</font><font color="#A020F0"></font>
+<a name="line2">  2: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+<a name="line3">  3: </a><font color="#A020F0">#include &lt;petscsf.h&gt;</font>
+
+<a name="line5">  5: </a><font color="#B22222">/*</font>
+<a name="line6">  6: </a><font color="#B22222">Solver loop to update \tau:</font>
+
+<a name="line8">  8: </a><font color="#B22222">  DMZoom(dmc, &amp;dmz)</font>
+<a name="line9">  9: </a><font color="#B22222">  <A href="../../../../docs/manualpages/DM/DMRefine.html#DMRefine">DMRefine</A>(dmz, &amp;dmf),</font>
+<a name="line10"> 10: </a><font color="#B22222">  Scatter Xcoarse -&gt; Xzoom,</font>
+<a name="line11"> 11: </a><font color="#B22222">  Interpolate Xzoom -&gt; Xfine (note that this may be on subcomms),</font>
+<a name="line12"> 12: </a><font color="#B22222">  Smooth Xfine using two-step smoother</font>
+<a name="line13"> 13: </a><font color="#B22222">    normal smoother plus Kaczmarz---moves back and forth from dmzoom to dmfine</font>
+<a name="line14"> 14: </a><font color="#B22222">  Compute residual Rfine</font>
+<a name="line15"> 15: </a><font color="#B22222">  Restrict Rfine to Rzoom_restricted</font>
+<a name="line16"> 16: </a><font color="#B22222">  Scatter Rzoom_restricted -&gt; Rcoarse_restricted</font>
+<a name="line17"> 17: </a><font color="#B22222">  Compute global residual Rcoarse</font>
+<a name="line18"> 18: </a><font color="#B22222">  TauCoarse = Rcoarse - Rcoarse_restricted</font>
+<a name="line19"> 19: </a><font color="#B22222">*/</font>
+
+<a name="line23"> 23: </a><font color="#B22222">/*</font>
+<a name="line24"> 24: </a><font color="#B22222">  DMPatchZoom - Create a version of the coarse patch (identified by rank) with halo on communicator commz</font>
+
+<a name="line26"> 26: </a><font color="#B22222">  Collective on DM</font>
+
+<a name="line28"> 28: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line29"> 29: </a><font color="#B22222">  + dm - the DM</font>
+<a name="line30"> 30: </a><font color="#B22222">  . rank - the rank which holds the given patch</font>
+<a name="line31"> 31: </a><font color="#B22222">  - commz - the new communicator for the patch</font>
+
+<a name="line33"> 33: </a><font color="#B22222">  Output Parameters:</font>
+<a name="line34"> 34: </a><font color="#B22222">  + dmz  - the patch DM</font>
+<a name="line35"> 35: </a><font color="#B22222">  . sfz  - the <A href="../../../../docs/manualpages/PetscSF/PetscSF.html#PetscSF">PetscSF</A> mapping the patch+halo to the zoomed version</font>
+<a name="line36"> 36: </a><font color="#B22222">  . sfzr - the <A href="../../../../docs/manualpages/PetscSF/PetscSF.html#PetscSF">PetscSF</A> mapping the patch to the restricted zoomed version</font>
+
+<a name="line38"> 38: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line40"> 40: </a><font color="#B22222">  Note: All processes in commz should have the same rank (could autosplit comm)</font>
+
+<a name="line42"> 42: </a><font color="#B22222">.seealso: DMPatchSolve()</font>
+<a name="line43"> 43: </a><font color="#B22222">*/</font>
+<a name="line44"> 44: </a><strong><font color="#4169E1"><a name="DMPatchZoom"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchZoom(DM dm, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> lower, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> upper, <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> commz, DM *dmz, <A href="../../../../docs/manualpages/PetscSF/PetscSF.html#PetscSF">PetscSF</A> *sfz, <A href="../../../../docs/manualpages/PetscSF/PetscSF.html#PetscSF">PetscSF</A> *sfzr)</font></strong>
+<a name="line45"> 45: </a>{
+<a name="line46"> 46: </a>  <A href="../../../../docs/manualpages/DM/DMDAStencilType.html#DMDAStencilType">DMDAStencilType</A> st;
+<a name="line47"> 47: </a>  <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A>      blower, bupper, loclower, locupper;
+<a name="line48"> 48: </a>  <A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A>              is;
+<a name="line49"> 49: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  *ranges, *indices;
+<a name="line50"> 50: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        *localPoints  = NULL;
+<a name="line51"> 51: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSFNode.html#PetscSFNode">PetscSFNode</A>     *remotePoints = NULL;
+<a name="line52"> 52: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        dim, dof;
+<a name="line53"> 53: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        M, N, P, rM, rN, rP, halo = 1, sxb, syb, szb, sxr, syr, szr, exr, eyr, ezr, mxb, myb, mzb, i, j, k, q;
+<a name="line54"> 54: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>     size;
+<a name="line55"> 55: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line58"> 58: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm), &amp;size);
+<a name="line59"> 59: </a>  <font color="#B22222">/* Create patch DM */</font>
+<a name="line60"> 60: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(dm, &amp;dim, &amp;M, &amp;N, &amp;P, 0,0,0, &amp;dof, 0,0,0,0, &amp;st);
+
+<a name="line62"> 62: </a>  <font color="#B22222">/* Get piece for rank r, expanded by halo */</font>
+<a name="line63"> 63: </a>  bupper.i = PetscMin(M, upper.i + halo); blower.i = PetscMax(lower.i - halo, 0);
+<a name="line64"> 64: </a>  bupper.j = PetscMin(N, upper.j + halo); blower.j = PetscMax(lower.j - halo, 0);
+<a name="line65"> 65: </a>  bupper.k = PetscMin(P, upper.k + halo); blower.k = PetscMax(lower.k - halo, 0);
+<a name="line66"> 66: </a>  rM       = bupper.i - blower.i;
+<a name="line67"> 67: </a>  rN       = bupper.j - blower.j;
+<a name="line68"> 68: </a>  rP       = bupper.k - blower.k;
+
+<a name="line70"> 70: </a>  <font color="#4169E1">if</font> (commz != MPI_COMM_NULL) {
+<a name="line71"> 71: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate.html#DMDACreate">DMDACreate</A>(commz, dmz);
+<a name="line72"> 72: </a>    <A href="../../../../docs/manualpages/DM/DMDASetDim.html#DMDASetDim">DMDASetDim</A>(*dmz, dim);
+<a name="line73"> 73: </a>    <A href="../../../../docs/manualpages/DM/DMDASetSizes.html#DMDASetSizes">DMDASetSizes</A>(*dmz, rM, rN, rP);
+<a name="line74"> 74: </a>    <A href="../../../../docs/manualpages/DM/DMDASetNumProcs.html#DMDASetNumProcs">DMDASetNumProcs</A>(*dmz, <A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, <A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, <A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>);
+<a name="line75"> 75: </a>    <A href="../../../../docs/manualpages/DM/DMDASetBoundaryType.html#DMDASetBoundaryType">DMDASetBoundaryType</A>(*dmz, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE);
+<a name="line76"> 76: </a>    <A href="../../../../docs/manualpages/DM/DMDASetDof.html#DMDASetDof">DMDASetDof</A>(*dmz, dof);
+<a name="line77"> 77: </a>    <A href="../../../../docs/manualpages/DM/DMDASetStencilType.html#DMDASetStencilType">DMDASetStencilType</A>(*dmz, st);
+<a name="line78"> 78: </a>    <A href="../../../../docs/manualpages/DM/DMDASetStencilWidth.html#DMDASetStencilWidth">DMDASetStencilWidth</A>(*dmz, 0);
+<a name="line79"> 79: </a>    <A href="../../../../docs/manualpages/DM/DMDASetOwnershipRanges.html#DMDASetOwnershipRanges">DMDASetOwnershipRanges</A>(*dmz, NULL, NULL, NULL);
+<a name="line80"> 80: </a>    <A href="../../../../docs/manualpages/DM/DMSetFromOptions.html#DMSetFromOptions">DMSetFromOptions</A>(*dmz);
+<a name="line81"> 81: </a>    <A href="../../../../docs/manualpages/DM/DMSetUp.html#DMSetUp">DMSetUp</A>(*dmz);
+<a name="line82"> 82: </a>    <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(*dmz, &amp;sxb, &amp;syb, &amp;szb, &amp;mxb, &amp;myb, &amp;mzb);
+<a name="line83"> 83: </a>    sxr  = PetscMax(sxb,     lower.i - blower.i);
+<a name="line84"> 84: </a>    syr  = PetscMax(syb,     lower.j - blower.j);
+<a name="line85"> 85: </a>    szr  = PetscMax(szb,     lower.k - blower.k);
+<a name="line86"> 86: </a>    exr  = PetscMin(sxb+mxb, upper.i - blower.i);
+<a name="line87"> 87: </a>    eyr  = PetscMin(syb+myb, upper.j - blower.j);
+<a name="line88"> 88: </a>    ezr  = PetscMin(szb+mzb, upper.k - blower.k);
+<a name="line89"> 89: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc2.html#PetscMalloc2">PetscMalloc2</A>(rM*rN*rP,&amp;localPoints,rM*rN*rP,&amp;remotePoints);
+<a name="line90"> 90: </a>  } <font color="#4169E1">else</font> {
+<a name="line91"> 91: </a>    sxr = syr = szr = exr = eyr = ezr = sxb = syb = szb = mxb = myb = mzb = 0;
+<a name="line92"> 92: </a>  }
+
+<a name="line94"> 94: </a>  <font color="#B22222">/* Create SF for restricted map */</font>
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRanges.html#VecGetOwnershipRanges">VecGetOwnershipRanges</A>(X,&amp;ranges);
+
+<a name="line97"> 97: </a>  loclower.i = blower.i + sxr; locupper.i = blower.i + exr;
+<a name="line98"> 98: </a>  loclower.j = blower.j + syr; locupper.j = blower.j + eyr;
+<a name="line99"> 99: </a>  loclower.k = blower.k + szr; locupper.k = blower.k + ezr;
+
+<a name="line101">101: </a>  <A href="../../../../docs/manualpages/DM/DMDACreatePatchIS.html#DMDACreatePatchIS">DMDACreatePatchIS</A>(dm, &amp;loclower, &amp;locupper, &amp;is);
+<a name="line102">102: </a>  <A href="../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(is, &amp;indices);
+
+<a name="line104">104: </a>  q = 0;
+<a name="line105">105: </a>  <font color="#4169E1">for</font> (k = szb; k &lt; szb+mzb; ++k) {
+<a name="line106">106: </a>    <font color="#4169E1">if</font> ((k &lt; szr) || (k &gt;= ezr)) <font color="#4169E1">continue</font>;
+<a name="line107">107: </a>    <font color="#4169E1">for</font> (j = syb; j &lt; syb+myb; ++j) {
+<a name="line108">108: </a>      <font color="#4169E1">if</font> ((j &lt; syr) || (j &gt;= eyr)) <font color="#4169E1">continue</font>;
+<a name="line109">109: </a>      <font color="#4169E1">for</font> (i = sxb; i &lt; sxb+mxb; ++i) {
+<a name="line110">110: </a>        const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> lp = ((k-szb)*rN + (j-syb))*rM + i-sxb;
+<a name="line111">111: </a>        <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       r;
+
+<a name="line113">113: </a>        <font color="#4169E1">if</font> ((i &lt; sxr) || (i &gt;= exr)) <font color="#4169E1">continue</font>;
+<a name="line114">114: </a>        localPoints[q]        = lp;
+<a name="line115">115: </a>        <A href="../../../../docs/manualpages/Sys/PetscFindInt.html#PetscFindInt">PetscFindInt</A>(indices[q], size+1, ranges, &amp;r);
+
+<a name="line117">117: </a>        remotePoints[q].rank  = r &lt; 0 ? -(r+1) - 1 : r;
+<a name="line118">118: </a>        remotePoints[q].index = indices[q] - ranges[remotePoints[q].rank];
+<a name="line119">119: </a>        ++q;
+<a name="line120">120: </a>      }
+<a name="line121">121: </a>    }
+<a name="line122">122: </a>  }
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(is, &amp;indices);
+<a name="line124">124: </a>  <A href="../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(&amp;is);
+<a name="line125">125: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSFCreate.html#PetscSFCreate">PetscSFCreate</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm), sfzr);
+<a name="line126">126: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectSetName.html#PetscObjectSetName">PetscObjectSetName</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) *sfzr, <font color="#666666">"Restricted Map"</font>);
+<a name="line127">127: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSFSetGraph.html#PetscSFSetGraph">PetscSFSetGraph</A>(*sfzr, M*N*P, q, localPoints, PETSC_COPY_VALUES, remotePoints, PETSC_COPY_VALUES);
+
+<a name="line129">129: </a>  <font color="#B22222">/* Create SF for buffered map */</font>
+<a name="line130">130: </a>  loclower.i = blower.i + sxb; locupper.i = blower.i + sxb+mxb;
+<a name="line131">131: </a>  loclower.j = blower.j + syb; locupper.j = blower.j + syb+myb;
+<a name="line132">132: </a>  loclower.k = blower.k + szb; locupper.k = blower.k + szb+mzb;
+
+<a name="line134">134: </a>  <A href="../../../../docs/manualpages/DM/DMDACreatePatchIS.html#DMDACreatePatchIS">DMDACreatePatchIS</A>(dm, &amp;loclower, &amp;locupper, &amp;is);
+<a name="line135">135: </a>  <A href="../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(is, &amp;indices);
+
+<a name="line137">137: </a>  q = 0;
+<a name="line138">138: </a>  <font color="#4169E1">for</font> (k = szb; k &lt; szb+mzb; ++k) {
+<a name="line139">139: </a>    <font color="#4169E1">for</font> (j = syb; j &lt; syb+myb; ++j) {
+<a name="line140">140: </a>      <font color="#4169E1">for</font> (i = sxb; i &lt; sxb+mxb; ++i, ++q) {
+<a name="line141">141: </a>        <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> r;
+
+<a name="line143">143: </a>        localPoints[q]        = q;
+<a name="line144">144: </a>        <A href="../../../../docs/manualpages/Sys/PetscFindInt.html#PetscFindInt">PetscFindInt</A>(indices[q], size+1, ranges, &amp;r);
+<a name="line145">145: </a>        remotePoints[q].rank  = r &lt; 0 ? -(r+1) - 1 : r;
+<a name="line146">146: </a>        remotePoints[q].index = indices[q] - ranges[remotePoints[q].rank];
+<a name="line147">147: </a>      }
+<a name="line148">148: </a>    }
+<a name="line149">149: </a>  }
+<a name="line150">150: </a>  <A href="../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(is, &amp;indices);
+<a name="line151">151: </a>  <A href="../../../../docs/manualpages/IS/ISDestroy.html#ISDestroy">ISDestroy</A>(&amp;is);
+<a name="line152">152: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSFCreate.html#PetscSFCreate">PetscSFCreate</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm), sfz);
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectSetName.html#PetscObjectSetName">PetscObjectSetName</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) *sfz, <font color="#666666">"Buffered Map"</font>);
+<a name="line154">154: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSFSetGraph.html#PetscSFSetGraph">PetscSFSetGraph</A>(*sfz, M*N*P, q, localPoints, PETSC_COPY_VALUES, remotePoints, PETSC_COPY_VALUES);
+
+<a name="line156">156: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree2.html#PetscFree2">PetscFree2</A>(localPoints, remotePoints);
+<a name="line157">157: </a>  <font color="#4169E1">return</font>(0);
+<a name="line158">158: </a>}
+
+<a name="line160">160: </a><font color="#4169E1">typedef</font> <font color="#4169E1">enum</font> {PATCH_COMM_TYPE_WORLD = 0, PATCH_COMM_TYPE_SELF = 1} PatchCommType;
+
+<a name="line164">164: </a><strong><font color="#4169E1"><a name="DMPatchSolve"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchSolve(DM dm)</font></strong>
+<a name="line165">165: </a>{
+<a name="line166">166: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>       comm;
+<a name="line167">167: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>       commz;
+<a name="line168">168: </a>  DM             dmc;
+<a name="line169">169: </a>  <A href="../../../../docs/manualpages/PetscSF/PetscSF.html#PetscSF">PetscSF</A>        sfz, sfzr;
+<a name="line170">170: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            XC;
+<a name="line171">171: </a>  <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A>     patchSize, commSize, gridRank, lower, upper;
+<a name="line172">172: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       M, N, P, i, j, k, l, m, n, p = 0;
+<a name="line173">173: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank, size;
+<a name="line174">174: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       debug = 0;
+
+<a name="line178">178: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm,&amp;comm);
+<a name="line179">179: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm, &amp;rank);
+<a name="line180">180: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(comm, &amp;size);
+<a name="line181">181: </a>  DMPatchGetCoarse(dm, &amp;dmc);
+<a name="line182">182: </a>  DMPatchGetPatchSize(dm, &amp;patchSize);
+<a name="line183">183: </a>  DMPatchGetCommSize(dm, &amp;commSize);
+<a name="line184">184: </a>  DMPatchGetCommSize(dm, &amp;commSize);
+<a name="line185">185: </a>  <A href="../../../../docs/manualpages/DM/DMGetGlobalVector.html#DMGetGlobalVector">DMGetGlobalVector</A>(dmc, &amp;XC);
+<a name="line186">186: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(dmc, 0, &amp;M, &amp;N, &amp;P, &amp;l, &amp;m, &amp;n, 0,0,0,0,0,0);
+<a name="line187">187: </a>  M    = PetscMax(M, 1); l = PetscMax(l, 1);
+<a name="line188">188: </a>  N    = PetscMax(N, 1); m = PetscMax(m, 1);
+<a name="line189">189: </a>  P    = PetscMax(P, 1); n = PetscMax(n, 1);
+
+<a name="line191">191: </a>  gridRank.i = rank       % l;
+<a name="line192">192: </a>  gridRank.j = rank/l     % m;
+<a name="line193">193: </a>  gridRank.k = rank/(l*m) % n;
+
+<a name="line195">195: </a>  <font color="#4169E1">if</font> (commSize.i*commSize.j*commSize.k == size || commSize.i*commSize.j*commSize.k == 0) {
+<a name="line196">196: </a>    commSize.i = l; commSize.j = m; commSize.k = n;
+<a name="line197">197: </a>    commz      = comm;
+<a name="line198">198: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (commSize.i*commSize.j*commSize.k == 1) {
+<a name="line199">199: </a>    commz = <A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>;
+<a name="line200">200: </a>  } <font color="#4169E1">else</font> {
+<a name="line201">201: </a>    const <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> newComm = ((gridRank.k/commSize.k)*(m/commSize.j) + gridRank.j/commSize.j)*(l/commSize.i) + (gridRank.i/commSize.i);
+<a name="line202">202: </a>    const <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> newRank = ((gridRank.k%commSize.k)*commSize.j     + gridRank.j%commSize.j)*commSize.i     + (gridRank.i%commSize.i);
+
+<a name="line204">204: </a>    <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_split.html#MPI_Comm_split">MPI_Comm_split</A>(comm, newComm, newRank, &amp;commz);
+<a name="line205">205: </a>    <font color="#4169E1">if</font> (debug) {<A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, <font color="#666666">"Rank %d color %d key %d commz %d\n"</font>, rank, newComm, newRank, *((<A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>*) &amp;commz));}
+<a name="line206">206: </a>  }
+<a name="line207">207: </a>  <font color="#B22222">/*</font>
+<a name="line208">208: </a><font color="#B22222">   Assumptions:</font>
+<a name="line209">209: </a><font color="#B22222">     - patchSize divides gridSize</font>
+<a name="line210">210: </a><font color="#B22222">     - commSize divides gridSize</font>
+<a name="line211">211: </a><font color="#B22222">     - commSize divides l,m,n</font>
+<a name="line212">212: </a><font color="#B22222">   Ignore multiple patches per rank for now</font>
+
+<a name="line214">214: </a><font color="#B22222">   Multiple ranks per patch:</font>
+<a name="line215">215: </a><font color="#B22222">     - l,m,n divides patchSize</font>
+<a name="line216">216: </a><font color="#B22222">     - commSize divides patchSize</font>
+<a name="line217">217: </a><font color="#B22222">   */</font>
+<a name="line218">218: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; P; k += PetscMax(patchSize.k, 1)) {
+<a name="line219">219: </a>    <font color="#4169E1">for</font> (j = 0; j &lt; N; j += PetscMax(patchSize.j, 1)) {
+<a name="line220">220: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; M; i += PetscMax(patchSize.i, 1), ++p) {
+<a name="line221">221: </a>        <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> commp = MPI_COMM_NULL;
+<a name="line222">222: </a>        DM       dmz   = NULL;
+<a name="line223">223: </a><font color="#A020F0">#if 0</font>
+<a name="line224">224: </a>        DM  dmf     = NULL;
+<a name="line225">225: </a>        <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> interpz = NULL;
+<a name="line226">226: </a><font color="#A020F0">#endif</font>
+<a name="line227">227: </a>        <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         XZ       = NULL;
+<a name="line228">228: </a>        <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *xcarray = NULL;
+<a name="line229">229: </a>        <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *xzarray = NULL;
+
+<a name="line231">231: </a>        <font color="#4169E1">if</font> ((gridRank.k/commSize.k == p/(l/commSize.i * m/commSize.j) % n/commSize.k) &amp;&amp;
+<a name="line232">232: </a>            (gridRank.j/commSize.j == p/(l/commSize.i)                % m/commSize.j) &amp;&amp;
+<a name="line233">233: </a>            (gridRank.i/commSize.i == p                               % l/commSize.i)) {
+<a name="line234">234: </a>          <font color="#4169E1">if</font> (debug) {<A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>, <font color="#666666">"Rank %d is accepting Patch %d\n"</font>, rank, p);}
+<a name="line235">235: </a>          commp = commz;
+<a name="line236">236: </a>        }
+<a name="line237">237: </a>        <font color="#B22222">/* Zoom to coarse patch */</font>
+<a name="line238">238: </a>        lower.i = i; lower.j = j; lower.k = k;
+<a name="line239">239: </a>        upper.i = i + patchSize.i; upper.j = j + patchSize.j; upper.k = k + patchSize.k;
+<a name="line240">240: </a>        DMPatchZoom(dmc, XC, lower, upper, commp, &amp;dmz, &amp;sfz, &amp;sfzr);
+<a name="line241">241: </a>        lower.c = 0; <font color="#B22222">/* initialize member, otherwise compiler issues warnings */</font>
+<a name="line242">242: </a>        upper.c = 0; <font color="#B22222">/* initialize member, otherwise compiler issues warnings */</font>
+<a name="line243">243: </a>        <font color="#B22222">/* Debug */</font>
+<a name="line244">244: </a>        <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(comm, <font color="#666666">"Patch %d: (%d, %d, %d)--(%d, %d, %d)\n"</font>, p, lower.i, lower.j, lower.k, upper.i, upper.j, upper.k);
+<a name="line245">245: </a>        <font color="#4169E1">if</font> (dmz) {<A href="../../../../docs/manualpages/DM/DMView.html#DMView">DMView</A>(dmz, <A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_.html#PETSC_VIEWER_STDOUT_">PETSC_VIEWER_STDOUT_</A>(commz));}
+<a name="line246">246: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFView.html#PetscSFView">PetscSFView</A>(sfz,  <A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_.html#PETSC_VIEWER_STDOUT_">PETSC_VIEWER_STDOUT_</A>(comm));
+<a name="line247">247: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFView.html#PetscSFView">PetscSFView</A>(sfzr, <A href="../../../../docs/manualpages/Viewer/PETSC_VIEWER_STDOUT_.html#PETSC_VIEWER_STDOUT_">PETSC_VIEWER_STDOUT_</A>(comm));
+<a name="line248">248: </a>        <font color="#B22222">/* Scatter Xcoarse -&gt; Xzoom */</font>
+<a name="line249">249: </a>        <font color="#4169E1">if</font> (dmz) {<A href="../../../../docs/manualpages/DM/DMGetGlobalVector.html#DMGetGlobalVector">DMGetGlobalVector</A>(dmz, &amp;XZ);}
+<a name="line250">250: </a>        <font color="#4169E1">if</font> (XZ)  {<A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(XZ, &amp;xzarray);}
+<a name="line251">251: </a>        <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(XC, &amp;xcarray);
+<a name="line252">252: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFBcastBegin.html#PetscSFBcastBegin">PetscSFBcastBegin</A>(sfz, <A href="../../../../docs/manualpages/Sys/MPIU_SCALAR.html#MPIU_SCALAR">MPIU_SCALAR</A>, xcarray, xzarray);
+<a name="line253">253: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFBcastEnd.html#PetscSFBcastEnd">PetscSFBcastEnd</A>(sfz, <A href="../../../../docs/manualpages/Sys/MPIU_SCALAR.html#MPIU_SCALAR">MPIU_SCALAR</A>, xcarray, xzarray);
+<a name="line254">254: </a>        <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(XC, &amp;xcarray);
+<a name="line255">255: </a>        <font color="#4169E1">if</font> (XZ)  {<A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(XZ, &amp;xzarray);}
+<a name="line256">256: </a><font color="#A020F0">#if 0</font>
+<a name="line257">257: </a>        <font color="#B22222">/* Interpolate Xzoom -&gt; Xfine, note that this may be on subcomms */</font>
+<a name="line258">258: </a>        <A href="../../../../docs/manualpages/DM/DMRefine.html#DMRefine">DMRefine</A>(dmz, MPI_COMM_NULL, &amp;dmf);
+<a name="line259">259: </a>        <A href="../../../../docs/manualpages/DM/DMCreateInterpolation.html#DMCreateInterpolation">DMCreateInterpolation</A>(dmz, dmf, &amp;interpz, NULL);
+<a name="line260">260: </a>        <A href="../../../../docs/manualpages/DM/DMInterpolate.html#DMInterpolate">DMInterpolate</A>(dmz, interpz, dmf);
+<a name="line261">261: </a>        <font color="#B22222">/* Smooth Xfine using two-step smoother, normal smoother plus Kaczmarz---moves back and forth from dmzoom to dmfine */</font>
+<a name="line262">262: </a>        <font color="#B22222">/* Compute residual Rfine */</font>
+<a name="line263">263: </a>        <font color="#B22222">/* Restrict Rfine to Rzoom_restricted */</font>
+<a name="line264">264: </a><font color="#A020F0">#endif</font>
+<a name="line265">265: </a>        <font color="#B22222">/* Scatter Rzoom_restricted -&gt; Rcoarse_restricted */</font>
+<a name="line266">266: </a>        <font color="#4169E1">if</font> (XZ)  {<A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(XZ, &amp;xzarray);}
+<a name="line267">267: </a>        <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(XC, &amp;xcarray);
+<a name="line268">268: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFReduceBegin.html#PetscSFReduceBegin">PetscSFReduceBegin</A>(sfzr, <A href="../../../../docs/manualpages/Sys/MPIU_SCALAR.html#MPIU_SCALAR">MPIU_SCALAR</A>, xzarray, xcarray, MPI_SUM);
+<a name="line269">269: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFReduceEnd.html#PetscSFReduceEnd">PetscSFReduceEnd</A>(sfzr, <A href="../../../../docs/manualpages/Sys/MPIU_SCALAR.html#MPIU_SCALAR">MPIU_SCALAR</A>, xzarray, xcarray, MPI_SUM);
+<a name="line270">270: </a>        <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(XC, &amp;xcarray);
+<a name="line271">271: </a>        <font color="#4169E1">if</font> (XZ)  {<A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(XZ, &amp;xzarray);}
+<a name="line272">272: </a>        <font color="#4169E1">if</font> (dmz) {<A href="../../../../docs/manualpages/DM/DMRestoreGlobalVector.html#DMRestoreGlobalVector">DMRestoreGlobalVector</A>(dmz, &amp;XZ);}
+<a name="line273">273: </a>        <font color="#B22222">/* Compute global residual Rcoarse */</font>
+<a name="line274">274: </a>        <font color="#B22222">/* TauCoarse = Rcoarse - Rcoarse_restricted */</font>
+
+<a name="line276">276: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFDestroy.html#PetscSFDestroy">PetscSFDestroy</A>(&amp;sfz);
+<a name="line277">277: </a>        <A href="../../../../docs/manualpages/PetscSF/PetscSFDestroy.html#PetscSFDestroy">PetscSFDestroy</A>(&amp;sfzr);
+<a name="line278">278: </a>        <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;dmz);
+<a name="line279">279: </a>      }
+<a name="line280">280: </a>    }
+<a name="line281">281: </a>  }
+<a name="line282">282: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreGlobalVector.html#DMRestoreGlobalVector">DMRestoreGlobalVector</A>(dmc, &amp;XC);
+<a name="line283">283: </a>  <font color="#4169E1">return</font>(0);
+<a name="line284">284: </a>}
+
+<a name="line288">288: </a><strong><font color="#4169E1"><a name="DMPatchView_Ascii"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchView_Ascii(DM dm, <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line289">289: </a>{
+<a name="line290">290: </a>  DM_Patch          *mesh = (DM_Patch*) dm-&gt;data;
+<a name="line291">291: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerFormat.html#PetscViewerFormat">PetscViewerFormat</A> format;
+<a name="line292">292: </a>  const char        *name;
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+
+<a name="line296">296: </a>  PetscViewerGetFormat(viewer, &amp;format);
+<a name="line297">297: </a>  <font color="#B22222">/* if (format == PETSC_VIEWER_ASCII_INFO_DETAIL) */</font>
+<a name="line298">298: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetName.html#PetscObjectGetName">PetscObjectGetName</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) dm, &amp;name);
+<a name="line299">299: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"Patch DM %s\n"</font>, name);
+<a name="line300">300: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPushTab.html#PetscViewerASCIIPushTab">PetscViewerASCIIPushTab</A>(viewer);
+<a name="line301">301: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"Coarse DM\n"</font>);
+<a name="line302">302: </a>  <A href="../../../../docs/manualpages/DM/DMView.html#DMView">DMView</A>(mesh-&gt;dmCoarse, viewer);
+<a name="line303">303: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPopTab.html#PetscViewerASCIIPopTab">PetscViewerASCIIPopTab</A>(viewer);
+<a name="line304">304: </a>  <font color="#4169E1">return</font>(0);
+<a name="line305">305: </a>}
+
+<a name="line309">309: </a><strong><font color="#4169E1"><a name="DMView_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMView_Patch(DM dm, <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line310">310: </a>{
+<a name="line311">311: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      iascii, isbinary;
+
+<a name="line317">317: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) viewer, PETSCVIEWERASCII, &amp;iascii);
+<a name="line318">318: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>) viewer, PETSCVIEWERBINARY, &amp;isbinary);
+<a name="line319">319: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line320">320: </a>    DMPatchView_Ascii(dm, viewer);
+<a name="line321">321: </a><font color="#A020F0">#if 0</font>
+<a name="line322">322: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (isbinary) {
+<a name="line323">323: </a>    DMPatchView_Binary(dm, viewer);
+<a name="line324">324: </a><font color="#A020F0">#endif</font>
+<a name="line325">325: </a>  }
+<a name="line326">326: </a>  <font color="#4169E1">return</font>(0);
+<a name="line327">327: </a>}
+
+<a name="line331">331: </a><strong><font color="#4169E1"><a name="DMDestroy_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMDestroy_Patch(DM dm)</font></strong>
+<a name="line332">332: </a>{
+<a name="line333">333: </a>  DM_Patch       *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line337">337: </a>  <font color="#4169E1">if</font> (--mesh-&gt;refct &gt; 0) <font color="#4169E1">return</font>(0);
+<a name="line338">338: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;mesh-&gt;dmCoarse);
+<a name="line339">339: </a>  <font color="#B22222">/* This was originally freed in <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(), but that prevents reference counting of backend objects */</font>
+<a name="line340">340: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(mesh);
+<a name="line341">341: </a>  <font color="#4169E1">return</font>(0);
+<a name="line342">342: </a>}
+
+<a name="line346">346: </a><strong><font color="#4169E1"><a name="DMSetUp_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMSetUp_Patch(DM dm)</font></strong>
+<a name="line347">347: </a>{
+<a name="line348">348: </a>  DM_Patch       *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line353">353: </a>  <A href="../../../../docs/manualpages/DM/DMSetUp.html#DMSetUp">DMSetUp</A>(mesh-&gt;dmCoarse);
+<a name="line354">354: </a>  <font color="#4169E1">return</font>(0);
+<a name="line355">355: </a>}
+
+<a name="line359">359: </a><strong><font color="#4169E1"><a name="DMCreateGlobalVector_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCreateGlobalVector_Patch(DM dm, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *g)</font></strong>
+<a name="line360">360: </a>{
+<a name="line361">361: </a>  DM_Patch       *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line366">366: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(mesh-&gt;dmCoarse, g);
+<a name="line367">367: </a>  <font color="#4169E1">return</font>(0);
+<a name="line368">368: </a>}
+
+<a name="line372">372: </a><strong><font color="#4169E1"><a name="DMCreateLocalVector_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCreateLocalVector_Patch(DM dm, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *l)</font></strong>
+<a name="line373">373: </a>{
+<a name="line374">374: </a>  DM_Patch       *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line379">379: </a>  <A href="../../../../docs/manualpages/DM/DMCreateLocalVector.html#DMCreateLocalVector">DMCreateLocalVector</A>(mesh-&gt;dmCoarse, l);
+<a name="line380">380: </a>  <font color="#4169E1">return</font>(0);
+<a name="line381">381: </a>}
+
+<a name="line385">385: </a><strong><font color="#4169E1"><a name="DMCreateSubDM_Patch"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCreateSubDM_Patch(DM dm, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> numFields, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> fields[], <A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A> *is, DM *subdm)</font></strong>
+<a name="line386">386: </a>{
+<a name="line389">389: </a>  <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm), PETSC_ERR_SUP, <font color="#666666">"Tell me to code this"</font>);
+<a name="line390">390: </a>  <font color="#4169E1">return</font>(0);
+<a name="line391">391: </a>}
+
+<a name="line395">395: </a><strong><font color="#4169E1"><a name="DMPatchGetCoarse"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchGetCoarse(DM dm, DM *dmCoarse)</font></strong>
+<a name="line396">396: </a>{
+<a name="line397">397: </a>  DM_Patch *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line401">401: </a>  *dmCoarse = mesh-&gt;dmCoarse;
+<a name="line402">402: </a>  <font color="#4169E1">return</font>(0);
+<a name="line403">403: </a>}
+
+<a name="line407">407: </a><strong><font color="#4169E1"><a name="DMPatchGetPatchSize"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchGetPatchSize(DM dm, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> *patchSize)</font></strong>
+<a name="line408">408: </a>{
+<a name="line409">409: </a>  DM_Patch *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line414">414: </a>  *patchSize = mesh-&gt;patchSize;
+<a name="line415">415: </a>  <font color="#4169E1">return</font>(0);
+<a name="line416">416: </a>}
+
+<a name="line420">420: </a><strong><font color="#4169E1"><a name="DMPatchSetPatchSize"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchSetPatchSize(DM dm, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> patchSize)</font></strong>
+<a name="line421">421: </a>{
+<a name="line422">422: </a>  DM_Patch *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line426">426: </a>  mesh-&gt;patchSize = patchSize;
+<a name="line427">427: </a>  <font color="#4169E1">return</font>(0);
+<a name="line428">428: </a>}
+
+<a name="line432">432: </a><strong><font color="#4169E1"><a name="DMPatchGetCommSize"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchGetCommSize(DM dm, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> *commSize)</font></strong>
+<a name="line433">433: </a>{
+<a name="line434">434: </a>  DM_Patch *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line439">439: </a>  *commSize = mesh-&gt;commSize;
+<a name="line440">440: </a>  <font color="#4169E1">return</font>(0);
+<a name="line441">441: </a>}
+
+<a name="line445">445: </a><strong><font color="#4169E1"><a name="DMPatchSetCommSize"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMPatchSetCommSize(DM dm, <A href="../../../../docs/manualpages/Mat/MatStencil.html#MatStencil">MatStencil</A> commSize)</font></strong>
+<a name="line446">446: </a>{
+<a name="line447">447: </a>  DM_Patch *mesh = (DM_Patch*) dm-&gt;data;
+
+<a name="line451">451: </a>  mesh-&gt;commSize = commSize;
+<a name="line452">452: </a>  <font color="#4169E1">return</font>(0);
+<a name="line453">453: </a>}
+</pre>
+</body>
+
+</html>

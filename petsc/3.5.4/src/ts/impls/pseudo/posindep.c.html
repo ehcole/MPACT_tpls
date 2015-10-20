@@ -1,0 +1,666 @@
+<center><a href="posindep.c">Actual source code: posindep.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ts/impls/pseudo/posindep.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:37:35+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/ts/impls/pseudo/posindep.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">       Code for Timestepping with implicit backwards Euler.</font>
+<a name="line3">  3: </a><font color="#B22222">*/</font>
+<a name="line4">  4: </a><font color="#A020F0">#include &lt;petsc-private/tsimpl.h&gt;                </font><font color="#B22222">/*I   "petscts.h"   I*/</font><font color="#A020F0"></font>
+
+<a name="line6">  6: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line7">  7: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> update;       <font color="#B22222">/* work vector where new solution is formed */</font>
+<a name="line8">  8: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> func;         <font color="#B22222">/* work vector where F(t[i],u[i]) is stored */</font>
+<a name="line9">  9: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xdot;         <font color="#B22222">/* work vector for time derivative of state */</font>
+
+<a name="line11"> 11: </a>  <font color="#B22222">/* information used for Pseudo-timestepping */</font>
+
+<a name="line13"> 13: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*dt)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,void*);              <font color="#B22222">/* compute next timestep, and related context */</font>
+<a name="line14"> 14: </a>  void *dtctx;
+<a name="line15"> 15: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*verify)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>*);  <font color="#B22222">/* verify previous timestep and related context */</font>
+<a name="line16"> 16: </a>  void *verifyctx;
+
+<a name="line18"> 18: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> fnorm_initial,fnorm;                   <font color="#B22222">/* original and current norm of F(u) */</font>
+<a name="line19"> 19: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> fnorm_previous;
+
+<a name="line21"> 21: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> dt_initial;                     <font color="#B22222">/* initial time-step */</font>
+<a name="line22"> 22: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> dt_increment;                   <font color="#B22222">/* scaling that dt is incremented each time-step */</font>
+<a name="line23"> 23: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> dt_max;                         <font color="#B22222">/* maximum time step */</font>
+<a name="line24"> 24: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> increment_dt_from_initial_dt;
+<a name="line25"> 25: </a>} TS_Pseudo;
+
+<a name="line27"> 27: </a><font color="#B22222">/* ------------------------------------------------------------------------------*/</font>
+
+<a name="line31"> 31: </a><font color="#B22222">/*@C</font>
+<a name="line32"> 32: </a><font color="#B22222">    <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A> - Computes the next timestep for a currently running</font>
+<a name="line33"> 33: </a><font color="#B22222">    pseudo-timestepping process.</font>
+
+<a name="line35"> 35: </a><font color="#B22222">    Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line37"> 37: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line38"> 38: </a><font color="#B22222">.   ts - timestep context</font>
+
+<a name="line40"> 40: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line41"> 41: </a><font color="#B22222">.   dt - newly computed timestep</font>
+
+<a name="line43"> 43: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line45"> 45: </a><font color="#B22222">    Notes:</font>
+<a name="line46"> 46: </a><font color="#B22222">    The routine to be called here to compute the timestep should be</font>
+<a name="line47"> 47: </a><font color="#B22222">    set by calling <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>().</font>
+
+<a name="line49"> 49: </a><font color="#B22222">.keywords: timestep, pseudo, compute</font>
+
+<a name="line51"> 51: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>()</font>
+<a name="line52"> 52: </a><font color="#B22222">@*/</font>
+<a name="line53"> 53: </a><strong><font color="#4169E1"><a name="TSPseudoComputeTimeStep"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *dt)</font></strong>
+<a name="line54"> 54: </a>{
+<a name="line55"> 55: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line59"> 59: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(TS_PseudoComputeTimeStep,ts,0,0,0);
+<a name="line60"> 60: </a>  (*pseudo-&gt;dt)(ts,dt,pseudo-&gt;dtctx);
+<a name="line61"> 61: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(TS_PseudoComputeTimeStep,ts,0,0,0);
+<a name="line62"> 62: </a>  <font color="#4169E1">return</font>(0);
+<a name="line63"> 63: </a>}
+
+
+<a name="line66"> 66: </a><font color="#B22222">/* ------------------------------------------------------------------------------*/</font>
+<a name="line69"> 69: </a><font color="#B22222">/*@C</font>
+<a name="line70"> 70: </a><font color="#B22222">   <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStepDefault.html#TSPseudoVerifyTimeStepDefault">TSPseudoVerifyTimeStepDefault</A> - Default code to verify the quality of the last timestep.</font>
+
+<a name="line72"> 72: </a><font color="#B22222">   Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line74"> 74: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line75"> 75: </a><font color="#B22222">+  ts - the timestep context</font>
+<a name="line76"> 76: </a><font color="#B22222">.  dtctx - unused timestep context</font>
+<a name="line77"> 77: </a><font color="#B22222">-  update - latest solution vector</font>
+
+<a name="line79"> 79: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line80"> 80: </a><font color="#B22222">+  newdt - the timestep to use for the next step</font>
+<a name="line81"> 81: </a><font color="#B22222">-  flag - flag indicating whether the last time step was acceptable</font>
+
+<a name="line83"> 83: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line85"> 85: </a><font color="#B22222">   Note:</font>
+<a name="line86"> 86: </a><font color="#B22222">   This routine always returns a flag of 1, indicating an acceptable</font>
+<a name="line87"> 87: </a><font color="#B22222">   timestep.</font>
+
+<a name="line89"> 89: </a><font color="#B22222">.keywords: timestep, pseudo, default, verify</font>
+
+<a name="line91"> 91: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetVerifyTimeStep.html#TSPseudoSetVerifyTimeStep">TSPseudoSetVerifyTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A>()</font>
+<a name="line92"> 92: </a><font color="#B22222">@*/</font>
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="TSPseudoVerifyTimeStepDefault"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStepDefault.html#TSPseudoVerifyTimeStepDefault">TSPseudoVerifyTimeStepDefault</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> update,void *dtctx,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *newdt,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  *flag)</font></strong>
+<a name="line94"> 94: </a>{
+<a name="line96"> 96: </a>  *flag = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line97"> 97: </a>  <font color="#4169E1">return</font>(0);
+<a name="line98"> 98: </a>}
+
+
+<a name="line103">103: </a><font color="#B22222">/*@</font>
+<a name="line104">104: </a><font color="#B22222">    <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A> - Verifies whether the last timestep was acceptable.</font>
+
+<a name="line106">106: </a><font color="#B22222">    Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line108">108: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line109">109: </a><font color="#B22222">+   ts - timestep context</font>
+<a name="line110">110: </a><font color="#B22222">-   update - latest solution vector</font>
+
+<a name="line112">112: </a><font color="#B22222">    Output Parameters:</font>
+<a name="line113">113: </a><font color="#B22222">+   dt - newly computed timestep (if it had to shrink)</font>
+<a name="line114">114: </a><font color="#B22222">-   flag - indicates if current timestep was ok</font>
+
+<a name="line116">116: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line118">118: </a><font color="#B22222">    Notes:</font>
+<a name="line119">119: </a><font color="#B22222">    The routine to be called here to compute the timestep should be</font>
+<a name="line120">120: </a><font color="#B22222">    set by calling <A href="../../../../docs/manualpages/TS/TSPseudoSetVerifyTimeStep.html#TSPseudoSetVerifyTimeStep">TSPseudoSetVerifyTimeStep</A>().</font>
+
+<a name="line122">122: </a><font color="#B22222">.keywords: timestep, pseudo, verify</font>
+
+<a name="line124">124: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetVerifyTimeStep.html#TSPseudoSetVerifyTimeStep">TSPseudoSetVerifyTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStepDefault.html#TSPseudoVerifyTimeStepDefault">TSPseudoVerifyTimeStepDefault</A>()</font>
+<a name="line125">125: </a><font color="#B22222">@*/</font>
+<a name="line126">126: </a><strong><font color="#4169E1"><a name="TSPseudoVerifyTimeStep"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> update,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *dt,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  *flag)</font></strong>
+<a name="line127">127: </a>{
+<a name="line128">128: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line132">132: </a>  <font color="#4169E1">if</font> (!pseudo-&gt;verify) {*flag = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>; <font color="#4169E1">return</font>(0);}
+
+<a name="line134">134: </a>  (*pseudo-&gt;verify)(ts,update,pseudo-&gt;verifyctx,dt,flag);
+<a name="line135">135: </a>  <font color="#4169E1">return</font>(0);
+<a name="line136">136: </a>}
+
+<a name="line138">138: </a><font color="#B22222">/* --------------------------------------------------------------------------------*/</font>
+
+<a name="line142">142: </a><strong><font color="#4169E1"><a name="TSStep_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStep_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line143">143: </a>{
+<a name="line144">144: </a>  TS_Pseudo           *pseudo = (TS_Pseudo*)ts-&gt;data;
+<a name="line145">145: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>            its,lits,reject;
+<a name="line146">146: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>           stepok;
+<a name="line147">147: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>           next_time_step;
+<a name="line148">148: </a>  <A href="../../../../docs/manualpages/SNES/SNESConvergedReason.html#SNESConvergedReason">SNESConvergedReason</A> snesreason = SNES_CONVERGED_ITERATING;
+<a name="line149">149: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>      ierr;
+
+<a name="line152">152: </a>  <font color="#4169E1">if</font> (ts-&gt;steps == 0) pseudo-&gt;dt_initial = ts-&gt;time_step;
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(ts-&gt;vec_sol,pseudo-&gt;update);
+<a name="line154">154: </a>  next_time_step = ts-&gt;time_step;
+<a name="line155">155: </a>  <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A>(ts,&amp;next_time_step);
+<a name="line156">156: </a>  <font color="#4169E1">for</font> (reject=0; reject&lt;ts-&gt;max_reject; reject++,ts-&gt;reject++) {
+<a name="line157">157: </a>    ts-&gt;time_step = next_time_step;
+<a name="line158">158: </a>    <A href="../../../../docs/manualpages/TS/TSPreStep.html#TSPreStep">TSPreStep</A>(ts);
+<a name="line159">159: </a>    <A href="../../../../docs/manualpages/TS/TSPreStage.html#TSPreStage">TSPreStage</A>(ts,ts-&gt;ptime+ts-&gt;time_step);
+<a name="line160">160: </a>    <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(ts-&gt;snes,NULL,pseudo-&gt;update);
+<a name="line161">161: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetConvergedReason.html#SNESGetConvergedReason">SNESGetConvergedReason</A>(ts-&gt;snes,&amp;snesreason);
+<a name="line162">162: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetLinearSolveIterations.html#SNESGetLinearSolveIterations">SNESGetLinearSolveIterations</A>(ts-&gt;snes,&amp;lits);
+<a name="line163">163: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(ts-&gt;snes,&amp;its);
+<a name="line164">164: </a>    <A href="../../../../docs/manualpages/TS/TSPostStage.html#TSPostStage">TSPostStage</A>(ts,ts-&gt;ptime+ts-&gt;time_step,0,&amp;(pseudo-&gt;update));
+<a name="line165">165: </a>    ts-&gt;snes_its += its; ts-&gt;ksp_its += lits;
+<a name="line166">166: </a>    PetscInfo3(ts,<font color="#666666">"step=%D, nonlinear solve iterations=%D, linear solve iterations=%D\n"</font>,ts-&gt;steps,its,lits);
+<a name="line167">167: </a>    pseudo-&gt;fnorm = -1;         <font color="#B22222">/* The current norm is no longer valid, monitor must recompute it. */</font>
+<a name="line168">168: </a>    <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A>(ts,pseudo-&gt;update,&amp;next_time_step,&amp;stepok);
+<a name="line169">169: </a>    <font color="#4169E1">if</font> (stepok) <font color="#4169E1">break</font>;
+<a name="line170">170: </a>  }
+<a name="line171">171: </a>  <font color="#4169E1">if</font> (snesreason &lt; 0 &amp;&amp; ts-&gt;max_snes_failures &gt; 0 &amp;&amp; ++ts-&gt;num_snes_failures &gt;= ts-&gt;max_snes_failures) {
+<a name="line172">172: </a>    ts-&gt;reason = <A href="../../../../docs/manualpages/TS/TS_DIVERGED_NONLINEAR_SOLVE.html#TS_DIVERGED_NONLINEAR_SOLVE">TS_DIVERGED_NONLINEAR_SOLVE</A>;
+<a name="line173">173: </a>    PetscInfo2(ts,<font color="#666666">"step=%D, nonlinear solve solve failures %D greater than current <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> allowed, stopping solve\n"</font>,ts-&gt;steps,ts-&gt;num_snes_failures);
+<a name="line174">174: </a>    <font color="#4169E1">return</font>(0);
+<a name="line175">175: </a>  }
+<a name="line176">176: </a>  <font color="#4169E1">if</font> (reject &gt;= ts-&gt;max_reject) {
+<a name="line177">177: </a>    ts-&gt;reason = <A href="../../../../docs/manualpages/TS/TS_DIVERGED_STEP_REJECTED.html#TS_DIVERGED_STEP_REJECTED">TS_DIVERGED_STEP_REJECTED</A>;
+<a name="line178">178: </a>    PetscInfo2(ts,<font color="#666666">"step=%D, step rejections %D greater than current <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> allowed, stopping solve\n"</font>,ts-&gt;steps,reject);
+<a name="line179">179: </a>    <font color="#4169E1">return</font>(0);
+<a name="line180">180: </a>  }
+<a name="line181">181: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(pseudo-&gt;update,ts-&gt;vec_sol);
+<a name="line182">182: </a>  ts-&gt;ptime += ts-&gt;time_step;
+<a name="line183">183: </a>  ts-&gt;time_step = next_time_step;
+<a name="line184">184: </a>  ts-&gt;steps++;
+<a name="line185">185: </a>  <font color="#4169E1">return</font>(0);
+<a name="line186">186: </a>}
+
+<a name="line188">188: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+<a name="line191">191: </a><strong><font color="#4169E1"><a name="TSReset_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSReset_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line192">192: </a>{
+<a name="line193">193: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line197">197: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;pseudo-&gt;update);
+<a name="line198">198: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;pseudo-&gt;func);
+<a name="line199">199: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;pseudo-&gt;xdot);
+<a name="line200">200: </a>  <font color="#4169E1">return</font>(0);
+<a name="line201">201: </a>}
+
+<a name="line205">205: </a><strong><font color="#4169E1"><a name="TSDestroy_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSDestroy_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line206">206: </a>{
+
+<a name="line210">210: </a>  TSReset_Pseudo(ts);
+<a name="line211">211: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ts-&gt;data);
+<a name="line212">212: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetVerifyTimeStep_C"</font>,NULL);
+<a name="line213">213: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetTimeStepIncrement_C"</font>,NULL);
+<a name="line214">214: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetMaxTimeStep_C"</font>,NULL);
+<a name="line215">215: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoIncrementDtFromInitialDt_C"</font>,NULL);
+<a name="line216">216: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetTimeStep_C"</font>,NULL);
+<a name="line217">217: </a>  <font color="#4169E1">return</font>(0);
+<a name="line218">218: </a>}
+
+<a name="line220">220: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line224">224: </a><font color="#B22222">/*</font>
+<a name="line225">225: </a><font color="#B22222">    Compute Xdot = (X^{n+1}-X^n)/dt) = 0</font>
+<a name="line226">226: </a><font color="#B22222">*/</font>
+<a name="line227">227: </a><strong><font color="#4169E1"><a name="TSPseudoGetXdot"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSPseudoGetXdot(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Xdot)</font></strong>
+<a name="line228">228: </a>{
+<a name="line229">229: </a>  TS_Pseudo         *pseudo = (TS_Pseudo*)ts-&gt;data;
+<a name="line230">230: </a>  const <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> mdt     = 1.0/ts-&gt;time_step,*xnp1,*xn;
+<a name="line231">231: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       *xdot;
+<a name="line232">232: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line233">233: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          i,n;
+
+<a name="line236">236: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArrayRead.html#VecGetArrayRead">VecGetArrayRead</A>(ts-&gt;vec_sol,&amp;xn);
+<a name="line237">237: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArrayRead.html#VecGetArrayRead">VecGetArrayRead</A>(X,&amp;xnp1);
+<a name="line238">238: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(pseudo-&gt;xdot,&amp;xdot);
+<a name="line239">239: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(X,&amp;n);
+<a name="line240">240: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) xdot[i] = mdt*(xnp1[i] - xn[i]);
+<a name="line241">241: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArrayRead.html#VecRestoreArrayRead">VecRestoreArrayRead</A>(ts-&gt;vec_sol,&amp;xn);
+<a name="line242">242: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArrayRead.html#VecRestoreArrayRead">VecRestoreArrayRead</A>(X,&amp;xnp1);
+<a name="line243">243: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(pseudo-&gt;xdot,&amp;xdot);
+<a name="line244">244: </a>  *Xdot = pseudo-&gt;xdot;
+<a name="line245">245: </a>  <font color="#4169E1">return</font>(0);
+<a name="line246">246: </a>}
+
+<a name="line250">250: </a><font color="#B22222">/*</font>
+<a name="line251">251: </a><font color="#B22222">    The transient residual is</font>
+
+<a name="line253">253: </a><font color="#B22222">        F(U^{n+1},(U^{n+1}-U^n)/dt) = 0</font>
+
+<a name="line255">255: </a><font color="#B22222">    or for ODE,</font>
+
+<a name="line257">257: </a><font color="#B22222">        (U^{n+1} - U^{n})/dt - F(U^{n+1}) = 0</font>
+
+<a name="line259">259: </a><font color="#B22222">    This is the function that must be evaluated for transient simulation and for</font>
+<a name="line260">260: </a><font color="#B22222">    finite difference Jacobians.  On the first Newton step, this algorithm uses</font>
+<a name="line261">261: </a><font color="#B22222">    a guess of U^{n+1} = U^n in which case the transient term vanishes and the</font>
+<a name="line262">262: </a><font color="#B22222">    residual is actually the steady state residual.  Pseudotransient</font>
+<a name="line263">263: </a><font color="#B22222">    continuation as described in the literature is a linearly implicit</font>
+<a name="line264">264: </a><font color="#B22222">    algorithm, it only takes this one Newton step with the steady state</font>
+<a name="line265">265: </a><font color="#B22222">    residual, and then advances to the next time step.</font>
+<a name="line266">266: </a><font color="#B22222">*/</font>
+<a name="line267">267: </a><strong><font color="#4169E1"><a name="SNESTSFormFunction_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESTSFormFunction_Pseudo(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Y,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line268">268: </a>{
+<a name="line269">269: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Xdot;
+
+<a name="line273">273: </a>  TSPseudoGetXdot(ts,X,&amp;Xdot);
+<a name="line274">274: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ts-&gt;ptime+ts-&gt;time_step,X,Xdot,Y,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line275">275: </a>  <font color="#4169E1">return</font>(0);
+<a name="line276">276: </a>}
+
+<a name="line280">280: </a><font color="#B22222">/*</font>
+<a name="line281">281: </a><font color="#B22222">   This constructs the Jacobian needed for <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>.  For DAE, this is</font>
+
+<a name="line283">283: </a><font color="#B22222">       dF(X,Xdot)/dX + shift*dF(X,Xdot)/dXdot</font>
+
+<a name="line285">285: </a><font color="#B22222">    and for ODE:</font>
+
+<a name="line287">287: </a><font color="#B22222">       J = I/dt - J_{Frhs}   where J_{Frhs} is the given Jacobian of Frhs.</font>
+<a name="line288">288: </a><font color="#B22222">*/</font>
+<a name="line289">289: </a><strong><font color="#4169E1"><a name="SNESTSFormJacobian_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESTSFormJacobian_Pseudo(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> AA,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> BB,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line290">290: </a>{
+<a name="line291">291: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Xdot;
+
+<a name="line295">295: </a>  TSPseudoGetXdot(ts,X,&amp;Xdot);
+<a name="line296">296: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIJacobian.html#TSComputeIJacobian">TSComputeIJacobian</A>(ts,ts-&gt;ptime+ts-&gt;time_step,X,Xdot,1./ts-&gt;time_step,AA,BB,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line297">297: </a>  <font color="#4169E1">return</font>(0);
+<a name="line298">298: </a>}
+
+
+<a name="line303">303: </a><strong><font color="#4169E1"><a name="TSSetUp_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetUp_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line304">304: </a>{
+<a name="line305">305: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line309">309: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;pseudo-&gt;update);
+<a name="line310">310: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;pseudo-&gt;func);
+<a name="line311">311: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;pseudo-&gt;xdot);
+<a name="line312">312: </a>  <font color="#4169E1">return</font>(0);
+<a name="line313">313: </a>}
+<a name="line314">314: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line318">318: </a><strong><font color="#4169E1"><a name="TSPseudoMonitorDefault"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSPseudoMonitorDefault(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> step,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> ptime,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> v,void *dummy)</font></strong>
+<a name="line319">319: </a>{
+<a name="line320">320: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+<a name="line322">322: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    viewer = (<A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>) dummy;
+
+<a name="line325">325: </a>  <font color="#4169E1">if</font> (!viewer) {
+<a name="line326">326: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIGetStdout.html#PetscViewerASCIIGetStdout">PetscViewerASCIIGetStdout</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts),&amp;viewer);
+<a name="line327">327: </a>  }
+<a name="line328">328: </a>  <font color="#4169E1">if</font> (pseudo-&gt;fnorm &lt; 0) {      <font color="#B22222">/* The last computed norm is stale, recompute */</font>
+<a name="line329">329: </a>    <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(pseudo-&gt;xdot);
+<a name="line330">330: </a>    <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ts-&gt;ptime,ts-&gt;vec_sol,pseudo-&gt;xdot,pseudo-&gt;func,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line331">331: </a>    <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(pseudo-&gt;func,<A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;pseudo-&gt;fnorm);
+<a name="line332">332: </a>  }
+<a name="line333">333: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIAddTab.html#PetscViewerASCIIAddTab">PetscViewerASCIIAddTab</A>(viewer,((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;tablevel);
+<a name="line334">334: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> %D dt %g time %g fnorm %g\n"</font>,step,(double)ts-&gt;time_step,(double)ptime,(double)pseudo-&gt;fnorm);
+<a name="line335">335: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIISubtractTab.html#PetscViewerASCIISubtractTab">PetscViewerASCIISubtractTab</A>(viewer,((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;tablevel);
+<a name="line336">336: </a>  <font color="#4169E1">return</font>(0);
+<a name="line337">337: </a>}
+
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="TSSetFromOptions_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetFromOptions_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line342">342: </a>{
+<a name="line343">343: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+<a name="line345">345: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line346">346: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    viewer;
+
+<a name="line349">349: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"Pseudo-timestepping options"</font>);
+<a name="line350">350: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ts_monitor_pseudo"</font>,<font color="#666666">"Monitor convergence"</font>,<font color="#666666">"TSPseudoMonitorDefault"</font>,flg,&amp;flg,NULL);
+<a name="line351">351: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line352">352: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIOpen.html#PetscViewerASCIIOpen">PetscViewerASCIIOpen</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts),<font color="#666666">"stdout"</font>,&amp;viewer);
+<a name="line353">353: </a>    <A href="../../../../docs/manualpages/TS/TSMonitorSet.html#TSMonitorSet">TSMonitorSet</A>(ts,TSPseudoMonitorDefault,viewer,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(void**))<A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>);
+<a name="line354">354: </a>  }
+<a name="line355">355: </a>  flg  = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line356">356: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ts_pseudo_increment_dt_from_initial_dt"</font>,<font color="#666666">"Increase dt as a ratio from original dt"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSPseudoIncrementDtFromInitialDt.html#TSPseudoIncrementDtFromInitialDt">TSPseudoIncrementDtFromInitialDt</A>"</font>,flg,&amp;flg,NULL);
+<a name="line357">357: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line358">358: </a>    <A href="../../../../docs/manualpages/TS/TSPseudoIncrementDtFromInitialDt.html#TSPseudoIncrementDtFromInitialDt">TSPseudoIncrementDtFromInitialDt</A>(ts);
+<a name="line359">359: </a>  }
+<a name="line360">360: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-ts_pseudo_increment"</font>,<font color="#666666">"Ratio to increase dt"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStepIncrement.html#TSPseudoSetTimeStepIncrement">TSPseudoSetTimeStepIncrement</A>"</font>,pseudo-&gt;dt_increment,&amp;pseudo-&gt;dt_increment,0);
+<a name="line361">361: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-ts_pseudo_max_dt"</font>,<font color="#666666">"Maximum value for dt"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSPseudoSetMaxTimeStep.html#TSPseudoSetMaxTimeStep">TSPseudoSetMaxTimeStep</A>"</font>,pseudo-&gt;dt_max,&amp;pseudo-&gt;dt_max,0);
+
+<a name="line363">363: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(ts-&gt;snes);
+<a name="line364">364: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line365">365: </a>  <font color="#4169E1">return</font>(0);
+<a name="line366">366: </a>}
+
+<a name="line370">370: </a><strong><font color="#4169E1"><a name="TSView_Pseudo"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSView_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line371">371: </a>{
+
+<a name="line375">375: </a>  <A href="../../../../docs/manualpages/SNES/SNESView.html#SNESView">SNESView</A>(ts-&gt;snes,viewer);
+<a name="line376">376: </a>  <font color="#4169E1">return</font>(0);
+<a name="line377">377: </a>}
+
+<a name="line379">379: </a><font color="#B22222">/* ----------------------------------------------------------------------------- */</font>
+<a name="line382">382: </a><font color="#B22222">/*@C</font>
+<a name="line383">383: </a><font color="#B22222">   <A href="../../../../docs/manualpages/TS/TSPseudoSetVerifyTimeStep.html#TSPseudoSetVerifyTimeStep">TSPseudoSetVerifyTimeStep</A> - Sets a user-defined routine to verify the quality of the</font>
+<a name="line384">384: </a><font color="#B22222">   last timestep.</font>
+
+<a name="line386">386: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line388">388: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line389">389: </a><font color="#B22222">+  ts - timestep context</font>
+<a name="line390">390: </a><font color="#B22222">.  dt - user-defined function to verify timestep</font>
+<a name="line391">391: </a><font color="#B22222">-  ctx - [optional] user-defined context for private data</font>
+<a name="line392">392: </a><font color="#B22222">         for the timestep verification routine (may be NULL)</font>
+
+<a name="line394">394: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line396">396: </a><font color="#B22222">   Calling sequence of func:</font>
+<a name="line397">397: </a><font color="#B22222">.  func (<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> update,void *ctx,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *newdt,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  *flag);</font>
+
+<a name="line399">399: </a><font color="#B22222">.  update - latest solution vector</font>
+<a name="line400">400: </a><font color="#B22222">.  ctx - [optional] timestep context</font>
+<a name="line401">401: </a><font color="#B22222">.  newdt - the timestep to use for the next step</font>
+<a name="line402">402: </a><font color="#B22222">.  flag - flag indicating whether the last time step was acceptable</font>
+
+<a name="line404">404: </a><font color="#B22222">   Notes:</font>
+<a name="line405">405: </a><font color="#B22222">   The routine set here will be called by <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A>()</font>
+<a name="line406">406: </a><font color="#B22222">   during the timestepping process.</font>
+
+<a name="line408">408: </a><font color="#B22222">.keywords: timestep, pseudo, set, verify</font>
+
+<a name="line410">410: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStepDefault.html#TSPseudoVerifyTimeStepDefault">TSPseudoVerifyTimeStepDefault</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoVerifyTimeStep.html#TSPseudoVerifyTimeStep">TSPseudoVerifyTimeStep</A>()</font>
+<a name="line411">411: </a><font color="#B22222">@*/</font>
+<a name="line412">412: </a><strong><font color="#4169E1"><a name="TSPseudoSetVerifyTimeStep"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoSetVerifyTimeStep.html#TSPseudoSetVerifyTimeStep">TSPseudoSetVerifyTimeStep</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*dt)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>*),void *ctx)</font></strong>
+<a name="line413">413: </a>{
+
+<a name="line418">418: </a>  PetscTryMethod(ts,<font color="#666666">"TSPseudoSetVerifyTimeStep_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>*),void*),(ts,dt,ctx));
+<a name="line419">419: </a>  <font color="#4169E1">return</font>(0);
+<a name="line420">420: </a>}
+
+<a name="line424">424: </a><font color="#B22222">/*@</font>
+<a name="line425">425: </a><font color="#B22222">    <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStepIncrement.html#TSPseudoSetTimeStepIncrement">TSPseudoSetTimeStepIncrement</A> - Sets the scaling increment applied to</font>
+<a name="line426">426: </a><font color="#B22222">    dt when using the <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>() routine.</font>
+
+<a name="line428">428: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line430">430: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line431">431: </a><font color="#B22222">+   ts - the timestep context</font>
+<a name="line432">432: </a><font color="#B22222">-   inc - the scaling factor &gt;= 1.0</font>
+
+<a name="line434">434: </a><font color="#B22222">    Options Database Key:</font>
+<a name="line435">435: </a><font color="#B22222">.    -ts_pseudo_increment &lt;increment&gt;</font>
+
+<a name="line437">437: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line439">439: </a><font color="#B22222">.keywords: timestep, pseudo, set, increment</font>
+
+<a name="line441">441: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>()</font>
+<a name="line442">442: </a><font color="#B22222">@*/</font>
+<a name="line443">443: </a><strong><font color="#4169E1"><a name="TSPseudoSetTimeStepIncrement"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStepIncrement.html#TSPseudoSetTimeStepIncrement">TSPseudoSetTimeStepIncrement</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> inc)</font></strong>
+<a name="line444">444: </a>{
+
+<a name="line450">450: </a>  PetscTryMethod(ts,<font color="#666666">"TSPseudoSetTimeStepIncrement_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>),(ts,inc));
+<a name="line451">451: </a>  <font color="#4169E1">return</font>(0);
+<a name="line452">452: </a>}
+
+<a name="line456">456: </a><font color="#B22222">/*@</font>
+<a name="line457">457: </a><font color="#B22222">    <A href="../../../../docs/manualpages/TS/TSPseudoSetMaxTimeStep.html#TSPseudoSetMaxTimeStep">TSPseudoSetMaxTimeStep</A> - Sets the maximum time step</font>
+<a name="line458">458: </a><font color="#B22222">    when using the <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>() routine.</font>
+
+<a name="line460">460: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line462">462: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line463">463: </a><font color="#B22222">+   ts - the timestep context</font>
+<a name="line464">464: </a><font color="#B22222">-   maxdt - the maximum time step, use a non-positive value to deactivate</font>
+
+<a name="line466">466: </a><font color="#B22222">    Options Database Key:</font>
+<a name="line467">467: </a><font color="#B22222">.    -ts_pseudo_max_dt &lt;increment&gt;</font>
+
+<a name="line469">469: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line471">471: </a><font color="#B22222">.keywords: timestep, pseudo, set</font>
+
+<a name="line473">473: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>()</font>
+<a name="line474">474: </a><font color="#B22222">@*/</font>
+<a name="line475">475: </a><strong><font color="#4169E1"><a name="TSPseudoSetMaxTimeStep"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoSetMaxTimeStep.html#TSPseudoSetMaxTimeStep">TSPseudoSetMaxTimeStep</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> maxdt)</font></strong>
+<a name="line476">476: </a>{
+
+<a name="line482">482: </a>  PetscTryMethod(ts,<font color="#666666">"TSPseudoSetMaxTimeStep_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>),(ts,maxdt));
+<a name="line483">483: </a>  <font color="#4169E1">return</font>(0);
+<a name="line484">484: </a>}
+
+<a name="line488">488: </a><font color="#B22222">/*@</font>
+<a name="line489">489: </a><font color="#B22222">    <A href="../../../../docs/manualpages/TS/TSPseudoIncrementDtFromInitialDt.html#TSPseudoIncrementDtFromInitialDt">TSPseudoIncrementDtFromInitialDt</A> - Indicates that a new timestep</font>
+<a name="line490">490: </a><font color="#B22222">    is computed via the formula</font>
+<a name="line491">491: </a><font color="#B22222">$         dt = initial_dt*initial_fnorm/current_fnorm</font>
+<a name="line492">492: </a><font color="#B22222">      rather than the default update,</font>
+<a name="line493">493: </a><font color="#B22222">$         dt = current_dt*previous_fnorm/current_fnorm.</font>
+
+<a name="line495">495: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line497">497: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line498">498: </a><font color="#B22222">.   ts - the timestep context</font>
+
+<a name="line500">500: </a><font color="#B22222">    Options Database Key:</font>
+<a name="line501">501: </a><font color="#B22222">.    -ts_pseudo_increment_dt_from_initial_dt</font>
+
+<a name="line503">503: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line505">505: </a><font color="#B22222">.keywords: timestep, pseudo, set, increment</font>
+
+<a name="line507">507: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>()</font>
+<a name="line508">508: </a><font color="#B22222">@*/</font>
+<a name="line509">509: </a><strong><font color="#4169E1"><a name="TSPseudoIncrementDtFromInitialDt"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoIncrementDtFromInitialDt.html#TSPseudoIncrementDtFromInitialDt">TSPseudoIncrementDtFromInitialDt</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line510">510: </a>{
+
+<a name="line515">515: </a>  PetscTryMethod(ts,<font color="#666666">"TSPseudoIncrementDtFromInitialDt_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>),(ts));
+<a name="line516">516: </a>  <font color="#4169E1">return</font>(0);
+<a name="line517">517: </a>}
+
+
+<a name="line522">522: </a><font color="#B22222">/*@C</font>
+<a name="line523">523: </a><font color="#B22222">   <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A> - Sets the user-defined routine to be</font>
+<a name="line524">524: </a><font color="#B22222">   called at each pseudo-timestep to update the timestep.</font>
+
+<a name="line526">526: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line528">528: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line529">529: </a><font color="#B22222">+  ts - timestep context</font>
+<a name="line530">530: </a><font color="#B22222">.  dt - function to compute timestep</font>
+<a name="line531">531: </a><font color="#B22222">-  ctx - [optional] user-defined context for private data</font>
+<a name="line532">532: </a><font color="#B22222">         required by the function (may be NULL)</font>
+
+<a name="line534">534: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line536">536: </a><font color="#B22222">   Calling sequence of func:</font>
+<a name="line537">537: </a><font color="#B22222">.  func (<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *newdt,void *ctx);</font>
+
+<a name="line539">539: </a><font color="#B22222">.  newdt - the newly computed timestep</font>
+<a name="line540">540: </a><font color="#B22222">.  ctx - [optional] timestep context</font>
+
+<a name="line542">542: </a><font color="#B22222">   Notes:</font>
+<a name="line543">543: </a><font color="#B22222">   The routine set here will be called by <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A>()</font>
+<a name="line544">544: </a><font color="#B22222">   during the timestepping process.</font>
+<a name="line545">545: </a><font color="#B22222">   If not set then <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>() is automatically used</font>
+
+<a name="line547">547: </a><font color="#B22222">.keywords: timestep, pseudo, set</font>
+
+<a name="line549">549: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A>()</font>
+<a name="line550">550: </a><font color="#B22222">@*/</font>
+<a name="line551">551: </a><strong><font color="#4169E1"><a name="TSPseudoSetTimeStep"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*dt)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,void*),void *ctx)</font></strong>
+<a name="line552">552: </a>{
+
+<a name="line557">557: </a>  PetscTryMethod(ts,<font color="#666666">"TSPseudoSetTimeStep_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,void*),void*),(ts,dt,ctx));
+<a name="line558">558: </a>  <font color="#4169E1">return</font>(0);
+<a name="line559">559: </a>}
+
+<a name="line561">561: </a><font color="#B22222">/* ----------------------------------------------------------------------------- */</font>
+
+<a name="line563">563: </a><strong><font color="#4169E1">typedef <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*FCN1)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>*)</font></strong>;  <font color="#B22222">/* force argument to next function to not be extern C*/</font>
+<a name="line566">566: </a><strong><font color="#4169E1"><a name="TSPseudoSetVerifyTimeStep_Pseudo"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSPseudoSetVerifyTimeStep_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,FCN1 dt,void *ctx)</font></strong>
+<a name="line567">567: </a>{
+<a name="line568">568: </a>  TS_Pseudo *pseudo;
+
+<a name="line571">571: </a>  pseudo            = (TS_Pseudo*)ts-&gt;data;
+<a name="line572">572: </a>  pseudo-&gt;verify    = dt;
+<a name="line573">573: </a>  pseudo-&gt;verifyctx = ctx;
+<a name="line574">574: </a>  <font color="#4169E1">return</font>(0);
+<a name="line575">575: </a>}
+
+<a name="line579">579: </a><strong><font color="#4169E1"><a name="TSPseudoSetTimeStepIncrement_Pseudo"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSPseudoSetTimeStepIncrement_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> inc)</font></strong>
+<a name="line580">580: </a>{
+<a name="line581">581: </a>  TS_Pseudo *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line584">584: </a>  pseudo-&gt;dt_increment = inc;
+<a name="line585">585: </a>  <font color="#4169E1">return</font>(0);
+<a name="line586">586: </a>}
+
+<a name="line590">590: </a><strong><font color="#4169E1"><a name="TSPseudoSetMaxTimeStep_Pseudo"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSPseudoSetMaxTimeStep_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> maxdt)</font></strong>
+<a name="line591">591: </a>{
+<a name="line592">592: </a>  TS_Pseudo *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line595">595: </a>  pseudo-&gt;dt_max = maxdt;
+<a name="line596">596: </a>  <font color="#4169E1">return</font>(0);
+<a name="line597">597: </a>}
+
+<a name="line601">601: </a><strong><font color="#4169E1"><a name="TSPseudoIncrementDtFromInitialDt_Pseudo"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSPseudoIncrementDtFromInitialDt_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line602">602: </a>{
+<a name="line603">603: </a>  TS_Pseudo *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line606">606: </a>  pseudo-&gt;increment_dt_from_initial_dt = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line607">607: </a>  <font color="#4169E1">return</font>(0);
+<a name="line608">608: </a>}
+
+<a name="line610">610: </a><strong><font color="#4169E1">typedef <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*FCN2)(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*,void*)</font></strong>; <font color="#B22222">/* force argument to next function to not be extern C*/</font>
+<a name="line613">613: </a><strong><font color="#4169E1"><a name="TSPseudoSetTimeStep_Pseudo"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  TSPseudoSetTimeStep_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,FCN2 dt,void *ctx)</font></strong>
+<a name="line614">614: </a>{
+<a name="line615">615: </a>  TS_Pseudo *pseudo = (TS_Pseudo*)ts-&gt;data;
+
+<a name="line618">618: </a>  pseudo-&gt;dt    = dt;
+<a name="line619">619: </a>  pseudo-&gt;dtctx = ctx;
+<a name="line620">620: </a>  <font color="#4169E1">return</font>(0);
+<a name="line621">621: </a>}
+
+<a name="line623">623: </a><font color="#B22222">/* ----------------------------------------------------------------------------- */</font>
+<a name="line624">624: </a><font color="#B22222">/*MC</font>
+<a name="line625">625: </a><font color="#B22222">      <A href="../../../../docs/manualpages/TS/TSPSEUDO.html#TSPSEUDO">TSPSEUDO</A> - Solve steady state ODE and DAE problems with pseudo time stepping</font>
+
+<a name="line627">627: </a><font color="#B22222">  This method solves equations of the form</font>
+
+<a name="line629">629: </a><font color="#B22222">$    F(X,Xdot) = 0</font>
+
+<a name="line631">631: </a><font color="#B22222">  for steady state using the iteration</font>
+
+<a name="line633">633: </a><font color="#B22222">$    [G'] S = -F(X,0)</font>
+<a name="line634">634: </a><font color="#B22222">$    X += S</font>
+
+<a name="line636">636: </a><font color="#B22222">  where</font>
+
+<a name="line638">638: </a><font color="#B22222">$    G(Y) = F(Y,(Y-X)/dt)</font>
+
+<a name="line640">640: </a><font color="#B22222">  This is linearly-implicit Euler with the residual always evaluated "at steady</font>
+<a name="line641">641: </a><font color="#B22222">  state".  See note below.</font>
+
+<a name="line643">643: </a><font color="#B22222">  Options database keys:</font>
+<a name="line644">644: </a><font color="#B22222">+  -ts_pseudo_increment &lt;real&gt; - ratio of increase dt</font>
+<a name="line645">645: </a><font color="#B22222">-  -ts_pseudo_increment_dt_from_initial_dt &lt;truth&gt; - Increase dt as a ratio from original dt</font>
+
+<a name="line647">647: </a><font color="#B22222">  Level: beginner</font>
+
+<a name="line649">649: </a><font color="#B22222">  References:</font>
+<a name="line650">650: </a><font color="#B22222">  Todd S. Coffey and C. T. Kelley and David E. Keyes, Pseudotransient Continuation and Differential-Algebraic Equations, 2003.</font>
+<a name="line651">651: </a><font color="#B22222">  C. T. Kelley and David E. Keyes, Convergence analysis of Pseudotransient Continuation, 1998.</font>
+
+<a name="line653">653: </a><font color="#B22222">  Notes:</font>
+<a name="line654">654: </a><font color="#B22222">  The residual computed by this method includes the transient term (Xdot is computed instead of</font>
+<a name="line655">655: </a><font color="#B22222">  always being zero), but since the prediction from the last step is always the solution from the</font>
+<a name="line656">656: </a><font color="#B22222">  last step, on the first Newton iteration we have</font>
+
+<a name="line658">658: </a><font color="#B22222">$  Xdot = (Xpredicted - Xold)/dt = (Xold-Xold)/dt = 0</font>
+
+<a name="line660">660: </a><font color="#B22222">  Therefore, the linear system solved by the first Newton iteration is equivalent to the one</font>
+<a name="line661">661: </a><font color="#B22222">  described above and in the papers.  If the user chooses to perform multiple Newton iterations, the</font>
+<a name="line662">662: </a><font color="#B22222">  algorithm is no longer the one described in the referenced papers.</font>
+
+<a name="line664">664: </a><font color="#B22222">.seealso:  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(), <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>, <A href="../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>()</font>
+
+<a name="line666">666: </a><font color="#B22222">M*/</font>
+<a name="line669">669: </a><strong><font color="#4169E1"><a name="TSCreate_Pseudo"></a>PETSC_EXTERN <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSCreate_Pseudo(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line670">670: </a>{
+<a name="line671">671: </a>  TS_Pseudo      *pseudo;
+<a name="line673">673: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes;
+<a name="line674">674: </a>  <A href="../../../../docs/manualpages/SNES/SNESType.html#SNESType">SNESType</A>       stype;
+
+<a name="line677">677: </a>  ts-&gt;ops-&gt;reset   = TSReset_Pseudo;
+<a name="line678">678: </a>  ts-&gt;ops-&gt;destroy = TSDestroy_Pseudo;
+<a name="line679">679: </a>  ts-&gt;ops-&gt;view    = TSView_Pseudo;
+
+<a name="line681">681: </a>  ts-&gt;ops-&gt;setup          = TSSetUp_Pseudo;
+<a name="line682">682: </a>  ts-&gt;ops-&gt;step           = TSStep_Pseudo;
+<a name="line683">683: </a>  ts-&gt;ops-&gt;setfromoptions = TSSetFromOptions_Pseudo;
+<a name="line684">684: </a>  ts-&gt;ops-&gt;snesfunction   = SNESTSFormFunction_Pseudo;
+<a name="line685">685: </a>  ts-&gt;ops-&gt;snesjacobian   = SNESTSFormJacobian_Pseudo;
+
+<a name="line687">687: </a>  <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line688">688: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetType.html#SNESGetType">SNESGetType</A>(snes,&amp;stype);
+<a name="line689">689: </a>  <font color="#4169E1">if</font> (!stype) {<A href="../../../../docs/manualpages/SNES/SNESSetType.html#SNESSetType">SNESSetType</A>(snes,<A href="../../../../docs/manualpages/SNES/SNESKSPONLY.html#SNESKSPONLY">SNESKSPONLY</A>);}
+
+<a name="line691">691: </a>  <A href="../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(ts,&amp;pseudo);
+<a name="line692">692: </a>  ts-&gt;data = (void*)pseudo;
+
+<a name="line694">694: </a>  pseudo-&gt;dt_increment                 = 1.1;
+<a name="line695">695: </a>  pseudo-&gt;increment_dt_from_initial_dt = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line696">696: </a>  pseudo-&gt;dt                           = <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>;
+<a name="line697">697: </a>  pseudo-&gt;fnorm                        = -1;
+
+<a name="line699">699: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetVerifyTimeStep_C"</font>,TSPseudoSetVerifyTimeStep_Pseudo);
+<a name="line700">700: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetTimeStepIncrement_C"</font>,TSPseudoSetTimeStepIncrement_Pseudo);
+<a name="line701">701: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetMaxTimeStep_C"</font>,TSPseudoSetMaxTimeStep_Pseudo);
+<a name="line702">702: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoIncrementDtFromInitialDt_C"</font>,TSPseudoIncrementDtFromInitialDt_Pseudo);
+<a name="line703">703: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSPseudoSetTimeStep_C"</font>,TSPseudoSetTimeStep_Pseudo);
+<a name="line704">704: </a>  <font color="#4169E1">return</font>(0);
+<a name="line705">705: </a>}
+
+<a name="line709">709: </a><font color="#B22222">/*@C</font>
+<a name="line710">710: </a><font color="#B22222">   <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A> - Default code to compute pseudo-timestepping.</font>
+<a name="line711">711: </a><font color="#B22222">   Use with <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>().</font>
+
+<a name="line713">713: </a><font color="#B22222">   Collective on <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+
+<a name="line715">715: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line716">716: </a><font color="#B22222">.  ts - the timestep context</font>
+<a name="line717">717: </a><font color="#B22222">.  dtctx - unused timestep context</font>
+
+<a name="line719">719: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line720">720: </a><font color="#B22222">.  newdt - the timestep to use for the next step</font>
+
+<a name="line722">722: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line724">724: </a><font color="#B22222">.keywords: timestep, pseudo, default</font>
+
+<a name="line726">726: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSPseudoSetTimeStep.html#TSPseudoSetTimeStep">TSPseudoSetTimeStep</A>(), <A href="../../../../docs/manualpages/TS/TSPseudoComputeTimeStep.html#TSPseudoComputeTimeStep">TSPseudoComputeTimeStep</A>()</font>
+<a name="line727">727: </a><font color="#B22222">@*/</font>
+<a name="line728">728: </a><strong><font color="#4169E1"><a name="TSPseudoTimeStepDefault"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/TS/TSPseudoTimeStepDefault.html#TSPseudoTimeStepDefault">TSPseudoTimeStepDefault</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *newdt,void *dtctx)</font></strong>
+<a name="line729">729: </a>{
+<a name="line730">730: </a>  TS_Pseudo      *pseudo = (TS_Pseudo*)ts-&gt;data;
+<a name="line731">731: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      inc     = pseudo-&gt;dt_increment,fnorm_previous = pseudo-&gt;fnorm_previous;
+
+<a name="line735">735: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(pseudo-&gt;xdot);
+<a name="line736">736: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ts-&gt;ptime,ts-&gt;vec_sol,pseudo-&gt;xdot,pseudo-&gt;func,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line737">737: </a>  <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(pseudo-&gt;func,<A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>,&amp;pseudo-&gt;fnorm);
+<a name="line738">738: </a>  <font color="#4169E1">if</font> (pseudo-&gt;fnorm_initial == 0.0) {
+<a name="line739">739: </a>    <font color="#B22222">/* first time through so compute initial function norm */</font>
+<a name="line740">740: </a>    pseudo-&gt;fnorm_initial = pseudo-&gt;fnorm;
+<a name="line741">741: </a>    fnorm_previous        = pseudo-&gt;fnorm;
+<a name="line742">742: </a>  }
+<a name="line743">743: </a>  <font color="#4169E1">if</font> (pseudo-&gt;fnorm == 0.0)                      *newdt = 1.e12*inc*ts-&gt;time_step;
+<a name="line744">744: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (pseudo-&gt;increment_dt_from_initial_dt) *newdt = inc*pseudo-&gt;dt_initial*pseudo-&gt;fnorm_initial/pseudo-&gt;fnorm;
+<a name="line745">745: </a>  <font color="#4169E1">else</font>                                           *newdt = inc*ts-&gt;time_step*fnorm_previous/pseudo-&gt;fnorm;
+<a name="line746">746: </a>  <font color="#4169E1">if</font> (pseudo-&gt;dt_max &gt; 0) *newdt = PetscMin(*newdt,pseudo-&gt;dt_max);
+<a name="line747">747: </a>  pseudo-&gt;fnorm_previous = pseudo-&gt;fnorm;
+<a name="line748">748: </a>  <font color="#4169E1">return</font>(0);
+<a name="line749">749: </a>}
+</pre>
+</body>
+
+</html>

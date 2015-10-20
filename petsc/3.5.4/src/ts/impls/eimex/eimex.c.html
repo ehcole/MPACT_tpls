@@ -1,0 +1,607 @@
+<center><a href="eimex.c">Actual source code: eimex.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/ts/impls/eimex/eimex.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:37:46+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/ts/impls/eimex/eimex.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222"> * eimex.c</font>
+<a name="line3">  3: </a><font color="#B22222"> *</font>
+<a name="line4">  4: </a><font color="#B22222"> *  Created on: Jun 21, 2012</font>
+<a name="line5">  5: </a><font color="#B22222"> *      Written by Hong Zhang (zhang@vt.edu), Virginia Tech</font>
+<a name="line6">  6: </a><font color="#B22222"> *                 Emil Constantinescu (emconsta@mcs.anl.gov), Argonne National Laboratory</font>
+<a name="line7">  7: </a><font color="#B22222"> */</font>
+<a name="line8">  8: </a><font color="#B22222">/*MC</font>
+<a name="line9">  9: </a><font color="#B22222">      <A href="../../../../docs/manualpages/TS/EIMEX.html#EIMEX">EIMEX</A> - Time stepping with Extrapolated IMEX methods.</font>
+
+<a name="line11"> 11: </a><font color="#B22222">  Notes:</font>
+<a name="line12"> 12: </a><font color="#B22222">  The general system is written as</font>
+
+<a name="line14"> 14: </a><font color="#B22222">  G(t,X,Xdot) = F(t,X)</font>
+
+<a name="line16"> 16: </a><font color="#B22222">  where G represents the stiff part and F represents the non-stiff part. The user should provide the stiff part</font>
+<a name="line17"> 17: </a><font color="#B22222">  of the equation using <A href="../../../../docs/manualpages/TS/TSSetIFunction.html#TSSetIFunction">TSSetIFunction</A>() and the non-stiff part with <A href="../../../../docs/manualpages/TS/TSSetRHSFunction.html#TSSetRHSFunction">TSSetRHSFunction</A>().</font>
+<a name="line18"> 18: </a><font color="#B22222">  This method is designed to be linearly implicit on G and can use an approximate and lagged Jacobian.</font>
+
+<a name="line20"> 20: </a><font color="#B22222">  Another common form for the system is</font>
+
+<a name="line22"> 22: </a><font color="#B22222">  y'=f(x)+g(x)</font>
+
+<a name="line24"> 24: </a><font color="#B22222">  The relationship between F,G and f,g is</font>
+
+<a name="line26"> 26: </a><font color="#B22222">  G = y'-g(x), F = f(x)</font>
+
+<a name="line28"> 28: </a><font color="#B22222"> References</font>
+<a name="line29"> 29: </a><font color="#B22222">  E. Constantinescu and A. Sandu, Extrapolated implicit-explicit time stepping, SIAM Journal on Scientific</font>
+<a name="line30"> 30: </a><font color="#B22222">Computing, 31 (2010), pp. 4452-4477.</font>
+
+<a name="line32"> 32: </a><font color="#B22222">      Level: beginner</font>
+
+<a name="line34"> 34: </a><font color="#B22222">.seealso:  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(), <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>, <A href="../../../../docs/manualpages/TS/TSSetType.html#TSSetType">TSSetType</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>()</font>
+
+<a name="line36"> 36: </a><font color="#B22222"> M*/</font>
+<a name="line37"> 37: </a><font color="#A020F0">#include &lt;petsc-private/tsimpl.h&gt;                </font><font color="#B22222">/*I   "petscts.h"   I*/</font><font color="#A020F0"></font>
+<a name="line38"> 38: </a><font color="#A020F0">#include &lt;petscdm.h&gt;</font>
+
+<a name="line40"> 40: </a>static const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> TSEIMEXDefault = 3;
+
+<a name="line42"> 42: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line43"> 43: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     row_ind;         <font color="#B22222">/* Return the term T[row_ind][col_ind] */</font>
+<a name="line44"> 44: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     col_ind;         <font color="#B22222">/* Return the term T[row_ind][col_ind] */</font>
+<a name="line45"> 45: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     nstages;         <font color="#B22222">/* Numbers of stages in current scheme */</font>
+<a name="line46"> 46: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     max_rows;        <font color="#B22222">/* Maximum number of rows */</font>
+<a name="line47"> 47: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     *N;              <font color="#B22222">/* Harmonic sequence N[max_rows] */</font>
+<a name="line48"> 48: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          Y;               <font color="#B22222">/* States computed during the step, used to complete the step */</font>
+<a name="line49"> 49: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          Z;               <font color="#B22222">/* For shift*(Y-Z) */</font>
+<a name="line50"> 50: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          *T;              <font color="#B22222">/* Working table, size determined by nstages */</font>
+<a name="line51"> 51: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          YdotRHS;         <font color="#B22222">/* f(x) Work vector holding YdotRHS during residual evaluation */</font>
+<a name="line52"> 52: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          YdotI;           <font color="#B22222">/* xdot-g(x) Work vector holding YdotI = G(t,x,xdot) when xdot =0 */</font>
+<a name="line53"> 53: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          Ydot;            <font color="#B22222">/* f(x)+g(x) Work vector */</font>
+<a name="line54"> 54: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>          VecSolPrev;      <font color="#B22222">/* Work vector holding the solution from the previous step (used for interpolation) */</font>
+<a name="line55"> 55: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>    shift;
+<a name="line56"> 56: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>    ctime;
+<a name="line57"> 57: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>    recompute_jacobian; <font color="#B22222">/* Recompute the Jacobian at each stage, default is to freeze the Jacobian at the start of each step */</font>
+<a name="line58"> 58: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>    ord_adapt;       <font color="#B22222">/* order adapativity */</font>
+<a name="line59"> 59: </a>  TSStepStatus status;
+<a name="line60"> 60: </a>} TS_EIMEX;
+
+<a name="line62"> 62: </a><font color="#B22222">/* This function is pure */</font>
+<a name="line63"> 63: </a><strong><font color="#4169E1"><a name="Map"></a>static <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> Map(<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> j, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> s)</font></strong>
+<a name="line64"> 64: </a>{
+<a name="line65"> 65: </a>  <font color="#4169E1">return</font> ((2*s-j+1)*j/2+i-j);
+<a name="line66"> 66: </a>}
+
+
+<a name="line71"> 71: </a><strong><font color="#4169E1"><a name="TSEvaluateStep_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEvaluateStep_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> order,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> *done)</font></strong>
+<a name="line72"> 72: </a>{
+<a name="line73"> 73: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line74"> 74: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  ns = ext-&gt;nstages;
+<a name="line77"> 77: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(ext-&gt;T[Map(ext-&gt;row_ind,ext-&gt;col_ind,ns)],X);
+<a name="line78"> 78: </a>  <font color="#4169E1">return</font>(0);
+<a name="line79"> 79: </a>}
+
+
+<a name="line84"> 84: </a><strong><font color="#4169E1"><a name="TSStage_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStage_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> istage)</font></strong>
+<a name="line85"> 85: </a>{
+<a name="line86"> 86: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line87"> 87: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>       h;
+<a name="line88"> 88: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>             Y=ext-&gt;Y, Z=ext-&gt;Z;
+<a name="line89"> 89: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>            snes;
+<a name="line90"> 90: </a>  <A href="../../../../docs/manualpages/TS/TSAdapt.html#TSAdapt">TSAdapt</A>         adapt;
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        i,its,lits;
+<a name="line92"> 92: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       accept;
+<a name="line93"> 93: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line97"> 97: </a>  h = ts-&gt;time_step/ext-&gt;N[istage];<font color="#B22222">/* step size for the istage-th stage */</font>
+<a name="line98"> 98: </a>  ext-&gt;shift = 1./h;
+<a name="line99"> 99: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetLagJacobian.html#SNESSetLagJacobian">SNESSetLagJacobian</A>(snes,-2); <font color="#B22222">/* Recompute the Jacobian on this solve, but not again */</font>
+<a name="line100">100: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(ext-&gt;VecSolPrev,Y); <font color="#B22222">/* Take the previous solution as intial step */</font>
+
+<a name="line102">102: </a>  <font color="#4169E1">for</font>(i=0; i&lt;ext-&gt;N[istage]; i++){
+<a name="line103">103: </a>    ext-&gt;ctime = ts-&gt;ptime + h*i;
+<a name="line104">104: </a>    <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(Y,Z);<font color="#B22222">/* Save the solution of the previous substep */</font>
+<a name="line105">105: </a>    <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,NULL,Y);
+<a name="line106">106: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(snes,&amp;its);
+<a name="line107">107: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetLinearSolveIterations.html#SNESGetLinearSolveIterations">SNESGetLinearSolveIterations</A>(snes,&amp;lits);
+<a name="line108">108: </a>    ts-&gt;snes_its += its; ts-&gt;ksp_its += lits;
+<a name="line109">109: </a>    <A href="../../../../docs/manualpages/TS/TSGetAdapt.html#TSGetAdapt">TSGetAdapt</A>(ts,&amp;adapt);
+<a name="line110">110: </a>    <A href="../../../../docs/manualpages/TS/TSAdaptCheckStage.html#TSAdaptCheckStage">TSAdaptCheckStage</A>(adapt,ts,&amp;accept);
+<a name="line111">111: </a>  }
+
+<a name="line113">113: </a>  <font color="#4169E1">return</font>(0);
+<a name="line114">114: </a>}
+
+
+<a name="line119">119: </a><strong><font color="#4169E1"><a name="TSStep_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSStep_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line120">120: </a>{
+<a name="line121">121: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line122">122: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  ns = ext-&gt;nstages;
+<a name="line123">123: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>             *T=ext-&gt;T, Y=ext-&gt;Y;
+
+<a name="line125">125: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>            snes;
+<a name="line126">126: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        i,j;
+<a name="line127">127: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>       accept = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line128">128: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line129">129: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>       alpha,local_error;
+
+<a name="line132">132: </a>  <A href="../../../../docs/manualpages/TS/TSGetSNES.html#TSGetSNES">TSGetSNES</A>(ts,&amp;snes);
+<a name="line133">133: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetType.html#SNESSetType">SNESSetType</A>(snes,<font color="#666666">"ksponly"</font>);
+<a name="line134">134: </a>  ext-&gt;status = TS_STEP_INCOMPLETE;
+
+<a name="line136">136: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(ts-&gt;vec_sol,ext-&gt;VecSolPrev);
+
+<a name="line138">138: </a>  <font color="#B22222">/* Apply n_j steps of the base method to obtain solutions of T(j,1),1&lt;=j&lt;=s */</font>
+<a name="line139">139: </a>  <font color="#4169E1">for</font>(j=0; j&lt;ns; j++){
+<a name="line140">140: </a>        TSStage_EIMEX(ts,j);
+<a name="line141">141: </a>        <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(Y,T[j]);
+<a name="line142">142: </a>  }
+
+<a name="line144">144: </a>  <font color="#4169E1">for</font>(i=1;i&lt;ns;i++){
+<a name="line145">145: </a>    <font color="#4169E1">for</font>(j=i;j&lt;ns;j++){
+<a name="line146">146: </a>      alpha = -(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ext-&gt;N[j]/ext-&gt;N[j-i];
+<a name="line147">147: </a>      <A href="../../../../docs/manualpages/Vec/VecAXPBYPCZ.html#VecAXPBYPCZ">VecAXPBYPCZ</A>(T[Map(j,i,ns)],alpha,1.0,0,T[Map(j,i-1,ns)],T[Map(j-1,i-1,ns)]);<font color="#B22222">/* T[j][i]=alpha*T[j][i-1]+T[j-1][i-1] */</font>
+<a name="line148">148: </a>      alpha = 1.0/(1.0 + alpha);
+<a name="line149">149: </a>      <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(T[Map(j,i,ns)],alpha);
+<a name="line150">150: </a>    }
+<a name="line151">151: </a>  }
+
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/TS/TSEvaluateStep.html#TSEvaluateStep">TSEvaluateStep</A>(ts,ns,ts-&gt;vec_sol,NULL);<font color="#B22222">/* update ts solution */</font>
+
+<a name="line155">155: </a>  <font color="#4169E1">if</font>(ext-&gt;ord_adapt &amp;&amp; ext-&gt;nstages &lt; ext-&gt;max_rows){
+<a name="line156">156: </a>        accept = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line157">157: </a>        <font color="#4169E1">while</font>(!accept &amp;&amp; ext-&gt;nstages &lt; ext-&gt;max_rows){
+<a name="line158">158: </a>          <A href="../../../../docs/manualpages/TS/TSErrorNormWRMS.html#TSErrorNormWRMS">TSErrorNormWRMS</A>(ts,T[Map(ext-&gt;nstages-1,ext-&gt;nstages-2,ext-&gt;nstages)],&amp;local_error);
+<a name="line159">159: </a>          accept = (local_error &lt; 1.0)? <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> : <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line161">161: </a>          <font color="#4169E1">if</font>(!accept){<font color="#B22222">/* add one more stage */</font>
+<a name="line162">162: </a>            TSStage_EIMEX(ts,ext-&gt;nstages);
+<a name="line163">163: </a>            ext-&gt;nstages++; ext-&gt;row_ind++; ext-&gt;col_ind++;
+<a name="line164">164: </a>            <font color="#B22222">/* T table need to be recycled */</font>
+<a name="line165">165: </a>            <A href="../../../../docs/manualpages/Vec/VecDuplicateVecs.html#VecDuplicateVecs">VecDuplicateVecs</A>(ts-&gt;vec_sol,(1+ext-&gt;nstages)*ext-&gt;nstages/2,&amp;ext-&gt;T);
+<a name="line166">166: </a>            <font color="#4169E1">for</font>(i=0; i&lt;ext-&gt;nstages-1; i++){
+<a name="line167">167: </a>              <font color="#4169E1">for</font>(j=0; j&lt;=i; j++){
+<a name="line168">168: </a>                <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(T[Map(i,j,ext-&gt;nstages-1)],ext-&gt;T[Map(i,j,ext-&gt;nstages)]);
+<a name="line169">169: </a>              }
+<a name="line170">170: </a>            }
+<a name="line171">171: </a>            <A href="../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>(ext-&gt;nstages*(ext-&gt;nstages-1)/2,&amp;T);
+<a name="line172">172: </a>            T = ext-&gt;T; <font color="#B22222">/* reset the pointer */</font>
+<a name="line173">173: </a>            <font color="#B22222">/* recycling finished, store the new solution */</font>
+<a name="line174">174: </a>            <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(Y,T[ext-&gt;nstages-1]);
+<a name="line175">175: </a>            <font color="#B22222">/* extrapolation for the newly added stage */</font>
+<a name="line176">176: </a>            <font color="#4169E1">for</font>(i=1;i&lt;ext-&gt;nstages;i++){
+<a name="line177">177: </a>              alpha = -(<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ext-&gt;N[ext-&gt;nstages-1]/ext-&gt;N[ext-&gt;nstages-1-i];
+<a name="line178">178: </a>              <A href="../../../../docs/manualpages/Vec/VecAXPBYPCZ.html#VecAXPBYPCZ">VecAXPBYPCZ</A>(T[Map(ext-&gt;nstages-1,i,ext-&gt;nstages)],alpha,1.0,0,T[Map(ext-&gt;nstages-1,i-1,ext-&gt;nstages)],T[Map(ext-&gt;nstages-1-1,i-1,ext-&gt;nstages)]);<font color="#B22222">/* T[ext-&gt;nstages-1][i]=alpha*T[ext-&gt;nstages-1][i-1]+T[ext-&gt;nstages-1-1][i-1] */</font>
+<a name="line179">179: </a>              alpha = 1.0/(1.0 + alpha);
+<a name="line180">180: </a>              <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(T[Map(ext-&gt;nstages-1,i,ext-&gt;nstages)],alpha);
+<a name="line181">181: </a>            }
+<a name="line182">182: </a>            <font color="#B22222">/* update ts solution */</font>
+<a name="line183">183: </a>            <A href="../../../../docs/manualpages/TS/TSEvaluateStep.html#TSEvaluateStep">TSEvaluateStep</A>(ts,ext-&gt;nstages,ts-&gt;vec_sol,NULL);
+<a name="line184">184: </a>          }<font color="#B22222">/* end if !accept */</font>
+<a name="line185">185: </a>        }<font color="#B22222">/* end while */</font>
+
+<a name="line187">187: </a>        <font color="#4169E1">if</font>(ext-&gt;nstages == ext-&gt;max_rows){
+<a name="line188">188: </a>                <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(ts,<font color="#666666">"Max number of rows has been used\n"</font>);
+<a name="line189">189: </a>        }
+<a name="line190">190: </a>  }<font color="#B22222">/* end if ext-&gt;ord_adapt */</font>
+
+<a name="line192">192: </a>  ts-&gt;ptime += ts-&gt;time_step;
+<a name="line193">193: </a>  ts-&gt;steps++;
+<a name="line194">194: </a>  ext-&gt;status = TS_STEP_COMPLETE;
+
+<a name="line196">196: </a>  <font color="#4169E1">if</font> (ext-&gt;status != TS_STEP_COMPLETE &amp;&amp; !ts-&gt;reason) ts-&gt;reason = <A href="../../../../docs/manualpages/TS/TS_DIVERGED_STEP_REJECTED.html#TS_DIVERGED_STEP_REJECTED">TS_DIVERGED_STEP_REJECTED</A>;
+<a name="line197">197: </a>  <font color="#4169E1">return</font>(0);
+<a name="line198">198: </a>}
+
+
+<a name="line201">201: </a><font color="#B22222">/* cubic Hermit spline */</font>
+<a name="line204">204: </a><strong><font color="#4169E1"><a name="TSInterpolate_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSInterpolate_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> itime,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X)</font></strong>
+<a name="line205">205: </a>{
+<a name="line206">206: </a>  TS_EIMEX       *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line207">207: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      t,a,b;
+<a name="line208">208: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Y0=ext-&gt;VecSolPrev,Y1=ext-&gt;Y,
+<a name="line209">209: </a>                         Ydot=ext-&gt;Ydot,YdotI=ext-&gt;YdotI;
+<a name="line210">210: </a>  const <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> h = ts-&gt;time_step_prev;
+<a name="line213">213: </a>  t = (itime -ts-&gt;ptime + h)/h;
+<a name="line214">214: </a>  <font color="#B22222">/* YdotI = -f(x)-g(x) */</font>
+
+<a name="line216">216: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(Ydot);
+<a name="line217">217: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ts-&gt;ptime-h,Y0,Ydot,YdotI,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+
+<a name="line219">219: </a>  a    = 2.0*t*t*t - 3.0*t*t + 1.0;
+<a name="line220">220: </a>  b    = -(t*t*t - 2.0*t*t + t)*h;
+<a name="line221">221: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPBYPCZ.html#VecAXPBYPCZ">VecAXPBYPCZ</A>(X,a,b,0.0,Y0,YdotI);
+
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ts-&gt;ptime,Y1,Ydot,YdotI,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line224">224: </a>  a    = -2.0*t*t*t+3.0*t*t;
+<a name="line225">225: </a>  b    = -(t*t*t - t*t)*h;
+<a name="line226">226: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPBYPCZ.html#VecAXPBYPCZ">VecAXPBYPCZ</A>(X,a,b,1.0,Y1,YdotI);
+
+<a name="line228">228: </a>  <font color="#4169E1">return</font>(0);
+<a name="line229">229: </a>}
+
+
+<a name="line234">234: </a><strong><font color="#4169E1"><a name="TSReset_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSReset_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line235">235: </a>{
+<a name="line236">236: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line237">237: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        ns;
+<a name="line238">238: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line241">241: </a>  ns = ext-&gt;nstages;
+<a name="line242">242: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroyVecs.html#VecDestroyVecs">VecDestroyVecs</A>((1+ns)*ns/2,&amp;ext-&gt;T);
+<a name="line243">243: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;Y);
+<a name="line244">244: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;Z);
+<a name="line245">245: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;YdotRHS);
+<a name="line246">246: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;YdotI);
+<a name="line247">247: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;Ydot);
+<a name="line248">248: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;ext-&gt;VecSolPrev);
+<a name="line249">249: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ext-&gt;N);
+<a name="line250">250: </a>  <font color="#4169E1">return</font>(0);
+<a name="line251">251: </a>}
+
+<a name="line255">255: </a><strong><font color="#4169E1"><a name="TSDestroy_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSDestroy_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line256">256: </a>{
+<a name="line257">257: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+
+<a name="line260">260: </a>  TSReset_EIMEX(ts);
+<a name="line261">261: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ts-&gt;data);
+<a name="line262">262: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetMaxRows_C"</font>,NULL);
+<a name="line263">263: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetRowCol_C"</font>,NULL);
+<a name="line264">264: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetOrdAdapt_C"</font>,NULL);
+
+<a name="line266">266: </a>  <font color="#4169E1">return</font>(0);
+<a name="line267">267: </a>}
+
+
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="TSEIMEXGetVecs"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEIMEXGetVecs(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,DM dm,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Z,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Ydot,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *YdotI, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *YdotRHS)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  TS_EIMEX       *ext = (TS_EIMEX*)ts-&gt;data;
+
+<a name="line278">278: </a>  <font color="#4169E1">if</font> (Z) {
+<a name="line279">279: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line280">280: </a>      <A href="../../../../docs/manualpages/DM/DMGetNamedGlobalVector.html#DMGetNamedGlobalVector">DMGetNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_Z"</font>,Z);
+<a name="line281">281: </a>    } <font color="#4169E1">else</font> *Z = ext-&gt;Z;
+<a name="line282">282: </a>  }
+<a name="line283">283: </a>  <font color="#4169E1">if</font> (Ydot) {
+<a name="line284">284: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line285">285: </a>      <A href="../../../../docs/manualpages/DM/DMGetNamedGlobalVector.html#DMGetNamedGlobalVector">DMGetNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_Ydot"</font>,Ydot);
+<a name="line286">286: </a>    } <font color="#4169E1">else</font> *Ydot = ext-&gt;Ydot;
+<a name="line287">287: </a>  }
+<a name="line288">288: </a>  <font color="#4169E1">if</font> (YdotI) {
+<a name="line289">289: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line290">290: </a>      <A href="../../../../docs/manualpages/DM/DMGetNamedGlobalVector.html#DMGetNamedGlobalVector">DMGetNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_YdotI"</font>,YdotI);
+<a name="line291">291: </a>    } <font color="#4169E1">else</font> *YdotI = ext-&gt;YdotI;
+<a name="line292">292: </a>  }
+<a name="line293">293: </a>  <font color="#4169E1">if</font> (YdotRHS) {
+<a name="line294">294: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line295">295: </a>      <A href="../../../../docs/manualpages/DM/DMGetNamedGlobalVector.html#DMGetNamedGlobalVector">DMGetNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_YdotRHS"</font>,YdotRHS);
+<a name="line296">296: </a>    } <font color="#4169E1">else</font> *YdotRHS = ext-&gt;YdotRHS;
+<a name="line297">297: </a>  }
+<a name="line298">298: </a>  <font color="#4169E1">return</font>(0);
+<a name="line299">299: </a>}
+
+
+<a name="line304">304: </a><strong><font color="#4169E1"><a name="TSEIMEXRestoreVecs"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEIMEXRestoreVecs(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,DM dm,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Z,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *Ydot,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *YdotI,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *YdotRHS)</font></strong>
+<a name="line305">305: </a>{
+
+<a name="line309">309: </a>  <font color="#4169E1">if</font> (Z) {
+<a name="line310">310: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line311">311: </a>      <A href="../../../../docs/manualpages/DM/DMRestoreNamedGlobalVector.html#DMRestoreNamedGlobalVector">DMRestoreNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_Z"</font>,Z);
+<a name="line312">312: </a>    }
+<a name="line313">313: </a>  }
+<a name="line314">314: </a>  <font color="#4169E1">if</font> (Ydot) {
+<a name="line315">315: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line316">316: </a>      <A href="../../../../docs/manualpages/DM/DMRestoreNamedGlobalVector.html#DMRestoreNamedGlobalVector">DMRestoreNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_Ydot"</font>,Ydot);
+<a name="line317">317: </a>    }
+<a name="line318">318: </a>  }
+<a name="line319">319: </a>  <font color="#4169E1">if</font> (YdotI) {
+<a name="line320">320: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line321">321: </a>      <A href="../../../../docs/manualpages/DM/DMRestoreNamedGlobalVector.html#DMRestoreNamedGlobalVector">DMRestoreNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_YdotI"</font>,YdotI);
+<a name="line322">322: </a>    }
+<a name="line323">323: </a>  }
+<a name="line324">324: </a>  <font color="#4169E1">if</font> (YdotRHS) {
+<a name="line325">325: </a>    <font color="#4169E1">if</font> (dm &amp;&amp; dm != ts-&gt;dm) {
+<a name="line326">326: </a>      <A href="../../../../docs/manualpages/DM/DMRestoreNamedGlobalVector.html#DMRestoreNamedGlobalVector">DMRestoreNamedGlobalVector</A>(dm,<font color="#666666">"TSEIMEX_YdotRHS"</font>,YdotRHS);
+<a name="line327">327: </a>    }
+<a name="line328">328: </a>  }
+<a name="line329">329: </a>  <font color="#4169E1">return</font>(0);
+<a name="line330">330: </a>}
+
+
+<a name="line333">333: </a><font color="#B22222">/*</font>
+<a name="line334">334: </a><font color="#B22222">  This defines the nonlinear equation that is to be solved with <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+<a name="line335">335: </a><font color="#B22222">  Fn[t0+Theta*dt, U, (U-U0)*shift] = 0</font>
+<a name="line336">336: </a><font color="#B22222">  In the case of Backward Euler, Fn = (U-U0)/h-g(t1,U))</font>
+<a name="line337">337: </a><font color="#B22222">  Since FormIFunction calculates G = ydot - g(t,y), ydot will be set to (U-U0)/h</font>
+<a name="line338">338: </a><font color="#B22222">*/</font>
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="SNESTSFormFunction_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESTSFormFunction_EIMEX(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> G,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line342">342: </a>{
+<a name="line343">343: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line344">344: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line345">345: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>             Ydot,Z;
+<a name="line346">346: </a>  DM              dm,dmsave;
+
+<a name="line349">349: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(G);
+
+<a name="line351">351: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;dm);
+<a name="line352">352: </a>  TSEIMEXGetVecs(ts,dm,&amp;Z,&amp;Ydot,NULL,NULL);
+<a name="line353">353: </a>  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(Ydot);
+<a name="line354">354: </a>  dmsave = ts-&gt;dm;
+<a name="line355">355: </a>  ts-&gt;dm = dm;
+<a name="line356">356: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIFunction.html#TSComputeIFunction">TSComputeIFunction</A>(ts,ext-&gt;ctime,X,Ydot,G,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line357">357: </a>  <font color="#B22222">/* <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A> indicates non-imex, adding explicit RHS to the implicit I function.  */</font>
+<a name="line358">358: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(G,Ydot);
+<a name="line359">359: </a>  ts-&gt;dm = dmsave;
+<a name="line360">360: </a>  TSEIMEXRestoreVecs(ts,dm,&amp;Z,&amp;Ydot,NULL,NULL);
+
+<a name="line362">362: </a>  <font color="#4169E1">return</font>(0);
+<a name="line363">363: </a>}
+
+<a name="line365">365: </a><font color="#B22222">/*</font>
+<a name="line366">366: </a><font color="#B22222"> This defined the Jacobian matrix for <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>. Jn = (I/h-g'(t,y))</font>
+<a name="line367">367: </a><font color="#B22222"> */</font>
+<a name="line370">370: </a><strong><font color="#4169E1"><a name="SNESTSFormJacobian_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESTSFormJacobian_EIMEX(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line371">371: </a>{
+<a name="line372">372: </a>  TS_EIMEX        *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line373">373: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>             Ydot;
+<a name="line374">374: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line375">375: </a>  DM              dm,dmsave;
+<a name="line377">377: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;dm);
+<a name="line378">378: </a>  TSEIMEXGetVecs(ts,dm,NULL,&amp;Ydot,NULL,NULL);
+<a name="line379">379: </a>  <font color="#B22222">/*  <A href="../../../../docs/manualpages/Vec/VecZeroEntries.html#VecZeroEntries">VecZeroEntries</A>(Ydot); */</font>
+<a name="line380">380: </a>  <font color="#B22222">/* ext-&gt;Ydot have already been computed in SNESTSFormFunction_EIMEX (<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> guarantees this) */</font>
+<a name="line381">381: </a>  dmsave = ts-&gt;dm;
+<a name="line382">382: </a>  ts-&gt;dm = dm;
+<a name="line383">383: </a>  <A href="../../../../docs/manualpages/TS/TSComputeIJacobian.html#TSComputeIJacobian">TSComputeIJacobian</A>(ts,ts-&gt;ptime,X,Ydot,ext-&gt;shift,A,B,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+<a name="line384">384: </a>  ts-&gt;dm = dmsave;
+<a name="line385">385: </a>  TSEIMEXRestoreVecs(ts,dm,NULL,&amp;Ydot,NULL,NULL);
+<a name="line386">386: </a>  <font color="#4169E1">return</font>(0);
+<a name="line387">387: </a>}
+
+<a name="line391">391: </a><strong><font color="#4169E1"><a name="DMCoarsenHook_TSEIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMCoarsenHook_TSEIMEX(DM fine,DM coarse,void *ctx)</font></strong>
+<a name="line392">392: </a>{
+
+<a name="line395">395: </a>  <font color="#4169E1">return</font>(0);
+<a name="line396">396: </a>}
+
+<a name="line400">400: </a><strong><font color="#4169E1"><a name="DMRestrictHook_TSEIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMRestrictHook_TSEIMEX(DM fine,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> restrct,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> rscale,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> inject,DM coarse,void *ctx)</font></strong>
+<a name="line401">401: </a>{
+<a name="line402">402: </a>  <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts = (<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>)ctx;
+<a name="line404">404: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Z,Z_c;
+
+<a name="line407">407: </a>  TSEIMEXGetVecs(ts,fine,&amp;Z,NULL,NULL,NULL);
+<a name="line408">408: </a>  TSEIMEXGetVecs(ts,coarse,&amp;Z_c,NULL,NULL,NULL);
+<a name="line409">409: </a>  <A href="../../../../docs/manualpages/Mat/MatRestrict.html#MatRestrict">MatRestrict</A>(restrct,Z,Z_c);
+<a name="line410">410: </a>  <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(Z_c,rscale,Z_c);
+<a name="line411">411: </a>  TSEIMEXRestoreVecs(ts,fine,&amp;Z,NULL,NULL,NULL);
+<a name="line412">412: </a>  TSEIMEXRestoreVecs(ts,coarse,&amp;Z_c,NULL,NULL,NULL);
+<a name="line413">413: </a>  <font color="#4169E1">return</font>(0);
+<a name="line414">414: </a>}
+
+
+<a name="line419">419: </a><strong><font color="#4169E1"><a name="TSSetUp_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetUp_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line420">420: </a>{
+<a name="line421">421: </a>  TS_EIMEX       *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line423">423: </a>  DM             dm;
+
+<a name="line426">426: </a>  <font color="#4169E1">if</font> (!ext-&gt;N){ <font color="#B22222">/* ext-&gt;max_rows not set */</font>
+<a name="line427">427: </a>    <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>(ts,TSEIMEXDefault);
+<a name="line428">428: </a>  }
+<a name="line429">429: </a>  <font color="#4169E1">if</font>(-1 == ext-&gt;row_ind &amp;&amp; -1 == ext-&gt;col_ind){
+<a name="line430">430: </a>        <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(ts,ext-&gt;max_rows,ext-&gt;max_rows);
+<a name="line431">431: </a>  }<font color="#4169E1">else</font>{<font color="#B22222">/* ext-&gt;row_ind and col_ind already set */</font>
+<a name="line432">432: </a>    <font color="#4169E1">if</font>(ext-&gt;ord_adapt){
+<a name="line433">433: </a>      <A href="../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(ts,<font color="#666666">"Order adaptivity is enabled and <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A> or -ts_eimex_row_col option will take no effect\n"</font>);
+<a name="line434">434: </a>        }
+<a name="line435">435: </a>  }
+
+<a name="line437">437: </a>  <font color="#4169E1">if</font>(ext-&gt;ord_adapt){
+<a name="line438">438: </a>    ext-&gt;nstages = 2; <font color="#B22222">/* Start with the 2-stage scheme */</font>
+<a name="line439">439: </a>        <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(ts,ext-&gt;nstages,ext-&gt;nstages);
+<a name="line440">440: </a>  }<font color="#4169E1">else</font>{
+<a name="line441">441: </a>        ext-&gt;nstages = ext-&gt;max_rows; <font color="#B22222">/* by default nstages is the same as max_rows, this can be changed by setting order adaptivity */</font>
+<a name="line442">442: </a>  }
+
+<a name="line444">444: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicateVecs.html#VecDuplicateVecs">VecDuplicateVecs</A>(ts-&gt;vec_sol,(1+ext-&gt;nstages)*ext-&gt;nstages/2,&amp;ext-&gt;T);<font color="#B22222">/* full T table */</font>
+<a name="line445">445: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;YdotI);
+<a name="line446">446: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;YdotRHS);
+<a name="line447">447: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;Ydot);
+<a name="line448">448: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;VecSolPrev);
+<a name="line449">449: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;Y);
+<a name="line450">450: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(ts-&gt;vec_sol,&amp;ext-&gt;Z);
+<a name="line451">451: </a>  <A href="../../../../docs/manualpages/TS/TSGetDM.html#TSGetDM">TSGetDM</A>(ts,&amp;dm);
+<a name="line452">452: </a>  <font color="#4169E1">if</font> (dm) {
+<a name="line453">453: </a>    <A href="../../../../docs/manualpages/DM/DMCoarsenHookAdd.html#DMCoarsenHookAdd">DMCoarsenHookAdd</A>(dm,DMCoarsenHook_TSEIMEX,DMRestrictHook_TSEIMEX,ts);
+<a name="line454">454: </a>  }
+<a name="line455">455: </a>  <font color="#4169E1">return</font>(0);
+<a name="line456">456: </a>}
+
+<a name="line460">460: </a><strong><font color="#4169E1"><a name="TSSetFromOptions_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSSetFromOptions_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line461">461: </a>{
+<a name="line462">462: </a>  TS_EIMEX       *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line464">464: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       tindex[2];
+<a name="line465">465: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       np = 2, nrows=TSEIMEXDefault;
+
+<a name="line468">468: </a>  tindex[0] = TSEIMEXDefault;
+<a name="line469">469: </a>  tindex[1] = TSEIMEXDefault;
+<a name="line470">470: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"<A href="../../../../docs/manualpages/TS/EIMEX.html#EIMEX">EIMEX</A> ODE solver options"</font>);
+<a name="line471">471: </a>  {
+<a name="line472">472: </a>    <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg;
+<a name="line473">473: </a>    flg  = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line474">474: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsInt.html#PetscOptionsInt">PetscOptionsInt</A>(<font color="#666666">"-ts_eimex_max_rows"</font>,<font color="#666666">"Define the maximum number of rows used"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>"</font>,nrows,&amp;nrows,&amp;flg); <font color="#B22222">/* default value 3 */</font>
+<a name="line475">475: </a>    <font color="#4169E1">if</font>(flg){
+<a name="line476">476: </a>      <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>(ts,nrows);
+<a name="line477">477: </a>    }
+<a name="line478">478: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsIntArray.html#PetscOptionsIntArray">PetscOptionsIntArray</A>(<font color="#666666">"-ts_eimex_row_col"</font>,<font color="#666666">"Return the specific term in the T table"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>"</font>,tindex,&amp;np,&amp;flg);
+<a name="line479">479: </a>    <font color="#4169E1">if</font>(flg){
+<a name="line480">480: </a>      <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(ts,tindex[0],tindex[1]);
+<a name="line481">481: </a>    }
+<a name="line482">482: </a>    <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-ts_eimex_order_adapt"</font>,<font color="#666666">"Solve the problem with adaptive order"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>"</font>,ext-&gt;ord_adapt,&amp;ext-&gt;ord_adapt,NULL);
+<a name="line483">483: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(ts-&gt;snes);
+<a name="line484">484: </a>  }
+<a name="line485">485: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line486">486: </a>  <font color="#4169E1">return</font>(0);
+<a name="line487">487: </a>}
+
+<a name="line491">491: </a><strong><font color="#4169E1"><a name="TSView_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSView_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line492">492: </a>{
+<a name="line493">493: </a>  <font color="#B22222">/*  TS_EIMEX         *ext = (TS_EIMEX*)ts-&gt;data; */</font>
+<a name="line494">494: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        iascii;
+<a name="line495">495: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+
+<a name="line498">498: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERASCII,&amp;iascii);
+<a name="line499">499: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line500">500: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  <A href="../../../../docs/manualpages/TS/EIMEX.html#EIMEX">EIMEX</A>\n"</font>);
+<a name="line501">501: </a>  }
+<a name="line502">502: </a>  <A href="../../../../docs/manualpages/SNES/SNESView.html#SNESView">SNESView</A>(ts-&gt;snes,viewer);
+<a name="line503">503: </a>  <font color="#4169E1">return</font>(0);
+<a name="line504">504: </a>}
+
+
+<a name="line509">509: </a><font color="#B22222">/*@C</font>
+<a name="line510">510: </a><font color="#B22222">  <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A> - Set the maximum number of rows for <A href="../../../../docs/manualpages/TS/EIMEX.html#EIMEX">EIMEX</A> schemes</font>
+
+<a name="line512">512: </a><font color="#B22222">  Logically collective</font>
+
+<a name="line514">514: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line515">515: </a><font color="#B22222">+  ts - timestepping context</font>
+<a name="line516">516: </a><font color="#B22222">-  nrows - maximum number of rows</font>
+
+<a name="line518">518: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line520">520: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEX.html#TSEIMEX">TSEIMEX</A></font>
+<a name="line521">521: </a><font color="#B22222">@*/</font>
+<a name="line522">522: </a><strong><font color="#4169E1"><a name="TSEIMEXSetMaxRows"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nrows)</font></strong>
+<a name="line523">523: </a>{
+<a name="line527">527: </a>  PetscTryMethod(ts,<font color="#666666">"TSEIMEXSetMaxRows_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(ts,nrows));
+<a name="line528">528: </a>  <font color="#4169E1">return</font>(0);
+<a name="line529">529: </a>}
+
+
+<a name="line534">534: </a><font color="#B22222">/*@C</font>
+<a name="line535">535: </a><font color="#B22222">  <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A> - Set the type index in the T table for the return value</font>
+
+<a name="line537">537: </a><font color="#B22222">  Logically collective</font>
+
+<a name="line539">539: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line540">540: </a><font color="#B22222">+  ts - timestepping context</font>
+<a name="line541">541: </a><font color="#B22222">-  tindex - index in the T table</font>
+
+<a name="line543">543: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line545">545: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEX.html#TSEIMEX">TSEIMEX</A></font>
+<a name="line546">546: </a><font color="#B22222">@*/</font>
+<a name="line547">547: </a><strong><font color="#4169E1"><a name="TSEIMEXSetRowCol"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> row, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> col)</font></strong>
+<a name="line548">548: </a>{
+<a name="line552">552: </a>  PetscTryMethod(ts,<font color="#666666">"TSEIMEXSetRowCol_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>, <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>),(ts,row,col));
+<a name="line553">553: </a>  <font color="#4169E1">return</font>(0);
+<a name="line554">554: </a>}
+
+
+<a name="line559">559: </a><font color="#B22222">/*@C</font>
+<a name="line560">560: </a><font color="#B22222">  <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A> - Set the order adaptativity</font>
+
+<a name="line562">562: </a><font color="#B22222">  Logically collective</font>
+
+<a name="line564">564: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line565">565: </a><font color="#B22222">+  ts - timestepping context</font>
+<a name="line566">566: </a><font color="#B22222">-  tindex - index in the T table</font>
+
+<a name="line568">568: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line570">570: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/TS/TSEIMEXSetRowCol.html#TSEIMEXSetRowCol">TSEIMEXSetRowCol</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>(), <A href="../../../../docs/manualpages/TS/TSEIMEX.html#TSEIMEX">TSEIMEX</A></font>
+<a name="line571">571: </a><font color="#B22222">@*/</font>
+<a name="line572">572: </a><strong><font color="#4169E1"><a name="TSEIMEXSetOrdAdapt"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/TS/TSEIMEXSetOrdAdapt.html#TSEIMEXSetOrdAdapt">TSEIMEXSetOrdAdapt</A>(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts, <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg)</font></strong>
+<a name="line573">573: </a>{
+<a name="line577">577: </a>  PetscTryMethod(ts,<font color="#666666">"TSEIMEXSetOrdAdapt_C"</font>,(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A>,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>),(ts,flg));
+<a name="line578">578: </a>  <font color="#4169E1">return</font>(0);
+<a name="line579">579: </a>}
+
+
+<a name="line584">584: </a><strong><font color="#4169E1"><a name="TSEIMEXSetMaxRows_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEIMEXSetMaxRows_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> nrows)</font></strong>
+<a name="line585">585: </a>{
+<a name="line586">586: </a>  TS_EIMEX *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line588">588: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line591">591: </a>  <font color="#4169E1">if</font> (nrows &lt; 0 || nrows &gt; 100) <A href="../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"Max number of rows (current value %D) should be an integer number between 1 and 100\n"</font>,nrows);
+<a name="line592">592: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ext-&gt;N);
+<a name="line593">593: </a>  ext-&gt;max_rows = nrows;
+<a name="line594">594: </a>  <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(nrows,&amp;ext-&gt;N);
+<a name="line595">595: </a>  <font color="#4169E1">for</font>(i=0;i&lt;nrows;i++) ext-&gt;N[i]=i+1;
+<a name="line596">596: </a>  <font color="#4169E1">return</font>(0);
+<a name="line597">597: </a>}
+
+<a name="line601">601: </a><strong><font color="#4169E1"><a name="TSEIMEXSetRowCol_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEIMEXSetRowCol_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> row,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> col)</font></strong>
+<a name="line602">602: </a>{
+<a name="line603">603: </a>  TS_EIMEX *ext = (TS_EIMEX*)ts-&gt;data;
+
+<a name="line606">606: </a>  <font color="#4169E1">if</font> (row &lt; 1 || col &lt; 1) <A href="../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"The row or column index (current value %d,%d) should not be less than 1 \n"</font>,row,col);
+<a name="line607">607: </a>  <font color="#4169E1">if</font> (row &gt; ext-&gt;max_rows || col &gt; ext-&gt;max_rows) <A href="../../../../docs/manualpages/Sys/SETERRQ3.html#SETERRQ3">SETERRQ3</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"The row or column index (current value %d,%d) exceeds the maximum number of rows %d\n"</font>,row,col,ext-&gt;max_rows);
+<a name="line608">608: </a>  <font color="#4169E1">if</font> (col &gt; row) <A href="../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts)-&gt;comm,PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"The column index (%d) exceeds the row index (%d)\n"</font>,col,row);
+
+<a name="line610">610: </a>  ext-&gt;row_ind = row - 1;
+<a name="line611">611: </a>  ext-&gt;col_ind = col - 1; <font color="#B22222">/* Array index in C starts from 0 */</font>
+<a name="line612">612: </a>  <font color="#4169E1">return</font>(0);
+<a name="line613">613: </a>}
+
+<a name="line617">617: </a><strong><font color="#4169E1"><a name="TSEIMEXSetOrdAdapt_EIMEX"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSEIMEXSetOrdAdapt_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg)</font></strong>
+<a name="line618">618: </a>{
+<a name="line619">619: </a>  TS_EIMEX *ext = (TS_EIMEX*)ts-&gt;data;
+<a name="line621">621: </a>  ext-&gt;ord_adapt = flg;
+<a name="line622">622: </a>  <font color="#4169E1">return</font>(0);
+<a name="line623">623: </a>}
+
+<a name="line625">625: </a><font color="#B22222">/* ------------------------------------------------------------ */</font>
+<a name="line626">626: </a><font color="#B22222">/*MC</font>
+<a name="line627">627: </a><font color="#B22222">      <A href="../../../../docs/manualpages/TS/TSEIMEX.html#TSEIMEX">TSEIMEX</A> - ODE solver using extrapolated IMEX schemes</font>
+<a name="line628">628: </a><font color="#B22222">  These methods are intended for problems with well-separated time scales, especially when a slow scale is strongly nonlinear such that it is expensive to solve with a fully implicit method. The user should provide the stiff part of the equation using <A href="../../../../docs/manualpages/TS/TSSetIFunction.html#TSSetIFunction">TSSetIFunction</A>() and the non-stiff part with <A href="../../../../docs/manualpages/TS/TSSetRHSFunction.html#TSSetRHSFunction">TSSetRHSFunction</A>().</font>
+
+<a name="line630">630: </a><font color="#B22222">   Notes:</font>
+<a name="line631">631: </a><font color="#B22222">  The default is a 3-stage scheme, it can be changed with <A href="../../../../docs/manualpages/TS/TSEIMEXSetMaxRows.html#TSEIMEXSetMaxRows">TSEIMEXSetMaxRows</A>() or -ts_eimex_max_rows</font>
+
+<a name="line633">633: </a><font color="#B22222">  This method currently only works with ODE, for which the stiff part G(t,X,Xdot) has the form Xdot + Ghat(t,X).</font>
+
+<a name="line635">635: </a><font color="#B22222">  Level: beginner</font>
+
+<a name="line637">637: </a><font color="#B22222">.seealso:  <A href="../../../../docs/manualpages/TS/TSCreate.html#TSCreate">TSCreate</A>(), <A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A></font>
+<a name="line638">638: </a><font color="#B22222">M*/</font>
+<a name="line641">641: </a><strong><font color="#4169E1"><a name="TSCreate_EIMEX"></a>PETSC_EXTERN <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> TSCreate_EIMEX(<A href="../../../../docs/manualpages/TS/TS.html#TS">TS</A> ts)</font></strong>
+<a name="line642">642: </a>{
+<a name="line643">643: </a>  TS_EIMEX       *ext;
+
+
+<a name="line648">648: </a>  ts-&gt;ops-&gt;reset          = TSReset_EIMEX;
+<a name="line649">649: </a>  ts-&gt;ops-&gt;destroy        = TSDestroy_EIMEX;
+<a name="line650">650: </a>  ts-&gt;ops-&gt;view           = TSView_EIMEX;
+<a name="line651">651: </a>  ts-&gt;ops-&gt;setup          = TSSetUp_EIMEX;
+<a name="line652">652: </a>  ts-&gt;ops-&gt;step           = TSStep_EIMEX;
+<a name="line653">653: </a>  ts-&gt;ops-&gt;interpolate    = TSInterpolate_EIMEX;
+<a name="line654">654: </a>  ts-&gt;ops-&gt;evaluatestep   = TSEvaluateStep_EIMEX;
+<a name="line655">655: </a>  ts-&gt;ops-&gt;setfromoptions = TSSetFromOptions_EIMEX;
+<a name="line656">656: </a>  ts-&gt;ops-&gt;snesfunction   = SNESTSFormFunction_EIMEX;
+<a name="line657">657: </a>  ts-&gt;ops-&gt;snesjacobian   = SNESTSFormJacobian_EIMEX;
+
+<a name="line659">659: </a>  <A href="../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(ts,&amp;ext);
+<a name="line660">660: </a>  ts-&gt;data = (void*)ext;
+
+<a name="line662">662: </a>  ext-&gt;ord_adapt = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>; <font color="#B22222">/* By default, no order adapativity */</font>
+<a name="line663">663: </a>  ext-&gt;row_ind   = -1;
+<a name="line664">664: </a>  ext-&gt;col_ind   = -1;
+<a name="line665">665: </a>  ext-&gt;max_rows  = TSEIMEXDefault;
+<a name="line666">666: </a>  ext-&gt;nstages   = TSEIMEXDefault;
+
+<a name="line668">668: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetMaxRows_C"</font>, TSEIMEXSetMaxRows_EIMEX);
+<a name="line669">669: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetRowCol_C"</font>,  TSEIMEXSetRowCol_EIMEX);
+<a name="line670">670: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)ts,<font color="#666666">"TSEIMEXSetOrdAdapt_C"</font>,TSEIMEXSetOrdAdapt_EIMEX);
+<a name="line671">671: </a>  <font color="#4169E1">return</font>(0);
+<a name="line672">672: </a>}
+</pre>
+</body>
+
+</html>

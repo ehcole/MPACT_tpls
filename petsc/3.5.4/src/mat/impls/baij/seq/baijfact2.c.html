@@ -1,0 +1,782 @@
+<center><a href="baijfact2.c">Actual source code: baijfact2.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/mat/impls/baij/seq/baijfact2.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:23:17+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/mat/impls/baij/seq/baijfact2.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">    Factorization code for BAIJ format.</font>
+<a name="line4">  4: </a><font color="#B22222">*/</font>
+
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;../src/mat/impls/baij/seq/baij.h&gt;</font>
+<a name="line7">  7: </a><font color="#A020F0">#include &lt;petsc-private/kernels/blockinvert.h&gt;</font>
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;petscbt.h&gt;</font>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;../src/mat/utils/freespace.h&gt;</font>
+
+<a name="line11"> 11: </a><font color="#B22222">/* ----------------------------------------------------------------*/</font>
+<a name="line12"> 12: </a><strong><font color="#4169E1">extern <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDuplicateNoCreate_SeqBAIJ(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../../docs/manualpages/Mat/MatDuplicateOption.html#MatDuplicateOption">MatDuplicateOption</A>,<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>)</font></strong>;
+
+<a name="line16"> 16: </a><font color="#B22222">/*</font>
+<a name="line17"> 17: </a><font color="#B22222">   This is not much faster than MatLUFactorNumeric_SeqBAIJ_N() but the solve is faster at least sometimes</font>
+<a name="line18"> 18: </a><font color="#B22222">*/</font>
+<a name="line19"> 19: </a><strong><font color="#4169E1"><a name="MatLUFactorNumeric_SeqBAIJ_15_NaturalOrdering"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorNumeric_SeqBAIJ_15_NaturalOrdering(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,const <A href="../../../../../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line20"> 20: </a>{
+<a name="line21"> 21: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>             C =B;
+<a name="line22"> 22: </a>  Mat_SeqBAIJ     *a=(Mat_SeqBAIJ*)A-&gt;data,*b=(Mat_SeqBAIJ*)C-&gt;data;
+<a name="line23"> 23: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  ierr;
+<a name="line24"> 24: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        i,j,k,ipvt[15];
+<a name="line25"> 25: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>  n=a-&gt;mbs,*ai=a-&gt;i,*aj=a-&gt;j,*bi=b-&gt;i,*bj=b-&gt;j,*ajtmp,*bjtmp,*bdiag=b-&gt;diag,*pj;
+<a name="line26"> 26: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        nz,nzL,row;
+<a name="line27"> 27: </a>  MatScalar       *rtmp,*pc,*mwork,*pv,*vv,work[225];
+<a name="line28"> 28: </a>  const MatScalar *v,*aa=a-&gt;a;
+<a name="line29"> 29: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        bs2 = a-&gt;bs2,bs=A-&gt;rmap-&gt;bs,flg;
+<a name="line30"> 30: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>        sol_ver;
+
+<a name="line33"> 33: </a>  <A href="../../../../../docs/manualpages/Sys/PetscOptionsGetInt.html#PetscOptionsGetInt">PetscOptionsGetInt</A>(((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A)-&gt;prefix,<font color="#666666">"-sol_ver"</font>,&amp;sol_ver,NULL);
+
+<a name="line35"> 35: </a>  <font color="#B22222">/* generate work space needed by the factorization */</font>
+<a name="line36"> 36: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc2.html#PetscMalloc2">PetscMalloc2</A>(bs2*n,&amp;rtmp,bs2,&amp;mwork);
+<a name="line37"> 37: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp,bs2*n*<font color="#4169E1">sizeof</font>(MatScalar));
+
+<a name="line39"> 39: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line40"> 40: </a>    <font color="#B22222">/* zero rtmp */</font>
+<a name="line41"> 41: </a>    <font color="#B22222">/* L part */</font>
+<a name="line42"> 42: </a>    nz    = bi[i+1] - bi[i];
+<a name="line43"> 43: </a>    bjtmp = bj + bi[i];
+<a name="line44"> 44: </a>    <font color="#4169E1">for</font>  (j=0; j&lt;nz; j++) {
+<a name="line45"> 45: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp+bs2*bjtmp[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line46"> 46: </a>    }
+
+<a name="line48"> 48: </a>    <font color="#B22222">/* U part */</font>
+<a name="line49"> 49: </a>    nz    = bdiag[i] - bdiag[i+1];
+<a name="line50"> 50: </a>    bjtmp = bj + bdiag[i+1]+1;
+<a name="line51"> 51: </a>    <font color="#4169E1">for</font>  (j=0; j&lt;nz; j++) {
+<a name="line52"> 52: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp+bs2*bjtmp[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line53"> 53: </a>    }
+
+<a name="line55"> 55: </a>    <font color="#B22222">/* load in initial (unfactored row) */</font>
+<a name="line56"> 56: </a>    nz    = ai[i+1] - ai[i];
+<a name="line57"> 57: </a>    ajtmp = aj + ai[i];
+<a name="line58"> 58: </a>    v     = aa + bs2*ai[i];
+<a name="line59"> 59: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line60"> 60: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(rtmp+bs2*ajtmp[j],v+bs2*j,bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line61"> 61: </a>    }
+
+<a name="line63"> 63: </a>    <font color="#B22222">/* elimination */</font>
+<a name="line64"> 64: </a>    bjtmp = bj + bi[i];
+<a name="line65"> 65: </a>    nzL   = bi[i+1] - bi[i];
+<a name="line66"> 66: </a>    <font color="#4169E1">for</font> (k=0; k &lt; nzL; k++) {
+<a name="line67"> 67: </a>      row = bjtmp[k];
+<a name="line68"> 68: </a>      pc  = rtmp + bs2*row;
+<a name="line69"> 69: </a>      <font color="#4169E1">for</font> (flg=0,j=0; j&lt;bs2; j++) {
+<a name="line70"> 70: </a>        <font color="#4169E1">if</font> (pc[j]!=0.0) {
+<a name="line71"> 71: </a>          flg = 1;
+<a name="line72"> 72: </a>          <font color="#4169E1">break</font>;
+<a name="line73"> 73: </a>        }
+<a name="line74"> 74: </a>      }
+<a name="line75"> 75: </a>      <font color="#4169E1">if</font> (flg) {
+<a name="line76"> 76: </a>        pv = b-&gt;a + bs2*bdiag[row];
+<a name="line77"> 77: </a>        PetscKernel_A_gets_A_times_B(bs,pc,pv,mwork);
+<a name="line78"> 78: </a>        <font color="#B22222">/*PetscKernel_A_gets_A_times_B_15(pc,pv,mwork);*/</font>
+<a name="line79"> 79: </a>        pj = b-&gt;j + bdiag[row+1]+1; <font color="#B22222">/* begining of U(row,:) */</font>
+<a name="line80"> 80: </a>        pv = b-&gt;a + bs2*(bdiag[row+1]+1);
+<a name="line81"> 81: </a>        nz = bdiag[row] - bdiag[row+1] - 1; <font color="#B22222">/* num of entries inU(row,:), excluding diag */</font>
+<a name="line82"> 82: </a>        <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line83"> 83: </a>          vv = rtmp + bs2*pj[j];
+<a name="line84"> 84: </a>          PetscKernel_A_gets_A_minus_B_times_C(bs,vv,pc,pv);
+<a name="line85"> 85: </a>          <font color="#B22222">/* PetscKernel_A_gets_A_minus_B_times_C_15(vv,pc,pv); */</font>
+<a name="line86"> 86: </a>          pv += bs2;
+<a name="line87"> 87: </a>        }
+<a name="line88"> 88: </a>        <A href="../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(2*bs2*bs*(nz+1)-bs2); <font color="#B22222">/* flops = 2*bs^3*nz + 2*bs^3 - bs2) */</font>
+<a name="line89"> 89: </a>      }
+<a name="line90"> 90: </a>    }
+
+<a name="line92"> 92: </a>    <font color="#B22222">/* finished row so stick it into b-&gt;a */</font>
+<a name="line93"> 93: </a>    <font color="#B22222">/* L part */</font>
+<a name="line94"> 94: </a>    pv = b-&gt;a + bs2*bi[i];
+<a name="line95"> 95: </a>    pj = b-&gt;j + bi[i];
+<a name="line96"> 96: </a>    nz = bi[i+1] - bi[i];
+<a name="line97"> 97: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line98"> 98: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv+bs2*j,rtmp+bs2*pj[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line99"> 99: </a>    }
+
+<a name="line101">101: </a>    <font color="#B22222">/* Mark diagonal and invert diagonal for simplier triangular solves */</font>
+<a name="line102">102: </a>    pv   = b-&gt;a + bs2*bdiag[i];
+<a name="line103">103: </a>    pj   = b-&gt;j + bdiag[i];
+<a name="line104">104: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv,rtmp+bs2*pj[0],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line105">105: </a>    <font color="#B22222">/* PetscKernel_A_gets_inverse_A(bs,pv,pivots,work); */</font>
+<a name="line106">106: </a>    PetscKernel_A_gets_inverse_A_15(pv,ipvt,work,info-&gt;shiftamount);
+
+<a name="line108">108: </a>    <font color="#B22222">/* U part */</font>
+<a name="line109">109: </a>    pv = b-&gt;a + bs2*(bdiag[i+1]+1);
+<a name="line110">110: </a>    pj = b-&gt;j + bdiag[i+1]+1;
+<a name="line111">111: </a>    nz = bdiag[i] - bdiag[i+1] - 1;
+<a name="line112">112: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line113">113: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv+bs2*j,rtmp+bs2*pj[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line114">114: </a>    }
+<a name="line115">115: </a>  }
+
+<a name="line117">117: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree2.html#PetscFree2">PetscFree2</A>(rtmp,mwork);
+
+<a name="line119">119: </a>  C-&gt;ops-&gt;solve          = MatSolve_SeqBAIJ_15_NaturalOrdering_ver1;
+<a name="line120">120: </a>  C-&gt;ops-&gt;solvetranspose = MatSolve_SeqBAIJ_N_NaturalOrdering;
+<a name="line121">121: </a>  C-&gt;assembled           = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line123">123: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(1.333333333333*bs*bs2*b-&gt;mbs); <font color="#B22222">/* from inverting diagonal blocks */</font>
+<a name="line124">124: </a>  <font color="#4169E1">return</font>(0);
+<a name="line125">125: </a>}
+
+<a name="line129">129: </a><strong><font color="#4169E1"><a name="MatLUFactorNumeric_SeqBAIJ_N"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatLUFactorNumeric_SeqBAIJ_N(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,const <A href="../../../../../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line130">130: </a>{
+<a name="line131">131: </a>  <A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            C     =B;
+<a name="line132">132: </a>  Mat_SeqBAIJ    *a    =(Mat_SeqBAIJ*)A-&gt;data,*b=(Mat_SeqBAIJ*)C-&gt;data;
+<a name="line133">133: </a>  <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>             isrow = b-&gt;row,isicol = b-&gt;icol;
+<a name="line135">135: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *r,*ic;
+<a name="line136">136: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,k,n=a-&gt;mbs,*ai=a-&gt;i,*aj=a-&gt;j,*bi=b-&gt;i,*bj=b-&gt;j;
+<a name="line137">137: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *ajtmp,*bjtmp,nz,nzL,row,*bdiag=b-&gt;diag,*pj;
+<a name="line138">138: </a>  MatScalar      *rtmp,*pc,*mwork,*v,*pv,*aa=a-&gt;a;
+<a name="line139">139: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       bs=A-&gt;rmap-&gt;bs,bs2 = a-&gt;bs2,*v_pivots,flg;
+<a name="line140">140: </a>  MatScalar      *v_work;
+<a name="line141">141: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      col_identity,row_identity,both_identity;
+
+<a name="line144">144: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isrow,&amp;r);
+<a name="line145">145: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isicol,&amp;ic);
+
+<a name="line147">147: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(bs2*n,&amp;rtmp);
+<a name="line148">148: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp,bs2*n*<font color="#4169E1">sizeof</font>(MatScalar));
+
+<a name="line150">150: </a>  <font color="#B22222">/* generate work space needed by dense LU factorization */</font>
+<a name="line151">151: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc3.html#PetscMalloc3">PetscMalloc3</A>(bs,&amp;v_work,bs2,&amp;mwork,bs,&amp;v_pivots);
+
+<a name="line153">153: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line154">154: </a>    <font color="#B22222">/* zero rtmp */</font>
+<a name="line155">155: </a>    <font color="#B22222">/* L part */</font>
+<a name="line156">156: </a>    nz    = bi[i+1] - bi[i];
+<a name="line157">157: </a>    bjtmp = bj + bi[i];
+<a name="line158">158: </a>    <font color="#4169E1">for</font>  (j=0; j&lt;nz; j++) {
+<a name="line159">159: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp+bs2*bjtmp[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line160">160: </a>    }
+
+<a name="line162">162: </a>    <font color="#B22222">/* U part */</font>
+<a name="line163">163: </a>    nz    = bdiag[i] - bdiag[i+1];
+<a name="line164">164: </a>    bjtmp = bj + bdiag[i+1]+1;
+<a name="line165">165: </a>    <font color="#4169E1">for</font>  (j=0; j&lt;nz; j++) {
+<a name="line166">166: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(rtmp+bs2*bjtmp[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line167">167: </a>    }
+
+<a name="line169">169: </a>    <font color="#B22222">/* load in initial (unfactored row) */</font>
+<a name="line170">170: </a>    nz    = ai[r[i]+1] - ai[r[i]];
+<a name="line171">171: </a>    ajtmp = aj + ai[r[i]];
+<a name="line172">172: </a>    v     = aa + bs2*ai[r[i]];
+<a name="line173">173: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line174">174: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(rtmp+bs2*ic[ajtmp[j]],v+bs2*j,bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line175">175: </a>    }
+
+<a name="line177">177: </a>    <font color="#B22222">/* elimination */</font>
+<a name="line178">178: </a>    bjtmp = bj + bi[i];
+<a name="line179">179: </a>    nzL   = bi[i+1] - bi[i];
+<a name="line180">180: </a>    <font color="#4169E1">for</font> (k=0; k &lt; nzL; k++) {
+<a name="line181">181: </a>      row = bjtmp[k];
+<a name="line182">182: </a>      pc  = rtmp + bs2*row;
+<a name="line183">183: </a>      <font color="#4169E1">for</font> (flg=0,j=0; j&lt;bs2; j++) {
+<a name="line184">184: </a>        <font color="#4169E1">if</font> (pc[j]!=0.0) {
+<a name="line185">185: </a>          flg = 1;
+<a name="line186">186: </a>          <font color="#4169E1">break</font>;
+<a name="line187">187: </a>        }
+<a name="line188">188: </a>      }
+<a name="line189">189: </a>      <font color="#4169E1">if</font> (flg) {
+<a name="line190">190: </a>        pv = b-&gt;a + bs2*bdiag[row];
+<a name="line191">191: </a>        PetscKernel_A_gets_A_times_B(bs,pc,pv,mwork); <font color="#B22222">/* *pc = *pc * (*pv); */</font>
+<a name="line192">192: </a>        pj = b-&gt;j + bdiag[row+1]+1;         <font color="#B22222">/* begining of U(row,:) */</font>
+<a name="line193">193: </a>        pv = b-&gt;a + bs2*(bdiag[row+1]+1);
+<a name="line194">194: </a>        nz = bdiag[row] - bdiag[row+1] - 1;         <font color="#B22222">/* num of entries inU(row,:), excluding diag */</font>
+<a name="line195">195: </a>        <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line196">196: </a>          PetscKernel_A_gets_A_minus_B_times_C(bs,rtmp+bs2*pj[j],pc,pv+bs2*j);
+<a name="line197">197: </a>        }
+<a name="line198">198: </a>        <A href="../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(2*bs2*bs*(nz+1)-bs2); <font color="#B22222">/* flops = 2*bs^3*nz + 2*bs^3 - bs2) */</font>
+<a name="line199">199: </a>      }
+<a name="line200">200: </a>    }
+
+<a name="line202">202: </a>    <font color="#B22222">/* finished row so stick it into b-&gt;a */</font>
+<a name="line203">203: </a>    <font color="#B22222">/* L part */</font>
+<a name="line204">204: </a>    pv = b-&gt;a + bs2*bi[i];
+<a name="line205">205: </a>    pj = b-&gt;j + bi[i];
+<a name="line206">206: </a>    nz = bi[i+1] - bi[i];
+<a name="line207">207: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line208">208: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv+bs2*j,rtmp+bs2*pj[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line209">209: </a>    }
+
+<a name="line211">211: </a>    <font color="#B22222">/* Mark diagonal and invert diagonal for simplier triangular solves */</font>
+<a name="line212">212: </a>    pv = b-&gt;a + bs2*bdiag[i];
+<a name="line213">213: </a>    pj = b-&gt;j + bdiag[i];
+<a name="line214">214: </a>    <font color="#B22222">/* if (*pj != i)<A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,"row %d != *pj %d",i,*pj); */</font>
+<a name="line215">215: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv,rtmp+bs2*pj[0],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line216">216: </a>    PetscKernel_A_gets_inverse_A(bs,pv,v_pivots,v_work);
+
+<a name="line218">218: </a>    <font color="#B22222">/* U part */</font>
+<a name="line219">219: </a>    pv = b-&gt;a + bs2*(bdiag[i+1]+1);
+<a name="line220">220: </a>    pj = b-&gt;j + bdiag[i+1]+1;
+<a name="line221">221: </a>    nz = bdiag[i] - bdiag[i+1] - 1;
+<a name="line222">222: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line223">223: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(pv+bs2*j,rtmp+bs2*pj[j],bs2*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line224">224: </a>    }
+<a name="line225">225: </a>  }
+
+<a name="line227">227: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(rtmp);
+<a name="line228">228: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree3.html#PetscFree3">PetscFree3</A>(v_work,mwork,v_pivots);
+<a name="line229">229: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isicol,&amp;ic);
+<a name="line230">230: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isrow,&amp;r);
+
+<a name="line232">232: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(isrow,&amp;row_identity);
+<a name="line233">233: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(isicol,&amp;col_identity);
+
+<a name="line235">235: </a>  both_identity = (<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>) (row_identity &amp;&amp; col_identity);
+<a name="line236">236: </a>  <font color="#4169E1">if</font> (both_identity) {
+<a name="line237">237: </a>    C-&gt;ops-&gt;solve = MatSolve_SeqBAIJ_N_NaturalOrdering;
+<a name="line238">238: </a>  } <font color="#4169E1">else</font> {
+<a name="line239">239: </a>    C-&gt;ops-&gt;solve = MatSolve_SeqBAIJ_N;
+<a name="line240">240: </a>  }
+<a name="line241">241: </a>  C-&gt;ops-&gt;solvetranspose = MatSolveTranspose_SeqBAIJ_N;
+
+<a name="line243">243: </a>  C-&gt;assembled = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line245">245: </a>  <A href="../../../../../docs/manualpages/Profiling/PetscLogFlops.html#PetscLogFlops">PetscLogFlops</A>(1.333333333333*bs*bs2*b-&gt;mbs); <font color="#B22222">/* from inverting diagonal blocks */</font>
+<a name="line246">246: </a>  <font color="#4169E1">return</font>(0);
+<a name="line247">247: </a>}
+
+<a name="line249">249: </a><font color="#B22222">/*</font>
+<a name="line250">250: </a><font color="#B22222">   ilu(0) with natural ordering under new data structure.</font>
+<a name="line251">251: </a><font color="#B22222">   See MatILUFactorSymbolic_SeqAIJ_ilu0() for detailed description</font>
+<a name="line252">252: </a><font color="#B22222">   because this code is almost identical to MatILUFactorSymbolic_SeqAIJ_ilu0_inplace().</font>
+<a name="line253">253: </a><font color="#B22222">*/</font>
+
+<a name="line257">257: </a><strong><font color="#4169E1"><a name="MatILUFactorSymbolic_SeqBAIJ_ilu0"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatILUFactorSymbolic_SeqBAIJ_ilu0(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> fact,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> isrow,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> iscol,const <A href="../../../../../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line258">258: </a>{
+
+<a name="line260">260: </a>  Mat_SeqBAIJ    *a = (Mat_SeqBAIJ*)A-&gt;data,*b;
+<a name="line262">262: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       n=a-&gt;mbs,*ai=a-&gt;i,*aj,*adiag=a-&gt;diag,bs2 = a-&gt;bs2;
+<a name="line263">263: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,j,nz,*bi,*bj,*bdiag,bi_temp;
+
+<a name="line266">266: </a>  MatDuplicateNoCreate_SeqBAIJ(fact,A,MAT_DO_NOT_COPY_VALUES,<A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line267">267: </a>  b    = (Mat_SeqBAIJ*)(fact)-&gt;data;
+
+<a name="line269">269: </a>  <font color="#B22222">/* allocate matrix arrays for new data structure */</font>
+<a name="line270">270: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc3.html#PetscMalloc3">PetscMalloc3</A>(bs2*ai[n]+1,&amp;b-&gt;a,ai[n]+1,&amp;b-&gt;j,n+1,&amp;b-&gt;i);
+<a name="line271">271: </a>  PetscLogObjectMemory((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,ai[n]*(bs2*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)+<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>))+(n+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>));
+
+<a name="line273">273: </a>  b-&gt;singlemalloc    = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line274">274: </a>  b-&gt;free_a          = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line275">275: </a>  b-&gt;free_ij         = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line276">276: </a>  fact-&gt;preallocated = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line277">277: </a>  fact-&gt;assembled    = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line278">278: </a>  <font color="#4169E1">if</font> (!b-&gt;diag) {
+<a name="line279">279: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;b-&gt;diag);
+<a name="line280">280: </a>    PetscLogObjectMemory((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,(n+1)*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>));
+<a name="line281">281: </a>  }
+<a name="line282">282: </a>  bdiag = b-&gt;diag;
+
+<a name="line284">284: </a>  <font color="#4169E1">if</font> (n &gt; 0) {
+<a name="line285">285: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMemzero.html#PetscMemzero">PetscMemzero</A>(b-&gt;a,bs2*ai[n]*<font color="#4169E1">sizeof</font>(MatScalar));
+<a name="line286">286: </a>  }
+
+<a name="line288">288: </a>  <font color="#B22222">/* set bi and bj with new data structure */</font>
+<a name="line289">289: </a>  bi = b-&gt;i;
+<a name="line290">290: </a>  bj = b-&gt;j;
+
+<a name="line292">292: </a>  <font color="#B22222">/* L part */</font>
+<a name="line293">293: </a>  bi[0] = 0;
+<a name="line294">294: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line295">295: </a>    nz      = adiag[i] - ai[i];
+<a name="line296">296: </a>    bi[i+1] = bi[i] + nz;
+<a name="line297">297: </a>    aj      = a-&gt;j + ai[i];
+<a name="line298">298: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line299">299: </a>      *bj = aj[j]; bj++;
+<a name="line300">300: </a>    }
+<a name="line301">301: </a>  }
+
+<a name="line303">303: </a>  <font color="#B22222">/* U part */</font>
+<a name="line304">304: </a>  bi_temp  = bi[n];
+<a name="line305">305: </a>  bdiag[n] = bi[n]-1;
+<a name="line306">306: </a>  <font color="#4169E1">for</font> (i=n-1; i&gt;=0; i--) {
+<a name="line307">307: </a>    nz      = ai[i+1] - adiag[i] - 1;
+<a name="line308">308: </a>    bi_temp = bi_temp + nz + 1;
+<a name="line309">309: </a>    aj      = a-&gt;j + adiag[i] + 1;
+<a name="line310">310: </a>    <font color="#4169E1">for</font> (j=0; j&lt;nz; j++) {
+<a name="line311">311: </a>      *bj = aj[j]; bj++;
+<a name="line312">312: </a>    }
+<a name="line313">313: </a>    <font color="#B22222">/* diag[i] */</font>
+<a name="line314">314: </a>    *bj      = i; bj++;
+<a name="line315">315: </a>    bdiag[i] = bi_temp - 1;
+<a name="line316">316: </a>  }
+<a name="line317">317: </a>  <font color="#4169E1">return</font>(0);
+<a name="line318">318: </a>}
+
+<a name="line322">322: </a><strong><font color="#4169E1"><a name="MatILUFactorSymbolic_SeqBAIJ"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatILUFactorSymbolic_SeqBAIJ(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> fact,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> isrow,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> iscol,const <A href="../../../../../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line323">323: </a>{
+<a name="line324">324: </a>  Mat_SeqBAIJ        *a = (Mat_SeqBAIJ*)A-&gt;data,*b;
+<a name="line325">325: </a>  <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>                 isicol;
+<a name="line326">326: </a>  <A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>     ierr;
+<a name="line327">327: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>     *r,*ic;
+<a name="line328">328: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           n=a-&gt;mbs,*ai=a-&gt;i,*aj=a-&gt;j,d;
+<a name="line329">329: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           *bi,*cols,nnz,*cols_lvl;
+<a name="line330">330: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           *bdiag,prow,fm,nzbd,reallocs=0,dcount=0;
+<a name="line331">331: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           i,levels,diagonal_fill;
+<a name="line332">332: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>          col_identity,row_identity,both_identity;
+<a name="line333">333: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>          f;
+<a name="line334">334: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           nlnk,*lnk,*lnk_lvl=NULL;
+<a name="line335">335: </a>  PetscBT            lnkbt;
+<a name="line336">336: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           nzi,*bj,**bj_ptr,**bjlvl_ptr;
+<a name="line337">337: </a>  PetscFreeSpaceList free_space    =NULL,current_space=NULL;
+<a name="line338">338: </a>  PetscFreeSpaceList free_space_lvl=NULL,current_space_lvl=NULL;
+<a name="line339">339: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>          missing;
+<a name="line340">340: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>           bs=A-&gt;rmap-&gt;bs,bs2=a-&gt;bs2;
+
+<a name="line343">343: </a>  <font color="#4169E1">if</font> (A-&gt;rmap-&gt;n != A-&gt;cmap-&gt;n) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONG,<font color="#666666">"Must be square matrix, rows %D columns %D"</font>,A-&gt;rmap-&gt;n,A-&gt;cmap-&gt;n);
+<a name="line344">344: </a>  <font color="#4169E1">if</font> (bs&gt;1) {  <font color="#B22222">/* check shifttype */</font>
+<a name="line345">345: </a>    <font color="#4169E1">if</font> (info-&gt;shifttype == MAT_SHIFT_NONZERO || info-&gt;shifttype == MAT_SHIFT_POSITIVE_DEFINITE)
+<a name="line346">346: </a>      <A href="../../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_SUP,<font color="#666666">"Only MAT_SHIFT_NONE and MAT_SHIFT_INBLOCKS are supported for BAIJ matrix"</font>);
+<a name="line347">347: </a>  }
+
+<a name="line349">349: </a>  <A href="../../../../../docs/manualpages/Mat/MatMissingDiagonal.html#MatMissingDiagonal">MatMissingDiagonal</A>(A,&amp;missing,&amp;d);
+<a name="line350">350: </a>  <font color="#4169E1">if</font> (missing) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Matrix is missing diagonal entry %D"</font>,d);
+
+<a name="line352">352: </a>  f             = info-&gt;fill;
+<a name="line353">353: </a>  levels        = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)info-&gt;levels;
+<a name="line354">354: </a>  diagonal_fill = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)info-&gt;diagonal_fill;
+
+<a name="line356">356: </a>  <A href="../../../../../docs/manualpages/IS/ISInvertPermutation.html#ISInvertPermutation">ISInvertPermutation</A>(iscol,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,&amp;isicol);
+
+<a name="line358">358: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(isrow,&amp;row_identity);
+<a name="line359">359: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(iscol,&amp;col_identity);
+
+<a name="line361">361: </a>  both_identity = (<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>) (row_identity &amp;&amp; col_identity);
+
+<a name="line363">363: </a>  <font color="#4169E1">if</font> (!levels &amp;&amp; both_identity) {
+<a name="line364">364: </a>    <font color="#B22222">/* special case: ilu(0) with natural ordering */</font>
+<a name="line365">365: </a>    MatILUFactorSymbolic_SeqBAIJ_ilu0(fact,A,isrow,iscol,info);
+<a name="line366">366: </a>    MatSeqBAIJSetNumericFactorization(fact,both_identity);
+
+<a name="line368">368: </a>    fact-&gt;factortype               = MAT_FACTOR_ILU;
+<a name="line369">369: </a>    (fact)-&gt;info.factor_mallocs    = 0;
+<a name="line370">370: </a>    (fact)-&gt;info.fill_ratio_given  = info-&gt;fill;
+<a name="line371">371: </a>    (fact)-&gt;info.fill_ratio_needed = 1.0;
+
+<a name="line373">373: </a>    b                = (Mat_SeqBAIJ*)(fact)-&gt;data;
+<a name="line374">374: </a>    b-&gt;row           = isrow;
+<a name="line375">375: </a>    b-&gt;col           = iscol;
+<a name="line376">376: </a>    b-&gt;icol          = isicol;
+<a name="line377">377: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isrow);
+<a name="line378">378: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)iscol);
+<a name="line379">379: </a>    b-&gt;pivotinblocks = (info-&gt;pivotinblocks) ? <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> : <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line381">381: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1)*bs,&amp;b-&gt;solve_work);
+<a name="line382">382: </a>    <font color="#4169E1">return</font>(0);
+<a name="line383">383: </a>  }
+
+<a name="line385">385: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isrow,&amp;r);
+<a name="line386">386: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isicol,&amp;ic);
+
+<a name="line388">388: </a>  <font color="#B22222">/* get new row pointers */</font>
+<a name="line389">389: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;bi);
+<a name="line390">390: </a>  bi[0] = 0;
+<a name="line391">391: </a>  <font color="#B22222">/* bdiag is location of diagonal in factor */</font>
+<a name="line392">392: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;bdiag);
+<a name="line393">393: </a>  bdiag[0] = 0;
+
+<a name="line395">395: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc2.html#PetscMalloc2">PetscMalloc2</A>(n,&amp;bj_ptr,n,&amp;bjlvl_ptr);
+
+<a name="line397">397: </a>  <font color="#B22222">/* create a linked list for storing column indices of the active row */</font>
+<a name="line398">398: </a>  nlnk = n + 1;
+<a name="line399">399: </a>  PetscIncompleteLLCreate(n,n,nlnk,lnk,lnk_lvl,lnkbt);
+
+<a name="line401">401: </a>  <font color="#B22222">/* initial FreeSpace size is f*(ai[n]+1) */</font>
+<a name="line402">402: </a>  PetscFreeSpaceGet((<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)(f*(ai[n]+1)),&amp;free_space);
+<a name="line403">403: </a>  current_space     = free_space;
+<a name="line404">404: </a>  PetscFreeSpaceGet((<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)(f*(ai[n]+1)),&amp;free_space_lvl);
+<a name="line405">405: </a>  current_space_lvl = free_space_lvl;
+
+<a name="line407">407: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line408">408: </a>    nzi = 0;
+<a name="line409">409: </a>    <font color="#B22222">/* copy current row into linked list */</font>
+<a name="line410">410: </a>    nnz = ai[r[i]+1] - ai[r[i]];
+<a name="line411">411: </a>    <font color="#4169E1">if</font> (!nnz) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_MAT_LU_ZRPVT,<font color="#666666">"Empty row in matrix: row in original ordering %D in permuted ordering %D"</font>,r[i],i);
+<a name="line412">412: </a>    cols   = aj + ai[r[i]];
+<a name="line413">413: </a>    lnk[i] = -1; <font color="#B22222">/* marker to indicate if diagonal exists */</font>
+<a name="line414">414: </a>    PetscIncompleteLLInit(nnz,cols,n,ic,nlnk,lnk,lnk_lvl,lnkbt);
+<a name="line415">415: </a>    nzi   += nlnk;
+
+<a name="line417">417: </a>    <font color="#B22222">/* make sure diagonal entry is included */</font>
+<a name="line418">418: </a>    <font color="#4169E1">if</font> (diagonal_fill &amp;&amp; lnk[i] == -1) {
+<a name="line419">419: </a>      fm = n;
+<a name="line420">420: </a>      <font color="#4169E1">while</font> (lnk[fm] &lt; i) fm = lnk[fm];
+<a name="line421">421: </a>      lnk[i]     = lnk[fm]; <font color="#B22222">/* insert diagonal into linked list */</font>
+<a name="line422">422: </a>      lnk[fm]    = i;
+<a name="line423">423: </a>      lnk_lvl[i] = 0;
+<a name="line424">424: </a>      nzi++; dcount++;
+<a name="line425">425: </a>    }
+
+<a name="line427">427: </a>    <font color="#B22222">/* add pivot rows into the active row */</font>
+<a name="line428">428: </a>    nzbd = 0;
+<a name="line429">429: </a>    prow = lnk[n];
+<a name="line430">430: </a>    <font color="#4169E1">while</font> (prow &lt; i) {
+<a name="line431">431: </a>      nnz      = bdiag[prow];
+<a name="line432">432: </a>      cols     = bj_ptr[prow] + nnz + 1;
+<a name="line433">433: </a>      cols_lvl = bjlvl_ptr[prow] + nnz + 1;
+<a name="line434">434: </a>      nnz      = bi[prow+1] - bi[prow] - nnz - 1;
+
+<a name="line436">436: </a>      PetscILULLAddSorted(nnz,cols,levels,cols_lvl,prow,nlnk,lnk,lnk_lvl,lnkbt,prow);
+<a name="line437">437: </a>      nzi += nlnk;
+<a name="line438">438: </a>      prow = lnk[prow];
+<a name="line439">439: </a>      nzbd++;
+<a name="line440">440: </a>    }
+<a name="line441">441: </a>    bdiag[i] = nzbd;
+<a name="line442">442: </a>    bi[i+1]  = bi[i] + nzi;
+
+<a name="line444">444: </a>    <font color="#B22222">/* if free space is not available, make more free space */</font>
+<a name="line445">445: </a>    <font color="#4169E1">if</font> (current_space-&gt;local_remaining&lt;nzi) {
+<a name="line446">446: </a>      nnz  = 2*nzi*(n - i); <font color="#B22222">/* estimated and max additional space needed */</font>
+<a name="line447">447: </a>      PetscFreeSpaceGet(nnz,&amp;current_space);
+<a name="line448">448: </a>      PetscFreeSpaceGet(nnz,&amp;current_space_lvl);
+<a name="line449">449: </a>      reallocs++;
+<a name="line450">450: </a>    }
+
+<a name="line452">452: </a>    <font color="#B22222">/* copy data into free_space and free_space_lvl, then initialize lnk */</font>
+<a name="line453">453: </a>    PetscIncompleteLLClean(n,n,nzi,lnk,lnk_lvl,current_space-&gt;array,current_space_lvl-&gt;array,lnkbt);
+
+<a name="line455">455: </a>    bj_ptr[i]    = current_space-&gt;array;
+<a name="line456">456: </a>    bjlvl_ptr[i] = current_space_lvl-&gt;array;
+
+<a name="line458">458: </a>    <font color="#B22222">/* make sure the active row i has diagonal entry */</font>
+<a name="line459">459: </a>    <font color="#4169E1">if</font> (*(bj_ptr[i]+bdiag[i]) != i) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_MAT_LU_ZRPVT,<font color="#666666">"Row %D has missing diagonal in factored matrix\ntry running with -pc_factor_nonzeros_along_diagonal or -pc_factor_diagonal_fill"</font>,i);
+
+<a name="line461">461: </a>    current_space-&gt;array           += nzi;
+<a name="line462">462: </a>    current_space-&gt;local_used      += nzi;
+<a name="line463">463: </a>    current_space-&gt;local_remaining -= nzi;
+
+<a name="line465">465: </a>    current_space_lvl-&gt;array           += nzi;
+<a name="line466">466: </a>    current_space_lvl-&gt;local_used      += nzi;
+<a name="line467">467: </a>    current_space_lvl-&gt;local_remaining -= nzi;
+<a name="line468">468: </a>  }
+
+<a name="line470">470: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isrow,&amp;r);
+<a name="line471">471: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isicol,&amp;ic);
+
+<a name="line473">473: </a>  <font color="#B22222">/* copy free_space into bj and free free_space; set bi, bj, bdiag in new datastructure; */</font>
+<a name="line474">474: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((bi[n]+1),&amp;bj);
+<a name="line475">475: </a>  PetscFreeSpaceContiguous_LU(&amp;free_space,bj,n,bi,bdiag);
+
+<a name="line477">477: </a>  PetscIncompleteLLDestroy(lnk,lnkbt);
+<a name="line478">478: </a>  PetscFreeSpaceDestroy(free_space_lvl);
+<a name="line479">479: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree2.html#PetscFree2">PetscFree2</A>(bj_ptr,bjlvl_ptr);
+
+<a name="line481">481: </a><font color="#A020F0">#if defined(PETSC_USE_INFO)</font>
+<a name="line482">482: </a>  {
+<a name="line483">483: </a>    <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> af = ((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(bdiag[0]+1))/((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ai[n]);
+<a name="line484">484: </a>    PetscInfo3(A,<font color="#666666">"Reallocs %D Fill ratio:given %g needed %g\n"</font>,reallocs,(double)f,(double)af);
+<a name="line485">485: </a>    PetscInfo1(A,<font color="#666666">"Run with -[sub_]pc_factor_fill %g or use \n"</font>,(double)af);
+<a name="line486">486: </a>    PetscInfo1(A,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCFactorSetFill.html#PCFactorSetFill">PCFactorSetFill</A>([sub]pc,%g);\n"</font>,(double)af);
+<a name="line487">487: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(A,<font color="#666666">"for best performance.\n"</font>);
+<a name="line488">488: </a>    <font color="#4169E1">if</font> (diagonal_fill) {
+<a name="line489">489: </a>      PetscInfo1(A,<font color="#666666">"Detected and replaced %D missing diagonals"</font>,dcount);
+<a name="line490">490: </a>    }
+<a name="line491">491: </a>  }
+<a name="line492">492: </a><font color="#A020F0">#endif</font>
+
+<a name="line494">494: </a>  <font color="#B22222">/* put together the new matrix */</font>
+<a name="line495">495: </a>  MatSeqBAIJSetPreallocation_SeqBAIJ(fact,bs,MAT_SKIP_ALLOCATION,NULL);
+<a name="line496">496: </a>  PetscLogObjectParent((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,(<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isicol);
+
+<a name="line498">498: </a>  b               = (Mat_SeqBAIJ*)(fact)-&gt;data;
+<a name="line499">499: </a>  b-&gt;free_a       = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line500">500: </a>  b-&gt;free_ij      = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line501">501: </a>  b-&gt;singlemalloc = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line503">503: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((bs2*(bdiag[0]+1)),&amp;b-&gt;a);
+
+<a name="line505">505: </a>  b-&gt;j          = bj;
+<a name="line506">506: </a>  b-&gt;i          = bi;
+<a name="line507">507: </a>  b-&gt;diag       = bdiag;
+<a name="line508">508: </a>  b-&gt;free_diag  = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line509">509: </a>  b-&gt;ilen       = 0;
+<a name="line510">510: </a>  b-&gt;imax       = 0;
+<a name="line511">511: </a>  b-&gt;row        = isrow;
+<a name="line512">512: </a>  b-&gt;col        = iscol;
+<a name="line513">513: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isrow);
+<a name="line514">514: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)iscol);
+<a name="line515">515: </a>  b-&gt;icol       = isicol;
+
+<a name="line517">517: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((bs*n+bs),&amp;b-&gt;solve_work);
+<a name="line518">518: </a>  <font color="#B22222">/* In b structure:  Free imax, ilen, old a, old j.</font>
+<a name="line519">519: </a><font color="#B22222">     Allocate bdiag, solve_work, new a, new j */</font>
+<a name="line520">520: </a>  PetscLogObjectMemory((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,(bdiag[0]+1) * (<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)+bs2*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>)));
+<a name="line521">521: </a>  b-&gt;maxnz = b-&gt;nz = bdiag[0]+1;
+
+<a name="line523">523: </a>  fact-&gt;info.factor_mallocs    = reallocs;
+<a name="line524">524: </a>  fact-&gt;info.fill_ratio_given  = f;
+<a name="line525">525: </a>  fact-&gt;info.fill_ratio_needed = ((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)(bdiag[0]+1))/((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ai[n]);
+
+<a name="line527">527: </a>  MatSeqBAIJSetNumericFactorization(fact,both_identity);
+<a name="line528">528: </a>  <font color="#4169E1">return</font>(0);
+<a name="line529">529: </a>}
+
+<a name="line531">531: </a><font color="#B22222">/*</font>
+<a name="line532">532: </a><font color="#B22222">     This code is virtually identical to MatILUFactorSymbolic_SeqAIJ</font>
+<a name="line533">533: </a><font color="#B22222">   except that the data structure of Mat_SeqAIJ is slightly different.</font>
+<a name="line534">534: </a><font color="#B22222">   Not a good example of code reuse.</font>
+<a name="line535">535: </a><font color="#B22222">*/</font>
+<a name="line538">538: </a><strong><font color="#4169E1"><a name="MatILUFactorSymbolic_SeqBAIJ_inplace"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatILUFactorSymbolic_SeqBAIJ_inplace(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> fact,<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> isrow,<A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A> iscol,const <A href="../../../../../docs/manualpages/Mat/MatFactorInfo.html#MatFactorInfo">MatFactorInfo</A> *info)</font></strong>
+<a name="line539">539: </a>{
+<a name="line540">540: </a>  Mat_SeqBAIJ    *a = (Mat_SeqBAIJ*)A-&gt;data,*b;
+<a name="line541">541: </a>  <A href="../../../../../docs/manualpages/IS/IS.html#IS">IS</A>             isicol;
+<a name="line543">543: </a>  const <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *r,*ic,*ai = a-&gt;i,*aj = a-&gt;j,*xi;
+<a name="line544">544: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       prow,n = a-&gt;mbs,*ainew,*ajnew,jmax,*fill,nz,*im,*ajfill,*flev,*xitmp;
+<a name="line545">545: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *dloc,idx,row,m,fm,nzf,nzi,reallocate = 0,dcount = 0;
+<a name="line546">546: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       incrlev,nnz,i,bs = A-&gt;rmap-&gt;bs,bs2 = a-&gt;bs2,levels,diagonal_fill,dd;
+<a name="line547">547: </a>  <A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      col_identity,row_identity,both_identity,flg;
+<a name="line548">548: </a>  <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      f;
+
+<a name="line551">551: </a>  MatMissingDiagonal_SeqBAIJ(A,&amp;flg,&amp;dd);
+<a name="line552">552: </a>  <font color="#4169E1">if</font> (flg) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Matrix A is missing diagonal entry in row %D"</font>,dd);
+
+<a name="line554">554: </a>  f             = info-&gt;fill;
+<a name="line555">555: </a>  levels        = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)info-&gt;levels;
+<a name="line556">556: </a>  diagonal_fill = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)info-&gt;diagonal_fill;
+
+<a name="line558">558: </a>  <A href="../../../../../docs/manualpages/IS/ISInvertPermutation.html#ISInvertPermutation">ISInvertPermutation</A>(iscol,<A href="../../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,&amp;isicol);
+
+<a name="line560">560: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(isrow,&amp;row_identity);
+<a name="line561">561: </a>  <A href="../../../../../docs/manualpages/IS/ISIdentity.html#ISIdentity">ISIdentity</A>(iscol,&amp;col_identity);
+<a name="line562">562: </a>  both_identity = (<A href="../../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>) (row_identity &amp;&amp; col_identity);
+
+<a name="line564">564: </a>  <font color="#4169E1">if</font> (!levels &amp;&amp; both_identity) {  <font color="#B22222">/* special case copy the nonzero structure */</font>
+<a name="line565">565: </a>    MatDuplicateNoCreate_SeqBAIJ(fact,A,MAT_DO_NOT_COPY_VALUES,<A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+<a name="line566">566: </a>    MatSeqBAIJSetNumericFactorization_inplace(fact,both_identity);
+
+<a name="line568">568: </a>    fact-&gt;factortype = MAT_FACTOR_ILU;
+<a name="line569">569: </a>    b                = (Mat_SeqBAIJ*)fact-&gt;data;
+<a name="line570">570: </a>    b-&gt;row           = isrow;
+<a name="line571">571: </a>    b-&gt;col           = iscol;
+<a name="line572">572: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isrow);
+<a name="line573">573: </a>    <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)iscol);
+<a name="line574">574: </a>    b-&gt;icol          = isicol;
+<a name="line575">575: </a>    b-&gt;pivotinblocks = (info-&gt;pivotinblocks) ? <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> : <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line577">577: </a>    <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1)*bs,&amp;b-&gt;solve_work);
+<a name="line578">578: </a>    <font color="#4169E1">return</font>(0);
+<a name="line579">579: </a>  }
+
+<a name="line581">581: </a>  <font color="#B22222">/* general case perform the symbolic factorization */</font>
+<a name="line582">582: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isrow,&amp;r);
+<a name="line583">583: </a>  <A href="../../../../../docs/manualpages/IS/ISGetIndices.html#ISGetIndices">ISGetIndices</A>(isicol,&amp;ic);
+
+<a name="line585">585: </a>  <font color="#B22222">/* get new row pointers */</font>
+<a name="line586">586: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;ainew);
+<a name="line587">587: </a>  ainew[0] = 0;
+<a name="line588">588: </a>  <font color="#B22222">/* don't know how many column pointers are needed so estimate */</font>
+<a name="line589">589: </a>  jmax = (<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>)(f*ai[n] + 1);
+<a name="line590">590: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((jmax),&amp;ajnew);
+<a name="line591">591: </a>  <font color="#B22222">/* ajfill is level of fill for each fill entry */</font>
+<a name="line592">592: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((jmax),&amp;ajfill);
+<a name="line593">593: </a>  <font color="#B22222">/* fill is a linked list of nonzeros in active row */</font>
+<a name="line594">594: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;fill);
+<a name="line595">595: </a>  <font color="#B22222">/* im is level for each filled value */</font>
+<a name="line596">596: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;im);
+<a name="line597">597: </a>  <font color="#B22222">/* dloc is location of diagonal in factor */</font>
+<a name="line598">598: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((n+1),&amp;dloc);
+<a name="line599">599: </a>  dloc[0] = 0;
+<a name="line600">600: </a>  <font color="#4169E1">for</font> (prow=0; prow&lt;n; prow++) {
+
+<a name="line602">602: </a>    <font color="#B22222">/* copy prow into linked list */</font>
+<a name="line603">603: </a>    nzf = nz = ai[r[prow]+1] - ai[r[prow]];
+<a name="line604">604: </a>    <font color="#4169E1">if</font> (!nz) <A href="../../../../../docs/manualpages/Sys/SETERRQ2.html#SETERRQ2">SETERRQ2</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_MAT_LU_ZRPVT,<font color="#666666">"Empty row in matrix: row in original ordering %D in permuted ordering %D"</font>,r[prow],prow);
+<a name="line605">605: </a>    xi         = aj + ai[r[prow]];
+<a name="line606">606: </a>    fill[n]    = n;
+<a name="line607">607: </a>    fill[prow] = -1;   <font color="#B22222">/* marker for diagonal entry */</font>
+<a name="line608">608: </a>    <font color="#4169E1">while</font> (nz--) {
+<a name="line609">609: </a>      fm  = n;
+<a name="line610">610: </a>      idx = ic[*xi++];
+<a name="line611">611: </a>      <font color="#4169E1">do</font> {
+<a name="line612">612: </a>        m  = fm;
+<a name="line613">613: </a>        fm = fill[m];
+<a name="line614">614: </a>      } <font color="#4169E1">while</font> (fm &lt; idx);
+<a name="line615">615: </a>      fill[m]   = idx;
+<a name="line616">616: </a>      fill[idx] = fm;
+<a name="line617">617: </a>      im[idx]   = 0;
+<a name="line618">618: </a>    }
+
+<a name="line620">620: </a>    <font color="#B22222">/* make sure diagonal entry is included */</font>
+<a name="line621">621: </a>    <font color="#4169E1">if</font> (diagonal_fill &amp;&amp; fill[prow] == -1) {
+<a name="line622">622: </a>      fm = n;
+<a name="line623">623: </a>      <font color="#4169E1">while</font> (fill[fm] &lt; prow) fm = fill[fm];
+<a name="line624">624: </a>      fill[prow] = fill[fm];    <font color="#B22222">/* insert diagonal into linked list */</font>
+<a name="line625">625: </a>      fill[fm]   = prow;
+<a name="line626">626: </a>      im[prow]   = 0;
+<a name="line627">627: </a>      nzf++;
+<a name="line628">628: </a>      dcount++;
+<a name="line629">629: </a>    }
+
+<a name="line631">631: </a>    nzi = 0;
+<a name="line632">632: </a>    row = fill[n];
+<a name="line633">633: </a>    <font color="#4169E1">while</font> (row &lt; prow) {
+<a name="line634">634: </a>      incrlev = im[row] + 1;
+<a name="line635">635: </a>      nz      = dloc[row];
+<a name="line636">636: </a>      xi      = ajnew  + ainew[row] + nz + 1;
+<a name="line637">637: </a>      flev    = ajfill + ainew[row] + nz + 1;
+<a name="line638">638: </a>      nnz     = ainew[row+1] - ainew[row] - nz - 1;
+<a name="line639">639: </a>      fm      = row;
+<a name="line640">640: </a>      <font color="#4169E1">while</font> (nnz-- &gt; 0) {
+<a name="line641">641: </a>        idx = *xi++;
+<a name="line642">642: </a>        <font color="#4169E1">if</font> (*flev + incrlev &gt; levels) {
+<a name="line643">643: </a>          flev++;
+<a name="line644">644: </a>          <font color="#4169E1">continue</font>;
+<a name="line645">645: </a>        }
+<a name="line646">646: </a>        <font color="#4169E1">do</font> {
+<a name="line647">647: </a>          m  = fm;
+<a name="line648">648: </a>          fm = fill[m];
+<a name="line649">649: </a>        } <font color="#4169E1">while</font> (fm &lt; idx);
+<a name="line650">650: </a>        <font color="#4169E1">if</font> (fm != idx) {
+<a name="line651">651: </a>          im[idx]   = *flev + incrlev;
+<a name="line652">652: </a>          fill[m]   = idx;
+<a name="line653">653: </a>          fill[idx] = fm;
+<a name="line654">654: </a>          fm        = idx;
+<a name="line655">655: </a>          nzf++;
+<a name="line656">656: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (im[idx] &gt; *flev + incrlev) im[idx] = *flev+incrlev;
+<a name="line657">657: </a>        flev++;
+<a name="line658">658: </a>      }
+<a name="line659">659: </a>      row = fill[row];
+<a name="line660">660: </a>      nzi++;
+<a name="line661">661: </a>    }
+<a name="line662">662: </a>    <font color="#B22222">/* copy new filled row into permanent storage */</font>
+<a name="line663">663: </a>    ainew[prow+1] = ainew[prow] + nzf;
+<a name="line664">664: </a>    <font color="#4169E1">if</font> (ainew[prow+1] &gt; jmax) {
+
+<a name="line666">666: </a>      <font color="#B22222">/* estimate how much additional space we will need */</font>
+<a name="line667">667: </a>      <font color="#B22222">/* use the strategy suggested by David Hysom &lt;hysom@perch-t.icase.edu&gt; */</font>
+<a name="line668">668: </a>      <font color="#B22222">/* just double the memory each time */</font>
+<a name="line669">669: </a>      <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> maxadd = jmax;
+<a name="line670">670: </a>      <font color="#B22222">/* maxadd = (int)(((f*ai[n]+1)*(n-prow+5))/n); */</font>
+<a name="line671">671: </a>      <font color="#4169E1">if</font> (maxadd &lt; nzf) maxadd = (n-prow)*(nzf+1);
+<a name="line672">672: </a>      jmax += maxadd;
+
+<a name="line674">674: </a>      <font color="#B22222">/* allocate a longer ajnew and ajfill */</font>
+<a name="line675">675: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(jmax,&amp;xitmp);
+<a name="line676">676: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(xitmp,ajnew,ainew[prow]*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>));
+<a name="line677">677: </a>      <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ajnew);
+<a name="line678">678: </a>      ajnew  = xitmp;
+<a name="line679">679: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(jmax,&amp;xitmp);
+<a name="line680">680: </a>      <A href="../../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(xitmp,ajfill,ainew[prow]*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>));
+<a name="line681">681: </a>      <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ajfill);
+<a name="line682">682: </a>      ajfill = xitmp;
+<a name="line683">683: </a>      reallocate++;   <font color="#B22222">/* count how many reallocations are needed */</font>
+<a name="line684">684: </a>    }
+<a name="line685">685: </a>    xitmp      = ajnew + ainew[prow];
+<a name="line686">686: </a>    flev       = ajfill + ainew[prow];
+<a name="line687">687: </a>    dloc[prow] = nzi;
+<a name="line688">688: </a>    fm         = fill[n];
+<a name="line689">689: </a>    <font color="#4169E1">while</font> (nzf--) {
+<a name="line690">690: </a>      *xitmp++ = fm;
+<a name="line691">691: </a>      *flev++  = im[fm];
+<a name="line692">692: </a>      fm       = fill[fm];
+<a name="line693">693: </a>    }
+<a name="line694">694: </a>    <font color="#B22222">/* make sure row has diagonal entry */</font>
+<a name="line695">695: </a>    <font color="#4169E1">if</font> (ajnew[ainew[prow]+dloc[prow]] != prow) <A href="../../../../../docs/manualpages/Sys/SETERRQ1.html#SETERRQ1">SETERRQ1</A>(<A href="../../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,PETSC_ERR_MAT_LU_ZRPVT,<font color="#666666">"Row %D has missing diagonal in factored matrix\n\</font>
+<a name="line696">696: </a><font color="#666666">                                                        try running with -pc_factor_nonzeros_along_diagonal or -pc_factor_diagonal_fill"</font>,prow);
+<a name="line697">697: </a>  }
+<a name="line698">698: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(ajfill);
+<a name="line699">699: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isrow,&amp;r);
+<a name="line700">700: </a>  <A href="../../../../../docs/manualpages/IS/ISRestoreIndices.html#ISRestoreIndices">ISRestoreIndices</A>(isicol,&amp;ic);
+<a name="line701">701: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(fill);
+<a name="line702">702: </a>  <A href="../../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(im);
+
+<a name="line704">704: </a><font color="#A020F0">#if defined(PETSC_USE_INFO)</font>
+<a name="line705">705: </a>  {
+<a name="line706">706: </a>    <A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> af = ((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ainew[n])/((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ai[n]);
+<a name="line707">707: </a>    PetscInfo3(A,<font color="#666666">"Reallocs %D Fill ratio:given %g needed %g\n"</font>,reallocate,(double)f,(double)af);
+<a name="line708">708: </a>    PetscInfo1(A,<font color="#666666">"Run with -pc_factor_fill %g or use \n"</font>,(double)af);
+<a name="line709">709: </a>    PetscInfo1(A,<font color="#666666">"<A href="../../../../../docs/manualpages/PC/PCFactorSetFill.html#PCFactorSetFill">PCFactorSetFill</A>(pc,%g);\n"</font>,(double)af);
+<a name="line710">710: </a>    <A href="../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(A,<font color="#666666">"for best performance.\n"</font>);
+<a name="line711">711: </a>    <font color="#4169E1">if</font> (diagonal_fill) {
+<a name="line712">712: </a>      PetscInfo1(A,<font color="#666666">"Detected and replaced %D missing diagonals\n"</font>,dcount);
+<a name="line713">713: </a>    }
+<a name="line714">714: </a>  }
+<a name="line715">715: </a><font color="#A020F0">#endif</font>
+
+<a name="line717">717: </a>  <font color="#B22222">/* put together the new matrix */</font>
+<a name="line718">718: </a>  MatSeqBAIJSetPreallocation_SeqBAIJ(fact,bs,MAT_SKIP_ALLOCATION,NULL);
+<a name="line719">719: </a>  PetscLogObjectParent((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,(<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isicol);
+<a name="line720">720: </a>  b    = (Mat_SeqBAIJ*)fact-&gt;data;
+
+<a name="line722">722: </a>  b-&gt;free_a       = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line723">723: </a>  b-&gt;free_ij      = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line724">724: </a>  b-&gt;singlemalloc = <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line726">726: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(bs2*ainew[n],&amp;b-&gt;a);
+
+<a name="line728">728: </a>  b-&gt;j          = ajnew;
+<a name="line729">729: </a>  b-&gt;i          = ainew;
+<a name="line730">730: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) dloc[i] += ainew[i];
+<a name="line731">731: </a>  b-&gt;diag          = dloc;
+<a name="line732">732: </a>  b-&gt;free_diag     = <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line733">733: </a>  b-&gt;ilen          = 0;
+<a name="line734">734: </a>  b-&gt;imax          = 0;
+<a name="line735">735: </a>  b-&gt;row           = isrow;
+<a name="line736">736: </a>  b-&gt;col           = iscol;
+<a name="line737">737: </a>  b-&gt;pivotinblocks = (info-&gt;pivotinblocks) ? <A href="../../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A> : <A href="../../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line739">739: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)isrow);
+<a name="line740">740: </a>  <A href="../../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)iscol);
+<a name="line741">741: </a>  b-&gt;icol = isicol;
+<a name="line742">742: </a>  <A href="../../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>((bs*n+bs),&amp;b-&gt;solve_work);
+<a name="line743">743: </a>  <font color="#B22222">/* In b structure:  Free imax, ilen, old a, old j.</font>
+<a name="line744">744: </a><font color="#B22222">     Allocate dloc, solve_work, new a, new j */</font>
+<a name="line745">745: </a>  PetscLogObjectMemory((<A href="../../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)fact,(ainew[n]-n)*(<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>))+bs2*ainew[n]*<font color="#4169E1">sizeof</font>(<A href="../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>));
+<a name="line746">746: </a>  b-&gt;maxnz = b-&gt;nz = ainew[n];
+
+<a name="line748">748: </a>  fact-&gt;info.factor_mallocs    = reallocate;
+<a name="line749">749: </a>  fact-&gt;info.fill_ratio_given  = f;
+<a name="line750">750: </a>  fact-&gt;info.fill_ratio_needed = ((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ainew[n])/((<A href="../../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>)ai[prow]);
+
+<a name="line752">752: </a>  MatSeqBAIJSetNumericFactorization_inplace(fact,both_identity);
+<a name="line753">753: </a>  <font color="#4169E1">return</font>(0);
+<a name="line754">754: </a>}
+
+<a name="line758">758: </a><strong><font color="#4169E1"><a name="MatSetUnfactored_SeqBAIJ_4_NaturalOrdering_SSE"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatSetUnfactored_SeqBAIJ_4_NaturalOrdering_SSE(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line759">759: </a>{
+<a name="line760">760: </a>  <font color="#B22222">/* Mat_SeqBAIJ *a = (Mat_SeqBAIJ*)A-&gt;data; */</font>
+<a name="line761">761: </a>  <font color="#B22222">/* int i,*AJ=a-&gt;j,nz=a-&gt;nz; */</font>
+
+<a name="line764">764: </a>  <font color="#B22222">/* Undo Column scaling */</font>
+<a name="line765">765: </a>  <font color="#B22222">/*    while (nz--) { */</font>
+<a name="line766">766: </a>  <font color="#B22222">/*      AJ[i] = AJ[i]/4; */</font>
+<a name="line767">767: </a>  <font color="#B22222">/*    } */</font>
+<a name="line768">768: </a>  <font color="#B22222">/* This should really invoke a push/pop logic, but we don't have that yet. */</font>
+<a name="line769">769: </a>  A-&gt;ops-&gt;setunfactored = NULL;
+<a name="line770">770: </a>  <font color="#4169E1">return</font>(0);
+<a name="line771">771: </a>}
+
+<a name="line775">775: </a><strong><font color="#4169E1"><a name="MatSetUnfactored_SeqBAIJ_4_NaturalOrdering_SSE_usj"></a><A href="../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatSetUnfactored_SeqBAIJ_4_NaturalOrdering_SSE_usj(<A href="../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line776">776: </a>{
+<a name="line777">777: </a>  Mat_SeqBAIJ    *a = (Mat_SeqBAIJ*)A-&gt;data;
+<a name="line778">778: </a>  <A href="../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       *AJ=a-&gt;j,nz=a-&gt;nz;
+<a name="line779">779: </a>  unsigned short *aj=(unsigned short*)AJ;
+
+<a name="line782">782: </a>  <font color="#B22222">/* Is this really necessary? */</font>
+<a name="line783">783: </a>  <font color="#4169E1">while</font> (nz--) {
+<a name="line784">784: </a>    AJ[nz] = (int)((unsigned int)aj[nz]); <font color="#B22222">/* First extend, then convert to signed. */</font>
+<a name="line785">785: </a>  }
+<a name="line786">786: </a>  A-&gt;ops-&gt;setunfactored = NULL;
+<a name="line787">787: </a>  <font color="#4169E1">return</font>(0);
+<a name="line788">788: </a>}
+
+
+</pre>
+</body>
+
+</html>

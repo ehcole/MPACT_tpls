@@ -1,0 +1,889 @@
+<center><a href="nasm.c">Actual source code: nasm.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/impls/nasm/nasm.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:35:07+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/snes/impls/nasm/nasm.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a><font color="#A020F0">#include &lt;petsc-private/snesimpl.h&gt;             </font><font color="#B22222">/*I   "petscsnes.h"   I*/</font><font color="#A020F0"></font>
+<a name="line2">  2: </a><font color="#A020F0">#include &lt;petscdm.h&gt;</font>
+
+<a name="line4">  4: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line5">  5: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>   n;                   <font color="#B22222">/* local subdomains */</font>
+<a name="line6">  6: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>       *subsnes;            <font color="#B22222">/* nonlinear solvers for each subdomain */</font>
+<a name="line7">  7: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        *x;                  <font color="#B22222">/* solution vectors */</font>
+<a name="line8">  8: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        *xl;                 <font color="#B22222">/* solution local vectors */</font>
+<a name="line9">  9: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        *y;                  <font color="#B22222">/* step vectors */</font>
+<a name="line10"> 10: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>        *b;                  <font color="#B22222">/* rhs vectors */</font>
+<a name="line11"> 11: </a>  <A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *oscatter;           <font color="#B22222">/* scatter from global space to the subdomain global space */</font>
+<a name="line12"> 12: </a>  <A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *iscatter;           <font color="#B22222">/* scatter from global space to the nonoverlapping subdomain space */</font>
+<a name="line13"> 13: </a>  <A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *gscatter;           <font color="#B22222">/* scatter from global space to the subdomain local space */</font>
+<a name="line14"> 14: </a>  <A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>  type;                <font color="#B22222">/* ASM type */</font>
+<a name="line15"> 15: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  usesdm;              <font color="#B22222">/* use the DM for setting up the subproblems */</font>
+<a name="line16"> 16: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  finaljacobian;       <font color="#B22222">/* compute the jacobian of the converged solution */</font>
+<a name="line17"> 17: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>  damping;             <font color="#B22222">/* damping parameter for updates from the blocks */</font>
+<a name="line18"> 18: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  same_local_solves;   <font color="#B22222">/* flag to determine if the solvers have been individually modified */</font>
+
+<a name="line20"> 20: </a>  <font color="#B22222">/* logging events */</font>
+<a name="line21"> 21: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> eventrestrictinterp;
+<a name="line22"> 22: </a>  <A href="../../../../docs/manualpages/Profiling/PetscLogEvent.html#PetscLogEvent">PetscLogEvent</A> eventsubsolve;
+
+<a name="line24"> 24: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>      fjtype;            <font color="#B22222">/* type of computed jacobian */</font>
+<a name="line25"> 25: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>           xinit;             <font color="#B22222">/* initial solution in case the final jacobian type is computed as first */</font>
+<a name="line26"> 26: </a>} SNES_NASM;
+
+<a name="line28"> 28: </a>const char *const SNESNASMTypes[] = {<font color="#666666">"NONE"</font>,<font color="#666666">"RESTRICT"</font>,<font color="#666666">"INTERPOLATE"</font>,<font color="#666666">"BASIC"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>"</font>,<font color="#666666">"PC_ASM_"</font>,0};
+<a name="line29"> 29: </a>const char *const SNESNASMFJTypes[] = {<font color="#666666">"FINALOUTER"</font>,<font color="#666666">"FINALINNER"</font>,<font color="#666666">"INITIAL"</font>};
+
+<a name="line33"> 33: </a><strong><font color="#4169E1"><a name="SNESReset_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESReset_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line34"> 34: </a>{
+<a name="line35"> 35: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+<a name="line37"> 37: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+
+<a name="line40"> 40: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line41"> 41: </a>    <font color="#4169E1">if</font> (nasm-&gt;xl) { <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;nasm-&gt;xl[i]); }
+<a name="line42"> 42: </a>    <font color="#4169E1">if</font> (nasm-&gt;x) { <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;nasm-&gt;x[i]); }
+<a name="line43"> 43: </a>    <font color="#4169E1">if</font> (nasm-&gt;y) { <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;nasm-&gt;y[i]); }
+<a name="line44"> 44: </a>    <font color="#4169E1">if</font> (nasm-&gt;b) { <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;nasm-&gt;b[i]); }
+
+<a name="line46"> 46: </a>    <font color="#4169E1">if</font> (nasm-&gt;subsnes) { <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(&amp;nasm-&gt;subsnes[i]); }
+<a name="line47"> 47: </a>    <font color="#4169E1">if</font> (nasm-&gt;oscatter) { <A href="../../../../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>(&amp;nasm-&gt;oscatter[i]); }
+<a name="line48"> 48: </a>    <font color="#4169E1">if</font> (nasm-&gt;iscatter) { <A href="../../../../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>(&amp;nasm-&gt;iscatter[i]); }
+<a name="line49"> 49: </a>    <font color="#4169E1">if</font> (nasm-&gt;gscatter) { <A href="../../../../docs/manualpages/Vec/VecScatterDestroy.html#VecScatterDestroy">VecScatterDestroy</A>(&amp;nasm-&gt;gscatter[i]); }
+<a name="line50"> 50: </a>  }
+
+<a name="line52"> 52: </a>  <font color="#4169E1">if</font> (nasm-&gt;x) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;x);}
+<a name="line53"> 53: </a>  <font color="#4169E1">if</font> (nasm-&gt;xl) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;xl);}
+<a name="line54"> 54: </a>  <font color="#4169E1">if</font> (nasm-&gt;y) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;y);}
+<a name="line55"> 55: </a>  <font color="#4169E1">if</font> (nasm-&gt;b) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;b);}
+
+<a name="line57"> 57: </a>  <font color="#4169E1">if</font> (nasm-&gt;xinit) {<A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;nasm-&gt;xinit);}
+
+<a name="line59"> 59: </a>  <font color="#4169E1">if</font> (nasm-&gt;subsnes) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;subsnes);}
+<a name="line60"> 60: </a>  <font color="#4169E1">if</font> (nasm-&gt;oscatter) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;oscatter);}
+<a name="line61"> 61: </a>  <font color="#4169E1">if</font> (nasm-&gt;iscatter) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;iscatter);}
+<a name="line62"> 62: </a>  <font color="#4169E1">if</font> (nasm-&gt;gscatter) {<A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(nasm-&gt;gscatter);}
+
+<a name="line64"> 64: </a>  nasm-&gt;eventrestrictinterp = 0;
+<a name="line65"> 65: </a>  nasm-&gt;eventsubsolve = 0;
+<a name="line66"> 66: </a>  <font color="#4169E1">return</font>(0);
+<a name="line67"> 67: </a>}
+
+<a name="line71"> 71: </a><strong><font color="#4169E1"><a name="SNESDestroy_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESDestroy_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line72"> 72: </a>{
+
+<a name="line76"> 76: </a>  SNESReset_NASM(snes);
+<a name="line77"> 77: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(snes-&gt;data);
+<a name="line78"> 78: </a>  <font color="#4169E1">return</font>(0);
+<a name="line79"> 79: </a>}
+
+<a name="line83"> 83: </a><strong><font color="#4169E1"><a name="DMGlobalToLocalSubDomainDirichletHook_Private"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DMGlobalToLocalSubDomainDirichletHook_Private(DM dm,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> g,<A href="../../../../docs/manualpages/Sys/InsertMode.html#InsertMode">InsertMode</A> mode,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> l,void *ctx)</font></strong>
+<a name="line84"> 84: </a>{
+<a name="line86"> 86: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            bcs = (<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)ctx;
+
+<a name="line89"> 89: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(bcs,l);
+<a name="line90"> 90: </a>  <font color="#4169E1">return</font>(0);
+<a name="line91"> 91: </a>}
+
+<a name="line95"> 95: </a><strong><font color="#4169E1"><a name="SNESSetUp_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSetUp_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line96"> 96: </a>{
+<a name="line97"> 97: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+<a name="line99"> 99: </a>  DM             dm,subdm;
+<a name="line100">100: </a>  DM             *subdms;
+<a name="line101">101: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+<a name="line102">102: </a>  const char     *optionsprefix;
+<a name="line103">103: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            F;
+<a name="line104">104: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    size;
+<a name="line105">105: </a>  <A href="../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>            ksp;
+<a name="line106">106: </a>  <A href="../../../../docs/manualpages/PC/PC.html#PC">PC</A>             pc;
+
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (!nasm-&gt;subsnes) {
+<a name="line110">110: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;dm);
+<a name="line111">111: </a>    <font color="#4169E1">if</font> (dm) {
+<a name="line112">112: </a>      nasm-&gt;usesdm = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line113">113: </a>      <A href="../../../../docs/manualpages/DM/DMCreateDomainDecomposition.html#DMCreateDomainDecomposition">DMCreateDomainDecomposition</A>(dm,&amp;nasm-&gt;n,NULL,NULL,NULL,&amp;subdms);
+<a name="line114">114: </a>      <font color="#4169E1">if</font> (!subdms) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)dm),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"DM has no default decomposition defined.  Set subsolves manually with <A href="../../../../docs/manualpages/SNES/SNESNASMSetSubdomains.html#SNESNASMSetSubdomains">SNESNASMSetSubdomains</A>()."</font>);
+<a name="line115">115: </a>      <A href="../../../../docs/manualpages/DM/DMCreateDomainDecompositionScatters.html#DMCreateDomainDecompositionScatters">DMCreateDomainDecompositionScatters</A>(dm,nasm-&gt;n,subdms,&amp;nasm-&gt;iscatter,&amp;nasm-&gt;oscatter,&amp;nasm-&gt;gscatter);
+
+<a name="line117">117: </a>      <A href="../../../../docs/manualpages/SNES/SNESGetOptionsPrefix.html#SNESGetOptionsPrefix">SNESGetOptionsPrefix</A>(snes, &amp;optionsprefix);
+<a name="line118">118: </a>      <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(nasm-&gt;n,&amp;nasm-&gt;subsnes);
+<a name="line119">119: </a>      <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line120">120: </a>        <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_SELF.html#PETSC_COMM_SELF">PETSC_COMM_SELF</A>,&amp;nasm-&gt;subsnes[i]);
+<a name="line121">121: </a>        <A href="../../../../docs/manualpages/SNES/SNESAppendOptionsPrefix.html#SNESAppendOptionsPrefix">SNESAppendOptionsPrefix</A>(nasm-&gt;subsnes[i],optionsprefix);
+<a name="line122">122: </a>        <A href="../../../../docs/manualpages/SNES/SNESAppendOptionsPrefix.html#SNESAppendOptionsPrefix">SNESAppendOptionsPrefix</A>(nasm-&gt;subsnes[i],<font color="#666666">"sub_"</font>);
+<a name="line123">123: </a>        <A href="../../../../docs/manualpages/SNES/SNESSetDM.html#SNESSetDM">SNESSetDM</A>(nasm-&gt;subsnes[i],subdms[i]);
+<a name="line124">124: </a>        <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)nasm-&gt;subsnes[i]),&amp;size);
+<a name="line125">125: </a>        <font color="#4169E1">if</font> (size == 1) {
+<a name="line126">126: </a>          <A href="../../../../docs/manualpages/SNES/SNESGetKSP.html#SNESGetKSP">SNESGetKSP</A>(nasm-&gt;subsnes[i],&amp;ksp);
+<a name="line127">127: </a>          <A href="../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>(ksp,&amp;pc);
+<a name="line128">128: </a>          <A href="../../../../docs/manualpages/KSP/KSPSetType.html#KSPSetType">KSPSetType</A>(ksp,<A href="../../../../docs/manualpages/KSP/KSPPREONLY.html#KSPPREONLY">KSPPREONLY</A>);
+<a name="line129">129: </a>          <A href="../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(pc,<A href="../../../../docs/manualpages/PC/PCLU.html#PCLU">PCLU</A>);
+<a name="line130">130: </a>        }
+<a name="line131">131: </a>        <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(nasm-&gt;subsnes[i]);
+<a name="line132">132: </a>        <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;subdms[i]);
+<a name="line133">133: </a>      }
+<a name="line134">134: </a>      <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(subdms);
+<a name="line135">135: </a>    } <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Cannot construct local problems automatically without a DM!"</font>);
+<a name="line136">136: </a>  } <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Must set subproblems manually if there is no DM!"</font>);
+<a name="line137">137: </a>  <font color="#B22222">/* allocate the global vectors */</font>
+<a name="line138">138: </a>  <font color="#4169E1">if</font> (!nasm-&gt;x) {
+<a name="line139">139: </a>    <A href="../../../../docs/manualpages/Sys/PetscCalloc1.html#PetscCalloc1">PetscCalloc1</A>(nasm-&gt;n,&amp;nasm-&gt;x);
+<a name="line140">140: </a>  }
+<a name="line141">141: </a>  <font color="#4169E1">if</font> (!nasm-&gt;xl) {
+<a name="line142">142: </a>    <A href="../../../../docs/manualpages/Sys/PetscCalloc1.html#PetscCalloc1">PetscCalloc1</A>(nasm-&gt;n,&amp;nasm-&gt;xl);
+<a name="line143">143: </a>  }
+<a name="line144">144: </a>  <font color="#4169E1">if</font> (!nasm-&gt;y) {
+<a name="line145">145: </a>    <A href="../../../../docs/manualpages/Sys/PetscCalloc1.html#PetscCalloc1">PetscCalloc1</A>(nasm-&gt;n,&amp;nasm-&gt;y);
+<a name="line146">146: </a>  }
+<a name="line147">147: </a>  <font color="#4169E1">if</font> (!nasm-&gt;b) {
+<a name="line148">148: </a>    <A href="../../../../docs/manualpages/Sys/PetscCalloc1.html#PetscCalloc1">PetscCalloc1</A>(nasm-&gt;n,&amp;nasm-&gt;b);
+<a name="line149">149: </a>  }
+
+<a name="line151">151: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line152">152: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetFunction.html#SNESGetFunction">SNESGetFunction</A>(nasm-&gt;subsnes[i],&amp;F,NULL,NULL);
+<a name="line153">153: </a>    <font color="#4169E1">if</font> (!nasm-&gt;x[i]) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(F,&amp;nasm-&gt;x[i]);}
+<a name="line154">154: </a>    <font color="#4169E1">if</font> (!nasm-&gt;y[i]) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(F,&amp;nasm-&gt;y[i]);}
+<a name="line155">155: </a>    <font color="#4169E1">if</font> (!nasm-&gt;b[i]) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(F,&amp;nasm-&gt;b[i]);}
+<a name="line156">156: </a>    <font color="#4169E1">if</font> (!nasm-&gt;xl[i]) {
+<a name="line157">157: </a>      <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(nasm-&gt;subsnes[i],&amp;subdm);
+<a name="line158">158: </a>      <A href="../../../../docs/manualpages/DM/DMCreateLocalVector.html#DMCreateLocalVector">DMCreateLocalVector</A>(subdm,&amp;nasm-&gt;xl[i]);
+<a name="line159">159: </a>    }
+<a name="line160">160: </a>    <A href="../../../../docs/manualpages/DM/DMGlobalToLocalHookAdd.html#DMGlobalToLocalHookAdd">DMGlobalToLocalHookAdd</A>(subdm,DMGlobalToLocalSubDomainDirichletHook_Private,NULL,nasm-&gt;xl[i]);
+<a name="line161">161: </a>  }
+<a name="line162">162: </a>  <font color="#4169E1">if</font> (nasm-&gt;finaljacobian) {
+<a name="line163">163: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetUpMatrices.html#SNESSetUpMatrices">SNESSetUpMatrices</A>(snes);
+<a name="line164">164: </a>    <font color="#4169E1">if</font> (nasm-&gt;fjtype == 2) {
+<a name="line165">165: </a>      <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(snes-&gt;vec_sol,&amp;nasm-&gt;xinit);
+<a name="line166">166: </a>    }
+<a name="line167">167: </a>    <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n;i++) {
+<a name="line168">168: </a>      <A href="../../../../docs/manualpages/SNES/SNESSetUpMatrices.html#SNESSetUpMatrices">SNESSetUpMatrices</A>(nasm-&gt;subsnes[i]);
+<a name="line169">169: </a>    }
+<a name="line170">170: </a>  }
+<a name="line171">171: </a>  <font color="#4169E1">return</font>(0);
+<a name="line172">172: </a>}
+
+<a name="line176">176: </a><strong><font color="#4169E1"><a name="SNESSetFromOptions_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSetFromOptions_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line177">177: </a>{
+<a name="line178">178: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>    ierr;
+<a name="line179">179: </a>  <A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>         asmtype;
+<a name="line180">180: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>         flg,monflg,subviewflg;
+<a name="line181">181: </a>  SNES_NASM         *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line184">184: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsHead.html#PetscOptionsHead">PetscOptionsHead</A>(<font color="#666666">"Nonlinear Additive Schwartz options"</font>);
+<a name="line185">185: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsEnum.html#PetscOptionsEnum">PetscOptionsEnum</A>(<font color="#666666">"-snes_nasm_type"</font>,<font color="#666666">"Type of restriction/extension"</font>,<font color="#666666">""</font>,SNESNASMTypes,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>)nasm-&gt;type,(<A href="../../../../docs/manualpages/Sys/PetscEnum.html#PetscEnum">PetscEnum</A>*)&amp;asmtype,&amp;flg);
+<a name="line186">186: </a>  <font color="#4169E1">if</font> (flg) {<A href="../../../../docs/manualpages/SNES/SNESNASMSetType.html#SNESNASMSetType">SNESNASMSetType</A>(snes,asmtype);}
+<a name="line187">187: </a>  flg    = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line188">188: </a>  monflg = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line189">189: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-snes_nasm_damping"</font>,<font color="#666666">"Log times for subSNES solves and restriction"</font>,<font color="#666666">"<A href="../../../../docs/manualpages/SNES/SNESNASMSetDamping.html#SNESNASMSetDamping">SNESNASMSetDamping</A>"</font>,nasm-&gt;damping,&amp;nasm-&gt;damping,&amp;flg);
+<a name="line190">190: </a>  <font color="#4169E1">if</font> (flg) {<A href="../../../../docs/manualpages/SNES/SNESNASMSetDamping.html#SNESNASMSetDamping">SNESNASMSetDamping</A>(snes,nasm-&gt;damping);}
+<a name="line191">191: </a>  subviewflg = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line192">192: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-snes_nasm_sub_view"</font>,<font color="#666666">"Print detailed information for every processor when using -snes_view"</font>,<font color="#666666">""</font>,subviewflg,&amp;subviewflg,&amp;flg);
+<a name="line193">193: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line194">194: </a>    nasm-&gt;same_local_solves = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line195">195: </a>    <font color="#4169E1">if</font> (!subviewflg) {
+<a name="line196">196: </a>      nasm-&gt;same_local_solves = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line197">197: </a>    }
+<a name="line198">198: </a>  }
+<a name="line199">199: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-snes_nasm_finaljacobian"</font>,<font color="#666666">"Compute the global jacobian of the final iterate (for ASPIN)"</font>,<font color="#666666">""</font>,nasm-&gt;finaljacobian,&amp;nasm-&gt;finaljacobian,NULL);
+<a name="line200">200: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsEList.html#PetscOptionsEList">PetscOptionsEList</A>(<font color="#666666">"-snes_nasm_finaljacobian_type"</font>,<font color="#666666">"The type of the final jacobian computed."</font>,<font color="#666666">""</font>,SNESNASMFJTypes,3,SNESNASMFJTypes[0],&amp;nasm-&gt;fjtype,NULL);
+<a name="line201">201: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-snes_nasm_log"</font>,<font color="#666666">"Log times for subSNES solves and restriction"</font>,<font color="#666666">""</font>,monflg,&amp;monflg,&amp;flg);
+<a name="line202">202: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line203">203: </a>    <A href="../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"SNESNASMSubSolve"</font>,((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes)-&gt;classid,&amp;nasm-&gt;eventsubsolve);
+<a name="line204">204: </a>    <A href="../../../../docs/manualpages/Profiling/PetscLogEventRegister.html#PetscLogEventRegister">PetscLogEventRegister</A>(<font color="#666666">"SNESNASMRestrict"</font>,((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes)-&gt;classid,&amp;nasm-&gt;eventrestrictinterp);
+<a name="line205">205: </a>  }
+<a name="line206">206: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsTail.html#PetscOptionsTail">PetscOptionsTail</A>();
+<a name="line207">207: </a>  <font color="#4169E1">return</font>(0);
+<a name="line208">208: </a>}
+
+<a name="line212">212: </a><strong><font color="#4169E1"><a name="SNESView_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESView_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes, <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer)</font></strong>
+<a name="line213">213: </a>{
+<a name="line214">214: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+<a name="line216">216: </a>  <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>    rank,size;
+<a name="line217">217: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,N,bsz;
+<a name="line218">218: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      iascii,isstring;
+<a name="line219">219: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    sviewer;
+<a name="line220">220: </a>  <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A>       comm;
+
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectGetComm.html#PetscObjectGetComm">PetscObjectGetComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,&amp;comm);
+<a name="line224">224: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERASCII,&amp;iascii);
+<a name="line225">225: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)viewer,PETSCVIEWERSTRING,&amp;isstring);
+<a name="line226">226: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(comm,&amp;rank);
+<a name="line227">227: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(comm,&amp;size);
+<a name="line228">228: </a>  <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</A>(&amp;nasm-&gt;n,&amp;N,1,MPIU_INT,MPI_SUM,comm);
+<a name="line229">229: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line230">230: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer, <font color="#666666">"  Nonlinear Additive Schwarz: total subdomain blocks = %D\n"</font>,N);
+<a name="line231">231: </a>    <font color="#4169E1">if</font> (nasm-&gt;same_local_solves) {
+<a name="line232">232: </a>      <font color="#4169E1">if</font> (nasm-&gt;subsnes) {
+<a name="line233">233: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Local solve is the same for all blocks:\n"</font>);
+<a name="line234">234: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPushTab.html#PetscViewerASCIIPushTab">PetscViewerASCIIPushTab</A>(viewer);
+<a name="line235">235: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerGetSingleton.html#PetscViewerGetSingleton">PetscViewerGetSingleton</A>(viewer,&amp;sviewer);
+<a name="line236">236: </a>        <font color="#4169E1">if</font> (!rank) {
+<a name="line237">237: </a>          <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPushTab.html#PetscViewerASCIIPushTab">PetscViewerASCIIPushTab</A>(viewer);
+<a name="line238">238: </a>          <A href="../../../../docs/manualpages/SNES/SNESView.html#SNESView">SNESView</A>(nasm-&gt;subsnes[0],sviewer);
+<a name="line239">239: </a>          <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPopTab.html#PetscViewerASCIIPopTab">PetscViewerASCIIPopTab</A>(viewer);
+<a name="line240">240: </a>        }
+<a name="line241">241: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerRestoreSingleton.html#PetscViewerRestoreSingleton">PetscViewerRestoreSingleton</A>(viewer,&amp;sviewer);
+<a name="line242">242: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPopTab.html#PetscViewerASCIIPopTab">PetscViewerASCIIPopTab</A>(viewer);
+<a name="line243">243: </a>      }
+<a name="line244">244: </a>    } <font color="#4169E1">else</font> {
+<a name="line245">245: </a>      <font color="#B22222">/* print the solver on each block */</font>
+<a name="line246">246: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIISynchronizedAllow.html#PetscViewerASCIISynchronizedAllow">PetscViewerASCIISynchronizedAllow</A>(viewer,<A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>);
+<a name="line247">247: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html#PetscViewerASCIISynchronizedPrintf">PetscViewerASCIISynchronizedPrintf</A>(viewer,<font color="#666666">"  [%d] number of local blocks = %D\n"</font>,(int)rank,nasm-&gt;n);
+<a name="line248">248: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerFlush.html#PetscViewerFlush">PetscViewerFlush</A>(viewer);
+<a name="line249">249: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIISynchronizedAllow.html#PetscViewerASCIISynchronizedAllow">PetscViewerASCIISynchronizedAllow</A>(viewer,<A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>);
+<a name="line250">250: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"  Local solve info for each block is in the following <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> objects:\n"</font>);
+<a name="line251">251: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPushTab.html#PetscViewerASCIIPushTab">PetscViewerASCIIPushTab</A>(viewer);
+<a name="line252">252: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(viewer,<font color="#666666">"- - - - - - - - - - - - - - - - - -\n"</font>);
+<a name="line253">253: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerGetSingleton.html#PetscViewerGetSingleton">PetscViewerGetSingleton</A>(viewer,&amp;sviewer);
+<a name="line254">254: </a>      <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line255">255: </a>        <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(nasm-&gt;x[i],&amp;bsz);
+<a name="line256">256: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(sviewer,<font color="#666666">"[%d] local block number %D, size = %D\n"</font>,(int)rank,i,bsz);
+<a name="line257">257: </a>        <A href="../../../../docs/manualpages/SNES/SNESView.html#SNESView">SNESView</A>(nasm-&gt;subsnes[i],sviewer);
+<a name="line258">258: </a>        <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPrintf.html#PetscViewerASCIIPrintf">PetscViewerASCIIPrintf</A>(sviewer,<font color="#666666">"- - - - - - - - - - - - - - - - - -\n"</font>);
+<a name="line259">259: </a>      }
+<a name="line260">260: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerRestoreSingleton.html#PetscViewerRestoreSingleton">PetscViewerRestoreSingleton</A>(viewer,&amp;sviewer);
+<a name="line261">261: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerFlush.html#PetscViewerFlush">PetscViewerFlush</A>(viewer);
+<a name="line262">262: </a>      <A href="../../../../docs/manualpages/Viewer/PetscViewerASCIIPopTab.html#PetscViewerASCIIPopTab">PetscViewerASCIIPopTab</A>(viewer);
+<a name="line263">263: </a>    }
+<a name="line264">264: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (isstring) {
+<a name="line265">265: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerStringSPrintf.html#PetscViewerStringSPrintf">PetscViewerStringSPrintf</A>(viewer,<font color="#666666">" blocks=%D,type=%s"</font>,N,SNESNASMTypes[nasm-&gt;type]);
+<a name="line266">266: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerGetSingleton.html#PetscViewerGetSingleton">PetscViewerGetSingleton</A>(viewer,&amp;sviewer);
+<a name="line267">267: </a>    <font color="#4169E1">if</font> (nasm-&gt;subsnes &amp;&amp; !rank) {<A href="../../../../docs/manualpages/SNES/SNESView.html#SNESView">SNESView</A>(nasm-&gt;subsnes[0],sviewer);}
+<a name="line268">268: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewerRestoreSingleton.html#PetscViewerRestoreSingleton">PetscViewerRestoreSingleton</A>(viewer,&amp;sviewer);
+<a name="line269">269: </a>  }
+<a name="line270">270: </a>  <font color="#4169E1">return</font>(0);
+<a name="line271">271: </a>}
+
+<a name="line275">275: </a><font color="#B22222">/*@</font>
+<a name="line276">276: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMSetType.html#SNESNASMSetType">SNESNASMSetType</A> - Set the type of subdomain update used</font>
+
+<a name="line278">278: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+
+<a name="line280">280: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line281">281: </a><font color="#B22222">+  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line282">282: </a><font color="#B22222">-  type - the type of update, PC_ASM_BASIC or PC_ASM_RESTRICT</font>
+
+<a name="line284">284: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line286">286: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM</font>
+
+<a name="line288">288: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMGetType.html#SNESNASMGetType">SNESNASMGetType</A>(), <A href="../../../../docs/manualpages/PC/PCASMSetType.html#PCASMSetType">PCASMSetType</A>()</font>
+<a name="line289">289: </a><font color="#B22222">@*/</font>
+<a name="line290">290: </a><strong><font color="#4169E1"><a name="SNESNASMSetType"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMSetType.html#SNESNASMSetType">SNESNASMSetType</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A> type)</font></strong>
+<a name="line291">291: </a>{
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>);
+
+<a name="line296">296: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetType_C"</font>,&amp;f);
+<a name="line297">297: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,type);}
+<a name="line298">298: </a>  <font color="#4169E1">return</font>(0);
+<a name="line299">299: </a>}
+
+<a name="line303">303: </a><strong><font color="#4169E1"><a name="SNESNASMSetType_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMSetType_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A> type)</font></strong>
+<a name="line304">304: </a>{
+<a name="line305">305: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line308">308: </a>  <font color="#4169E1">if</font> (type != PC_ASM_BASIC &amp;&amp; type != PC_ASM_RESTRICT) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_OUTOFRANGE,<font color="#666666">"<A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A> only supports basic and restrict types"</font>);
+<a name="line309">309: </a>  nasm-&gt;type = type;
+<a name="line310">310: </a>  <font color="#4169E1">return</font>(0);
+<a name="line311">311: </a>}
+
+<a name="line315">315: </a><font color="#B22222">/*@</font>
+<a name="line316">316: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMGetType.html#SNESNASMGetType">SNESNASMGetType</A> - Get the type of subdomain update used</font>
+
+<a name="line318">318: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+
+<a name="line320">320: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line321">321: </a><font color="#B22222">.  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+
+<a name="line323">323: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line324">324: </a><font color="#B22222">.  type - the type of update</font>
+
+<a name="line326">326: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line328">328: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM</font>
+
+<a name="line330">330: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMSetType.html#SNESNASMSetType">SNESNASMSetType</A>(), PCASMGetType()</font>
+<a name="line331">331: </a><font color="#B22222">@*/</font>
+<a name="line332">332: </a><strong><font color="#4169E1"><a name="SNESNASMGetType"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMGetType.html#SNESNASMGetType">SNESNASMGetType</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A> *type)</font></strong>
+<a name="line333">333: </a>{
+<a name="line335">335: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>*);
+
+<a name="line338">338: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetType_C"</font>,&amp;f);
+<a name="line339">339: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,type);}
+<a name="line340">340: </a>  <font color="#4169E1">return</font>(0);
+<a name="line341">341: </a>}
+
+<a name="line345">345: </a><strong><font color="#4169E1"><a name="SNESNASMGetType_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMGetType_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A> *type)</font></strong>
+<a name="line346">346: </a>{
+<a name="line347">347: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line350">350: </a>  *type = nasm-&gt;type;
+<a name="line351">351: </a>  <font color="#4169E1">return</font>(0);
+<a name="line352">352: </a>}
+
+<a name="line356">356: </a><font color="#B22222">/*@</font>
+<a name="line357">357: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMSetSubdomains.html#SNESNASMSetSubdomains">SNESNASMSetSubdomains</A> - Manually Set the context required to restrict and solve subdomain problems.</font>
+
+<a name="line359">359: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line361">361: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line362">362: </a><font color="#B22222">+  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line363">363: </a><font color="#B22222">.  n - the number of local subdomains</font>
+<a name="line364">364: </a><font color="#B22222">.  subsnes - solvers defined on the local subdomains</font>
+<a name="line365">365: </a><font color="#B22222">.  iscatter - scatters into the nonoverlapping portions of the local subdomains</font>
+<a name="line366">366: </a><font color="#B22222">.  oscatter - scatters into the overlapping portions of the local subdomains</font>
+<a name="line367">367: </a><font color="#B22222">-  gscatter - scatters into the (ghosted) local vector of the local subdomain</font>
+
+<a name="line369">369: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line371">371: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM</font>
+
+<a name="line373">373: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomains.html#SNESNASMGetSubdomains">SNESNASMGetSubdomains</A>()</font>
+<a name="line374">374: </a><font color="#B22222">@*/</font>
+<a name="line375">375: </a><strong><font color="#4169E1"><a name="SNESNASMSetSubdomains"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMSetSubdomains.html#SNESNASMSetSubdomains">SNESNASMSetSubdomains</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> subsnes[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> iscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> oscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> gscatter[])</font></strong>
+<a name="line376">376: </a>{
+<a name="line378">378: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>*,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>*,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>*,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>*);
+
+<a name="line381">381: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetSubdomains_C"</font>,&amp;f);
+<a name="line382">382: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,n,subsnes,iscatter,oscatter,gscatter);}
+<a name="line383">383: </a>  <font color="#4169E1">return</font>(0);
+<a name="line384">384: </a>}
+
+<a name="line388">388: </a><strong><font color="#4169E1"><a name="SNESNASMSetSubdomains_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMSetSubdomains_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> subsnes[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> iscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> oscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> gscatter[])</font></strong>
+<a name="line389">389: </a>{
+<a name="line390">390: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+<a name="line392">392: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line395">395: </a>  <font color="#4169E1">if</font> (snes-&gt;setupcalled) <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"<A href="../../../../docs/manualpages/SNES/SNESNASMSetSubdomains.html#SNESNASMSetSubdomains">SNESNASMSetSubdomains</A>() should be called before calling <A href="../../../../docs/manualpages/SNES/SNESSetUp.html#SNESSetUp">SNESSetUp</A>()."</font>);
+
+<a name="line397">397: </a>  <font color="#B22222">/* tear down the previously set things */</font>
+<a name="line398">398: </a>  <A href="../../../../docs/manualpages/SNES/SNESReset.html#SNESReset">SNESReset</A>(snes);
+
+<a name="line400">400: </a>  nasm-&gt;n = n;
+<a name="line401">401: </a>  <font color="#4169E1">if</font> (oscatter) {
+<a name="line402">402: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {<A href="../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)oscatter[i]);}
+<a name="line403">403: </a>  }
+<a name="line404">404: </a>  <font color="#4169E1">if</font> (iscatter) {
+<a name="line405">405: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {<A href="../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)iscatter[i]);}
+<a name="line406">406: </a>  }
+<a name="line407">407: </a>  <font color="#4169E1">if</font> (gscatter) {
+<a name="line408">408: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {<A href="../../../../docs/manualpages/Sys/PetscObjectReference.html#PetscObjectReference">PetscObjectReference</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)gscatter[i]);}
+<a name="line409">409: </a>  }
+<a name="line410">410: </a>  <font color="#4169E1">if</font> (oscatter) {
+<a name="line411">411: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(n,&amp;nasm-&gt;oscatter);
+<a name="line412">412: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line413">413: </a>      nasm-&gt;oscatter[i] = oscatter[i];
+<a name="line414">414: </a>    }
+<a name="line415">415: </a>  }
+<a name="line416">416: </a>  <font color="#4169E1">if</font> (iscatter) {
+<a name="line417">417: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(n,&amp;nasm-&gt;iscatter);
+<a name="line418">418: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line419">419: </a>      nasm-&gt;iscatter[i] = iscatter[i];
+<a name="line420">420: </a>    }
+<a name="line421">421: </a>  }
+<a name="line422">422: </a>  <font color="#4169E1">if</font> (gscatter) {
+<a name="line423">423: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(n,&amp;nasm-&gt;gscatter);
+<a name="line424">424: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line425">425: </a>      nasm-&gt;gscatter[i] = gscatter[i];
+<a name="line426">426: </a>    }
+<a name="line427">427: </a>  }
+
+<a name="line429">429: </a>  <font color="#4169E1">if</font> (subsnes) {
+<a name="line430">430: </a>    <A href="../../../../docs/manualpages/Sys/PetscMalloc1.html#PetscMalloc1">PetscMalloc1</A>(n,&amp;nasm-&gt;subsnes);
+<a name="line431">431: </a>    <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line432">432: </a>      nasm-&gt;subsnes[i] = subsnes[i];
+<a name="line433">433: </a>    }
+<a name="line434">434: </a>    nasm-&gt;same_local_solves = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line435">435: </a>  }
+<a name="line436">436: </a>  <font color="#4169E1">return</font>(0);
+<a name="line437">437: </a>}
+
+<a name="line441">441: </a><font color="#B22222">/*@</font>
+<a name="line442">442: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomains.html#SNESNASMGetSubdomains">SNESNASMGetSubdomains</A> - Get the local subdomain context.</font>
+
+<a name="line444">444: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line446">446: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line447">447: </a><font color="#B22222">.  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+
+<a name="line449">449: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line450">450: </a><font color="#B22222">+  n - the number of local subdomains</font>
+<a name="line451">451: </a><font color="#B22222">.  subsnes - solvers defined on the local subdomains</font>
+<a name="line452">452: </a><font color="#B22222">.  iscatter - scatters into the nonoverlapping portions of the local subdomains</font>
+<a name="line453">453: </a><font color="#B22222">.  oscatter - scatters into the overlapping portions of the local subdomains</font>
+<a name="line454">454: </a><font color="#B22222">-  gscatter - scatters into the (ghosted) local vector of the local subdomain</font>
+
+<a name="line456">456: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line458">458: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM</font>
+
+<a name="line460">460: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMSetSubdomains.html#SNESNASMSetSubdomains">SNESNASMSetSubdomains</A>()</font>
+<a name="line461">461: </a><font color="#B22222">@*/</font>
+<a name="line462">462: </a><strong><font color="#4169E1"><a name="SNESNASMGetSubdomains"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomains.html#SNESNASMGetSubdomains">SNESNASMGetSubdomains</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *n,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> *subsnes[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *iscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *oscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *gscatter[])</font></strong>
+<a name="line463">463: </a>{
+<a name="line465">465: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>*,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>**,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>**,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>**,<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>**);
+
+<a name="line468">468: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetSubdomains_C"</font>,&amp;f);
+<a name="line469">469: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,n,subsnes,iscatter,oscatter,gscatter);}
+<a name="line470">470: </a>  <font color="#4169E1">return</font>(0);
+<a name="line471">471: </a>}
+
+<a name="line475">475: </a><strong><font color="#4169E1"><a name="SNESNASMGetSubdomains_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMGetSubdomains_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *n,<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> *subsnes[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *iscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *oscatter[],<A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A> *gscatter[])</font></strong>
+<a name="line476">476: </a>{
+<a name="line477">477: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line480">480: </a>  <font color="#4169E1">if</font> (n) *n = nasm-&gt;n;
+<a name="line481">481: </a>  <font color="#4169E1">if</font> (oscatter) *oscatter = nasm-&gt;oscatter;
+<a name="line482">482: </a>  <font color="#4169E1">if</font> (iscatter) *iscatter = nasm-&gt;iscatter;
+<a name="line483">483: </a>  <font color="#4169E1">if</font> (gscatter) *gscatter = nasm-&gt;gscatter;
+<a name="line484">484: </a>  <font color="#4169E1">if</font> (subsnes)  {
+<a name="line485">485: </a>    *subsnes  = nasm-&gt;subsnes;
+<a name="line486">486: </a>    nasm-&gt;same_local_solves = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line487">487: </a>  }
+<a name="line488">488: </a>  <font color="#4169E1">return</font>(0);
+<a name="line489">489: </a>}
+
+<a name="line493">493: </a><font color="#B22222">/*@</font>
+<a name="line494">494: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomainVecs.html#SNESNASMGetSubdomainVecs">SNESNASMGetSubdomainVecs</A> - Get the processor-local subdomain vectors</font>
+
+<a name="line496">496: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line498">498: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line499">499: </a><font color="#B22222">.  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+
+<a name="line501">501: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line502">502: </a><font color="#B22222">+  n - the number of local subdomains</font>
+<a name="line503">503: </a><font color="#B22222">.  x - The subdomain solution vector</font>
+<a name="line504">504: </a><font color="#B22222">.  y - The subdomain step vector</font>
+<a name="line505">505: </a><font color="#B22222">.  b - The subdomain RHS vector</font>
+<a name="line506">506: </a><font color="#B22222">-  xl - The subdomain local vectors (ghosted)</font>
+
+<a name="line508">508: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line510">510: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM</font>
+
+<a name="line512">512: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomains.html#SNESNASMGetSubdomains">SNESNASMGetSubdomains</A>()</font>
+<a name="line513">513: </a><font color="#B22222">@*/</font>
+<a name="line514">514: </a><strong><font color="#4169E1"><a name="SNESNASMGetSubdomainVecs"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomainVecs.html#SNESNASMGetSubdomainVecs">SNESNASMGetSubdomainVecs</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *n,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **b, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **xl)</font></strong>
+<a name="line515">515: </a>{
+<a name="line517">517: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>*,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>**,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>**,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>**,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>**);
+
+<a name="line520">520: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetSubdomainVecs_C"</font>,&amp;f);
+<a name="line521">521: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,n,x,y,b,xl);}
+<a name="line522">522: </a>  <font color="#4169E1">return</font>(0);
+<a name="line523">523: </a>}
+
+<a name="line527">527: </a><strong><font color="#4169E1"><a name="SNESNASMGetSubdomainVecs_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMGetSubdomainVecs_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *n,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **b,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> **xl)</font></strong>
+<a name="line528">528: </a>{
+<a name="line529">529: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line532">532: </a>  <font color="#4169E1">if</font> (n)  *n  = nasm-&gt;n;
+<a name="line533">533: </a>  <font color="#4169E1">if</font> (x)  *x  = nasm-&gt;x;
+<a name="line534">534: </a>  <font color="#4169E1">if</font> (y)  *y  = nasm-&gt;y;
+<a name="line535">535: </a>  <font color="#4169E1">if</font> (b)  *b  = nasm-&gt;b;
+<a name="line536">536: </a>  <font color="#4169E1">if</font> (xl) *xl = nasm-&gt;xl;
+<a name="line537">537: </a>  <font color="#4169E1">return</font>(0);
+<a name="line538">538: </a>}
+
+<a name="line542">542: </a><font color="#B22222">/*@</font>
+<a name="line543">543: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMSetComputeFinalJacobian.html#SNESNASMSetComputeFinalJacobian">SNESNASMSetComputeFinalJacobian</A> - Schedules the computation of the global and subdomain jacobians upon convergence</font>
+
+<a name="line545">545: </a><font color="#B22222">   Collective on <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+
+<a name="line547">547: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line548">548: </a><font color="#B22222">+  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line549">549: </a><font color="#B22222">-  flg - indication of whether to compute the jacobians or not</font>
+
+<a name="line551">551: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line553">553: </a><font color="#B22222">   Notes: This is used almost exclusively in the implementation of ASPIN, where the converged subdomain and global jacobian</font>
+<a name="line554">554: </a><font color="#B22222">   is needed at each linear iteration.</font>
+
+<a name="line556">556: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM, ASPIN</font>
+
+<a name="line558">558: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMGetSubdomains.html#SNESNASMGetSubdomains">SNESNASMGetSubdomains</A>()</font>
+<a name="line559">559: </a><font color="#B22222">@*/</font>
+<a name="line560">560: </a><strong><font color="#4169E1"><a name="SNESNASMSetComputeFinalJacobian"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMSetComputeFinalJacobian.html#SNESNASMSetComputeFinalJacobian">SNESNASMSetComputeFinalJacobian</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg)</font></strong>
+<a name="line561">561: </a>{
+<a name="line562">562: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>);
+
+<a name="line566">566: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetComputeFinalJacobian_C"</font>,&amp;f);
+<a name="line567">567: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,flg);}
+<a name="line568">568: </a>  <font color="#4169E1">return</font>(0);
+<a name="line569">569: </a>}
+
+<a name="line573">573: </a><strong><font color="#4169E1"><a name="SNESNASMSetComputeFinalJacobian_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMSetComputeFinalJacobian_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A> flg)</font></strong>
+<a name="line574">574: </a>{
+<a name="line575">575: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line578">578: </a>  nasm-&gt;finaljacobian = flg;
+<a name="line579">579: </a>  <font color="#4169E1">if</font> (flg) snes-&gt;usesksp = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line580">580: </a>  <font color="#4169E1">return</font>(0);
+<a name="line581">581: </a>}
+
+<a name="line585">585: </a><font color="#B22222">/*@</font>
+<a name="line586">586: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMSetDamping.html#SNESNASMSetDamping">SNESNASMSetDamping</A> - Sets the update damping for NASM</font>
+
+<a name="line588">588: </a><font color="#B22222">   Logically collective on <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A></font>
+
+<a name="line590">590: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line591">591: </a><font color="#B22222">+  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line592">592: </a><font color="#B22222">-  dmp - damping</font>
+
+<a name="line594">594: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line596">596: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM, damping</font>
+
+<a name="line598">598: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMGetDamping.html#SNESNASMGetDamping">SNESNASMGetDamping</A>()</font>
+<a name="line599">599: </a><font color="#B22222">@*/</font>
+<a name="line600">600: </a><strong><font color="#4169E1"><a name="SNESNASMSetDamping"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMSetDamping.html#SNESNASMSetDamping">SNESNASMSetDamping</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> dmp)</font></strong>
+<a name="line601">601: </a>{
+<a name="line602">602: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>);
+
+<a name="line606">606: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetDamping_C"</font>,(void (**)(void))&amp;f);
+<a name="line607">607: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,dmp);}
+<a name="line608">608: </a>  <font color="#4169E1">return</font>(0);
+<a name="line609">609: </a>}
+
+<a name="line613">613: </a><strong><font color="#4169E1"><a name="SNESNASMSetDamping_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMSetDamping_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> dmp)</font></strong>
+<a name="line614">614: </a>{
+<a name="line615">615: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line618">618: </a>  nasm-&gt;damping = dmp;
+<a name="line619">619: </a>  <font color="#4169E1">return</font>(0);
+<a name="line620">620: </a>}
+
+<a name="line624">624: </a><font color="#B22222">/*@</font>
+<a name="line625">625: </a><font color="#B22222">   <A href="../../../../docs/manualpages/SNES/SNESNASMGetDamping.html#SNESNASMGetDamping">SNESNASMGetDamping</A> - Gets the update damping for NASM</font>
+
+<a name="line627">627: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line629">629: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line630">630: </a><font color="#B22222">+  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> - the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> context</font>
+<a name="line631">631: </a><font color="#B22222">-  dmp - damping</font>
+
+<a name="line633">633: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line635">635: </a><font color="#B22222">.keywords: <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, NASM, damping</font>
+
+<a name="line637">637: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>, <A href="../../../../docs/manualpages/SNES/SNESNASMSetDamping.html#SNESNASMSetDamping">SNESNASMSetDamping</A>()</font>
+<a name="line638">638: </a><font color="#B22222">@*/</font>
+<a name="line639">639: </a><strong><font color="#4169E1"><a name="SNESNASMGetDamping"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> <A href="../../../../docs/manualpages/SNES/SNESNASMGetDamping.html#SNESNASMGetDamping">SNESNASMGetDamping</A>(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *dmp)</font></strong>
+<a name="line640">640: </a>{
+<a name="line641">641: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*f)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>*);
+
+<a name="line645">645: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectQueryFunction.html#PetscObjectQueryFunction">PetscObjectQueryFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetDamping_C"</font>,(void (**)(void))&amp;f);
+<a name="line646">646: </a>  <font color="#4169E1">if</font> (f) {(f)(snes,dmp);}
+<a name="line647">647: </a>  <font color="#4169E1">return</font>(0);
+<a name="line648">648: </a>}
+
+<a name="line652">652: </a><strong><font color="#4169E1"><a name="SNESNASMGetDamping_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMGetDamping_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A> *dmp)</font></strong>
+<a name="line653">653: </a>{
+<a name="line654">654: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line657">657: </a>  *dmp = nasm-&gt;damping;
+<a name="line658">658: </a>  <font color="#4169E1">return</font>(0);
+<a name="line659">659: </a>}
+
+
+<a name="line664">664: </a><strong><font color="#4169E1"><a name="SNESNASMSolveLocal_Private"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMSolveLocal_Private(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> B,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X)</font></strong>
+<a name="line665">665: </a>{
+<a name="line666">666: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+<a name="line667">667: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           subsnes;
+<a name="line668">668: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i;
+<a name="line669">669: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      dmp;
+<a name="line671">671: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Xlloc,Xl,Bl,Yl;
+<a name="line672">672: </a>  <A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>     iscat,oscat,gscat;
+<a name="line673">673: </a>  DM             dm,subdm;
+<a name="line674">674: </a>  <A href="../../../../docs/manualpages/PC/PCASMType.html#PCASMType">PCASMType</A>      type;
+
+<a name="line677">677: </a>  <A href="../../../../docs/manualpages/SNES/SNESNASMGetType.html#SNESNASMGetType">SNESNASMGetType</A>(snes,&amp;type);
+<a name="line678">678: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;dm);
+<a name="line679">679: </a>  <A href="../../../../docs/manualpages/SNES/SNESNASMGetDamping.html#SNESNASMGetDamping">SNESNASMGetDamping</A>(snes,&amp;dmp);
+<a name="line680">680: </a>  <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(Y,0);
+<a name="line681">681: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+<a name="line682">682: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line683">683: </a>    <font color="#B22222">/* scatter the solution to the local solution */</font>
+<a name="line684">684: </a>    Xlloc = nasm-&gt;xl[i];
+<a name="line685">685: </a>    gscat   = nasm-&gt;gscatter[i];
+<a name="line686">686: </a>    oscat   = nasm-&gt;oscatter[i];
+<a name="line687">687: </a>    <A href="../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(gscat,X,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line688">688: </a>    <font color="#4169E1">if</font> (B) {
+<a name="line689">689: </a>      <font color="#B22222">/* scatter the RHS to the local RHS */</font>
+<a name="line690">690: </a>      Bl   = nasm-&gt;b[i];
+<a name="line691">691: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(oscat,B,Bl,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line692">692: </a>    }
+<a name="line693">693: </a>  }
+<a name="line694">694: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+
+
+<a name="line697">697: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventsubsolve) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(nasm-&gt;eventsubsolve,snes,0,0,0);}
+<a name="line698">698: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line699">699: </a>    Xl    = nasm-&gt;x[i];
+<a name="line700">700: </a>    Xlloc = nasm-&gt;xl[i];
+<a name="line701">701: </a>    Yl    = nasm-&gt;y[i];
+<a name="line702">702: </a>    subsnes = nasm-&gt;subsnes[i];
+<a name="line703">703: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(subsnes,&amp;subdm);
+<a name="line704">704: </a>    iscat   = nasm-&gt;iscatter[i];
+<a name="line705">705: </a>    oscat   = nasm-&gt;oscatter[i];
+<a name="line706">706: </a>    gscat   = nasm-&gt;gscatter[i];
+<a name="line707">707: </a>    <A href="../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(gscat,X,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line708">708: </a>    <font color="#4169E1">if</font> (B) {
+<a name="line709">709: </a>      Bl   = nasm-&gt;b[i];
+<a name="line710">710: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(oscat,B,Bl,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line711">711: </a>    } <font color="#4169E1">else</font> Bl = NULL;
+<a name="line712">712: </a>    <A href="../../../../docs/manualpages/DM/DMSubDomainRestrict.html#DMSubDomainRestrict">DMSubDomainRestrict</A>(dm,oscat,gscat,subdm);
+<a name="line713">713: </a>    <A href="../../../../docs/manualpages/DM/DMLocalToGlobalBegin.html#DMLocalToGlobalBegin">DMLocalToGlobalBegin</A>(subdm,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,Xl);
+<a name="line714">714: </a>    <A href="../../../../docs/manualpages/DM/DMLocalToGlobalEnd.html#DMLocalToGlobalEnd">DMLocalToGlobalEnd</A>(subdm,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,Xl);
+<a name="line715">715: </a>    <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(Xl,Yl);
+<a name="line716">716: </a>    <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(subsnes,Bl,Xl);
+<a name="line717">717: </a>    <A href="../../../../docs/manualpages/Vec/VecAYPX.html#VecAYPX">VecAYPX</A>(Yl,-1.0,Xl);
+<a name="line718">718: </a>    <font color="#4169E1">if</font> (type == PC_ASM_BASIC) {
+<a name="line719">719: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(oscat,Yl,Y,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line720">720: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (type == PC_ASM_RESTRICT) {
+<a name="line721">721: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(iscat,Yl,Y,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line722">722: </a>    } <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Only basic and restrict types are supported for <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>"</font>);
+<a name="line723">723: </a>  }
+<a name="line724">724: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventsubsolve) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(nasm-&gt;eventsubsolve,snes,0,0,0);}
+<a name="line725">725: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+<a name="line726">726: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line727">727: </a>    Yl    = nasm-&gt;y[i];
+<a name="line728">728: </a>    iscat   = nasm-&gt;iscatter[i];
+<a name="line729">729: </a>    oscat   = nasm-&gt;oscatter[i];
+<a name="line730">730: </a>    <font color="#4169E1">if</font> (type == PC_ASM_BASIC) {
+<a name="line731">731: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(oscat,Yl,Y,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line732">732: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (type == PC_ASM_RESTRICT) {
+<a name="line733">733: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(iscat,Yl,Y,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_REVERSE.html#SCATTER_REVERSE">SCATTER_REVERSE</A>);
+<a name="line734">734: </a>    } <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes),PETSC_ERR_ARG_WRONGSTATE,<font color="#666666">"Only basic and restrict types are supported for <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A>"</font>);
+<a name="line735">735: </a>  }
+<a name="line736">736: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+<a name="line737">737: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(X,dmp,Y);
+<a name="line738">738: </a>  <font color="#4169E1">return</font>(0);
+<a name="line739">739: </a>}
+
+<a name="line743">743: </a><strong><font color="#4169E1"><a name="SNESNASMComputeFinalJacobian_Private"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESNASMComputeFinalJacobian_Private(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Xfinal)</font></strong>
+<a name="line744">744: </a>{
+<a name="line745">745: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            X = Xfinal;
+<a name="line746">746: </a>  SNES_NASM      *nasm = (SNES_NASM*)snes-&gt;data;
+<a name="line747">747: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           subsnes;
+<a name="line748">748: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,lag = 1;
+<a name="line750">750: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            Xlloc,Xl,Fl,F;
+<a name="line751">751: </a>  <A href="../../../../docs/manualpages/Vec/VecScatter.html#VecScatter">VecScatter</A>     oscat,gscat;
+<a name="line752">752: </a>  DM             dm,subdm;
+
+<a name="line755">755: </a>  <font color="#4169E1">if</font> (nasm-&gt;fjtype == 2) X = nasm-&gt;xinit;
+<a name="line756">756: </a>  F = snes-&gt;vec_func;
+<a name="line757">757: </a>  <font color="#4169E1">if</font> (snes-&gt;normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_NONE.html#SNES_NORM_NONE">SNES_NORM_NONE</A>) {<A href="../../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,X,F);}
+<a name="line758">758: </a>  <A href="../../../../docs/manualpages/SNES/SNESComputeJacobian.html#SNESComputeJacobian">SNESComputeJacobian</A>(snes,X,snes-&gt;jacobian,snes-&gt;jacobian_pre);
+<a name="line759">759: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(snes,&amp;dm);
+<a name="line760">760: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventBegin.html#PetscLogEventBegin">PetscLogEventBegin</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+<a name="line761">761: </a>  <font color="#4169E1">if</font> (nasm-&gt;fjtype != 1) {
+<a name="line762">762: </a>    <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line763">763: </a>      Xlloc = nasm-&gt;xl[i];
+<a name="line764">764: </a>      gscat = nasm-&gt;gscatter[i];
+<a name="line765">765: </a>      oscat = nasm-&gt;oscatter[i];
+<a name="line766">766: </a>      <A href="../../../../docs/manualpages/Vec/VecScatterBegin.html#VecScatterBegin">VecScatterBegin</A>(gscat,X,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);
+<a name="line767">767: </a>    }
+<a name="line768">768: </a>  }
+<a name="line769">769: </a>  <font color="#4169E1">if</font> (nasm-&gt;eventrestrictinterp) {<A href="../../../../docs/manualpages/Profiling/PetscLogEventEnd.html#PetscLogEventEnd">PetscLogEventEnd</A>(nasm-&gt;eventrestrictinterp,snes,0,0,0);}
+<a name="line770">770: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nasm-&gt;n; i++) {
+<a name="line771">771: </a>    Fl      = nasm-&gt;subsnes[i]-&gt;vec_func;
+<a name="line772">772: </a>    Xl      = nasm-&gt;x[i];
+<a name="line773">773: </a>    Xlloc   = nasm-&gt;xl[i];
+<a name="line774">774: </a>    subsnes = nasm-&gt;subsnes[i];
+<a name="line775">775: </a>    oscat   = nasm-&gt;oscatter[i];
+<a name="line776">776: </a>    gscat   = nasm-&gt;gscatter[i];
+<a name="line777">777: </a>    <font color="#4169E1">if</font> (nasm-&gt;fjtype != 1) {<A href="../../../../docs/manualpages/Vec/VecScatterEnd.html#VecScatterEnd">VecScatterEnd</A>(gscat,X,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,<A href="../../../../docs/manualpages/Vec/SCATTER_FORWARD.html#SCATTER_FORWARD">SCATTER_FORWARD</A>);}
+<a name="line778">778: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetDM.html#SNESGetDM">SNESGetDM</A>(subsnes,&amp;subdm);
+<a name="line779">779: </a>    <A href="../../../../docs/manualpages/DM/DMSubDomainRestrict.html#DMSubDomainRestrict">DMSubDomainRestrict</A>(dm,oscat,gscat,subdm);
+<a name="line780">780: </a>    <font color="#4169E1">if</font> (nasm-&gt;fjtype != 1) {
+<a name="line781">781: </a>      <A href="../../../../docs/manualpages/DM/DMLocalToGlobalBegin.html#DMLocalToGlobalBegin">DMLocalToGlobalBegin</A>(subdm,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,Xl);
+<a name="line782">782: </a>      <A href="../../../../docs/manualpages/DM/DMLocalToGlobalEnd.html#DMLocalToGlobalEnd">DMLocalToGlobalEnd</A>(subdm,Xlloc,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,Xl);
+<a name="line783">783: </a>    }
+<a name="line784">784: </a>    <font color="#4169E1">if</font> (subsnes-&gt;lagjacobian == -1)    subsnes-&gt;lagjacobian = -2;
+<a name="line785">785: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (subsnes-&gt;lagjacobian &gt; 1) lag = subsnes-&gt;lagjacobian;
+<a name="line786">786: </a>    <A href="../../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(subsnes,Xl,Fl);
+<a name="line787">787: </a>    <A href="../../../../docs/manualpages/SNES/SNESComputeJacobian.html#SNESComputeJacobian">SNESComputeJacobian</A>(subsnes,Xl,subsnes-&gt;jacobian,subsnes-&gt;jacobian_pre);
+<a name="line788">788: </a>    <font color="#4169E1">if</font> (lag &gt; 1) subsnes-&gt;lagjacobian = lag;
+<a name="line789">789: </a>  }
+<a name="line790">790: </a>  <font color="#4169E1">return</font>(0);
+<a name="line791">791: </a>}
+
+<a name="line795">795: </a><strong><font color="#4169E1"><a name="SNESSolve_NASM"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESSolve_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line796">796: </a>{
+<a name="line797">797: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              F;
+<a name="line798">798: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              X;
+<a name="line799">799: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              B;
+<a name="line800">800: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              Y;
+<a name="line801">801: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         i;
+<a name="line802">802: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>        fnorm = 0.0;
+<a name="line803">803: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr;
+<a name="line804">804: </a>  <A href="../../../../docs/manualpages/SNES/SNESNormSchedule.html#SNESNormSchedule">SNESNormSchedule</A> normschedule;
+<a name="line805">805: </a>  SNES_NASM        *nasm = (SNES_NASM*)snes-&gt;data;
+
+<a name="line808">808: </a>  <A href="../../../../docs/manualpages/Sys/PetscCitationsRegister.html#PetscCitationsRegister">PetscCitationsRegister</A>(SNESCitation,&amp;SNEScite);
+<a name="line809">809: </a>  X = snes-&gt;vec_sol;
+<a name="line810">810: </a>  Y = snes-&gt;vec_sol_update;
+<a name="line811">811: </a>  F = snes-&gt;vec_func;
+<a name="line812">812: </a>  B = snes-&gt;vec_rhs;
+
+<a name="line814">814: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsTakeAccess.html#PetscObjectSAWsTakeAccess">PetscObjectSAWsTakeAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line815">815: </a>  snes-&gt;iter   = 0;
+<a name="line816">816: </a>  snes-&gt;norm   = 0.;
+<a name="line817">817: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsGrantAccess.html#PetscObjectSAWsGrantAccess">PetscObjectSAWsGrantAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line818">818: </a>  snes-&gt;reason = SNES_CONVERGED_ITERATING;
+<a name="line819">819: </a>  <A href="../../../../docs/manualpages/SNES/SNESGetNormSchedule.html#SNESGetNormSchedule">SNESGetNormSchedule</A>(snes, &amp;normschedule);
+<a name="line820">820: </a>  <font color="#4169E1">if</font> (normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_ALWAYS.html#SNES_NORM_ALWAYS">SNES_NORM_ALWAYS</A> || normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_INITIAL_ONLY.html#SNES_NORM_INITIAL_ONLY">SNES_NORM_INITIAL_ONLY</A> || normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_INITIAL_FINAL_ONLY.html#SNES_NORM_INITIAL_FINAL_ONLY">SNES_NORM_INITIAL_FINAL_ONLY</A>) {
+<a name="line821">821: </a>    <font color="#B22222">/* compute the initial function and preconditioned update delX */</font>
+<a name="line822">822: </a>    <font color="#4169E1">if</font> (!snes-&gt;vec_func_init_set) {
+<a name="line823">823: </a>      <A href="../../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,X,F);
+<a name="line824">824: </a>      <font color="#4169E1">if</font> (snes-&gt;domainerror) {
+<a name="line825">825: </a>        snes-&gt;reason = SNES_DIVERGED_FUNCTION_DOMAIN;
+<a name="line826">826: </a>        <font color="#4169E1">return</font>(0);
+<a name="line827">827: </a>      }
+<a name="line828">828: </a>    } <font color="#4169E1">else</font> snes-&gt;vec_func_init_set = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line830">830: </a>    <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(F, <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, &amp;fnorm); <font color="#B22222">/* fnorm &lt;- ||F||  */</font>
+<a name="line831">831: </a>    <font color="#4169E1">if</font> (PetscIsInfOrNanReal(fnorm)) {
+<a name="line832">832: </a>      snes-&gt;reason = <A href="../../../../docs/manualpages/SNES/SNES_DIVERGED_FNORM_NAN.html#SNES_DIVERGED_FNORM_NAN">SNES_DIVERGED_FNORM_NAN</A>;
+<a name="line833">833: </a>      <font color="#4169E1">return</font>(0);
+<a name="line834">834: </a>    }
+<a name="line835">835: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsTakeAccess.html#PetscObjectSAWsTakeAccess">PetscObjectSAWsTakeAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line836">836: </a>    snes-&gt;iter = 0;
+<a name="line837">837: </a>    snes-&gt;norm = fnorm;
+<a name="line838">838: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsGrantAccess.html#PetscObjectSAWsGrantAccess">PetscObjectSAWsGrantAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line839">839: </a>    SNESLogConvergenceHistory(snes,snes-&gt;norm,0);
+<a name="line840">840: </a>    <A href="../../../../docs/manualpages/SNES/SNESMonitor.html#SNESMonitor">SNESMonitor</A>(snes,0,snes-&gt;norm);
+
+<a name="line842">842: </a>    <font color="#B22222">/* test convergence */</font>
+<a name="line843">843: </a>    (*snes-&gt;ops-&gt;converged)(snes,0,0.0,0.0,fnorm,&amp;snes-&gt;reason,snes-&gt;cnvP);
+<a name="line844">844: </a>    <font color="#4169E1">if</font> (snes-&gt;reason) <font color="#4169E1">return</font>(0);
+<a name="line845">845: </a>  } <font color="#4169E1">else</font> {
+<a name="line846">846: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsGrantAccess.html#PetscObjectSAWsGrantAccess">PetscObjectSAWsGrantAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line847">847: </a>    SNESLogConvergenceHistory(snes,snes-&gt;norm,0);
+<a name="line848">848: </a>    <A href="../../../../docs/manualpages/SNES/SNESMonitor.html#SNESMonitor">SNESMonitor</A>(snes,0,snes-&gt;norm);
+<a name="line849">849: </a>  }
+
+<a name="line851">851: </a>  <font color="#B22222">/* Call general purpose update function */</font>
+<a name="line852">852: </a>  <font color="#4169E1">if</font> (snes-&gt;ops-&gt;update) {
+<a name="line853">853: </a>    (*snes-&gt;ops-&gt;update)(snes, snes-&gt;iter);
+<a name="line854">854: </a>  }
+<a name="line855">855: </a>  <font color="#B22222">/* copy the initial solution over for later */</font>
+<a name="line856">856: </a>  <font color="#4169E1">if</font> (nasm-&gt;fjtype == 2) {<A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(X,nasm-&gt;xinit);}
+
+<a name="line858">858: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; snes-&gt;max_its; i++) {
+<a name="line859">859: </a>    SNESNASMSolveLocal_Private(snes,B,Y,X);
+<a name="line860">860: </a>    <font color="#4169E1">if</font> (normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_ALWAYS.html#SNES_NORM_ALWAYS">SNES_NORM_ALWAYS</A> || ((i == snes-&gt;max_its - 1) &amp;&amp; (normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_INITIAL_FINAL_ONLY.html#SNES_NORM_INITIAL_FINAL_ONLY">SNES_NORM_INITIAL_FINAL_ONLY</A> || normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_FINAL_ONLY.html#SNES_NORM_FINAL_ONLY">SNES_NORM_FINAL_ONLY</A>))) {
+<a name="line861">861: </a>      <A href="../../../../docs/manualpages/SNES/SNESComputeFunction.html#SNESComputeFunction">SNESComputeFunction</A>(snes,X,F);
+<a name="line862">862: </a>      <font color="#4169E1">if</font> (snes-&gt;domainerror) {
+<a name="line863">863: </a>        snes-&gt;reason = SNES_DIVERGED_FUNCTION_DOMAIN;
+<a name="line864">864: </a>        <font color="#4169E1">break</font>;
+<a name="line865">865: </a>      }
+<a name="line866">866: </a>      <A href="../../../../docs/manualpages/Vec/VecNorm.html#VecNorm">VecNorm</A>(F, <A href="../../../../docs/manualpages/Vec/NORM_2.html#NORM_2">NORM_2</A>, &amp;fnorm); <font color="#B22222">/* fnorm &lt;- ||F||  */</font>
+<a name="line867">867: </a>      <font color="#4169E1">if</font> (PetscIsInfOrNanReal(fnorm)) {
+<a name="line868">868: </a>        snes-&gt;reason = <A href="../../../../docs/manualpages/SNES/SNES_DIVERGED_FNORM_NAN.html#SNES_DIVERGED_FNORM_NAN">SNES_DIVERGED_FNORM_NAN</A>;
+<a name="line869">869: </a>        <font color="#4169E1">break</font>;
+<a name="line870">870: </a>      }
+<a name="line871">871: </a>    }
+<a name="line872">872: </a>    <font color="#B22222">/* Monitor convergence */</font>
+<a name="line873">873: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsTakeAccess.html#PetscObjectSAWsTakeAccess">PetscObjectSAWsTakeAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line874">874: </a>    snes-&gt;iter = i+1;
+<a name="line875">875: </a>    snes-&gt;norm = fnorm;
+<a name="line876">876: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectSAWsGrantAccess.html#PetscObjectSAWsGrantAccess">PetscObjectSAWsGrantAccess</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes);
+<a name="line877">877: </a>    SNESLogConvergenceHistory(snes,snes-&gt;norm,0);
+<a name="line878">878: </a>    <A href="../../../../docs/manualpages/SNES/SNESMonitor.html#SNESMonitor">SNESMonitor</A>(snes,snes-&gt;iter,snes-&gt;norm);
+<a name="line879">879: </a>    <font color="#B22222">/* Test for convergence */</font>
+<a name="line880">880: </a>    <font color="#4169E1">if</font> (normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_ALWAYS.html#SNES_NORM_ALWAYS">SNES_NORM_ALWAYS</A>) {(*snes-&gt;ops-&gt;converged)(snes,snes-&gt;iter,0.0,0.0,fnorm,&amp;snes-&gt;reason,snes-&gt;cnvP);}
+<a name="line881">881: </a>    <font color="#4169E1">if</font> (snes-&gt;reason) <font color="#4169E1">break</font>;
+<a name="line882">882: </a>    <font color="#B22222">/* Call general purpose update function */</font>
+<a name="line883">883: </a>    <font color="#4169E1">if</font> (snes-&gt;ops-&gt;update) {(*snes-&gt;ops-&gt;update)(snes, snes-&gt;iter);}
+<a name="line884">884: </a>  }
+<a name="line885">885: </a>  <font color="#4169E1">if</font> (nasm-&gt;finaljacobian) {SNESNASMComputeFinalJacobian_Private(snes,X);}
+<a name="line886">886: </a>  <font color="#4169E1">if</font> (normschedule == <A href="../../../../docs/manualpages/SNES/SNES_NORM_ALWAYS.html#SNES_NORM_ALWAYS">SNES_NORM_ALWAYS</A>) {
+<a name="line887">887: </a>    <font color="#4169E1">if</font> (i == snes-&gt;max_its) {
+<a name="line888">888: </a>      PetscInfo1(snes,<font color="#666666">"Maximum number of iterations has been reached: %D\n"</font>,snes-&gt;max_its);
+<a name="line889">889: </a>      <font color="#4169E1">if</font> (!snes-&gt;reason) snes-&gt;reason = <A href="../../../../docs/manualpages/SNES/SNES_DIVERGED_MAX_IT.html#SNES_DIVERGED_MAX_IT">SNES_DIVERGED_MAX_IT</A>;
+<a name="line890">890: </a>    }
+<a name="line891">891: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (!snes-&gt;reason) snes-&gt;reason = SNES_CONVERGED_ITS; <font color="#B22222">/* NASM is meant to be used as a preconditioner */</font>
+<a name="line892">892: </a>  <font color="#4169E1">return</font>(0);
+<a name="line893">893: </a>}
+
+<a name="line895">895: </a><font color="#B22222">/*MC</font>
+<a name="line896">896: </a><font color="#B22222">  <A href="../../../../docs/manualpages/SNES/SNESNASM.html#SNESNASM">SNESNASM</A> - Nonlinear Additive Schwartz</font>
+
+<a name="line898">898: </a><font color="#B22222">   Options Database:</font>
+<a name="line899">899: </a><font color="#B22222">+  -snes_nasm_log - enable logging events for the communication and solve stages</font>
+<a name="line900">900: </a><font color="#B22222">.  -snes_nasm_type &lt;basic,restrict&gt; - type of subdomain update used</font>
+<a name="line901">901: </a><font color="#B22222">.  -snes_nasm_finaljacobian - compute the local and global jacobians of the final iterate</font>
+<a name="line902">902: </a><font color="#B22222">.  -snes_nasm_finaljacobian_type &lt;finalinner,finalouter,initial&gt; pick state the jacobian is calculated at</font>
+<a name="line903">903: </a><font color="#B22222">.  -sub_snes_ - options prefix of the subdomain nonlinear solves</font>
+<a name="line904">904: </a><font color="#B22222">.  -sub_ksp_ - options prefix of the subdomain Krylov solver</font>
+<a name="line905">905: </a><font color="#B22222">-  -sub_pc_ - options prefix of the subdomain preconditioner</font>
+
+<a name="line907">907: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line909">909: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(), <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>, <A href="../../../../docs/manualpages/SNES/SNESSetType.html#SNESSetType">SNESSetType</A>(), <A href="../../../../docs/manualpages/SNES/SNESType.html#SNESType">SNESType</A> (for list of available types)</font>
+<a name="line910">910: </a><font color="#B22222">M*/</font>
+
+<a name="line914">914: </a><strong><font color="#4169E1"><a name="SNESCreate_NASM"></a>PETSC_EXTERN <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SNESCreate_NASM(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes)</font></strong>
+<a name="line915">915: </a>{
+<a name="line916">916: </a>  SNES_NASM      *nasm;
+
+<a name="line920">920: </a>  <A href="../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(snes,&amp;nasm);
+<a name="line921">921: </a>  snes-&gt;data = (void*)nasm;
+
+<a name="line923">923: </a>  nasm-&gt;n        = <A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>;
+<a name="line924">924: </a>  nasm-&gt;subsnes  = 0;
+<a name="line925">925: </a>  nasm-&gt;x        = 0;
+<a name="line926">926: </a>  nasm-&gt;xl       = 0;
+<a name="line927">927: </a>  nasm-&gt;y        = 0;
+<a name="line928">928: </a>  nasm-&gt;b        = 0;
+<a name="line929">929: </a>  nasm-&gt;oscatter = 0;
+<a name="line930">930: </a>  nasm-&gt;iscatter = 0;
+<a name="line931">931: </a>  nasm-&gt;gscatter = 0;
+<a name="line932">932: </a>  nasm-&gt;damping  = 1.;
+
+<a name="line934">934: </a>  nasm-&gt;type = PC_ASM_BASIC;
+<a name="line935">935: </a>  nasm-&gt;finaljacobian = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line936">936: </a>  nasm-&gt;same_local_solves = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+
+<a name="line938">938: </a>  snes-&gt;ops-&gt;destroy        = SNESDestroy_NASM;
+<a name="line939">939: </a>  snes-&gt;ops-&gt;setup          = SNESSetUp_NASM;
+<a name="line940">940: </a>  snes-&gt;ops-&gt;setfromoptions = SNESSetFromOptions_NASM;
+<a name="line941">941: </a>  snes-&gt;ops-&gt;view           = SNESView_NASM;
+<a name="line942">942: </a>  snes-&gt;ops-&gt;solve          = SNESSolve_NASM;
+<a name="line943">943: </a>  snes-&gt;ops-&gt;reset          = SNESReset_NASM;
+
+<a name="line945">945: </a>  snes-&gt;usesksp = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line946">946: </a>  snes-&gt;usespc  = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line948">948: </a>  nasm-&gt;fjtype              = 0;
+<a name="line949">949: </a>  nasm-&gt;xinit               = NULL;
+<a name="line950">950: </a>  nasm-&gt;eventrestrictinterp = 0;
+<a name="line951">951: </a>  nasm-&gt;eventsubsolve       = 0;
+
+<a name="line953">953: </a>  <font color="#4169E1">if</font> (!snes-&gt;tolerancesset) {
+<a name="line954">954: </a>    snes-&gt;max_its   = 10000;
+<a name="line955">955: </a>    snes-&gt;max_funcs = 10000;
+<a name="line956">956: </a>  }
+
+<a name="line958">958: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetType_C"</font>,SNESNASMSetType_NASM);
+<a name="line959">959: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetType_C"</font>,SNESNASMGetType_NASM);
+<a name="line960">960: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetSubdomains_C"</font>,SNESNASMSetSubdomains_NASM);
+<a name="line961">961: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetSubdomains_C"</font>,SNESNASMGetSubdomains_NASM);
+<a name="line962">962: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetDamping_C"</font>,SNESNASMSetDamping_NASM);
+<a name="line963">963: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetDamping_C"</font>,SNESNASMGetDamping_NASM);
+<a name="line964">964: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMGetSubdomainVecs_C"</font>,SNESNASMGetSubdomainVecs_NASM);
+<a name="line965">965: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectComposeFunction.html#PetscObjectComposeFunction">PetscObjectComposeFunction</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)snes,<font color="#666666">"SNESNASMSetComputeFinalJacobian_C"</font>,SNESNASMSetComputeFinalJacobian_NASM);
+<a name="line966">966: </a>  <font color="#4169E1">return</font>(0);
+<a name="line967">967: </a>}
+
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,297 @@
+<center><a href="aijAssemble.cu">Actual source code: aijAssemble.cu</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/mat/impls/aij/seq/seqcusp/aijAssemble.cu.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:22:01+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/mat/impls/aij/seq/seqcusp/aijAssemble.cu.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a><font color="#A020F0">#include &lt;petscconf.h&gt;</font>
+<a name="line2">  2: </a>PETSC_CUDA_EXTERN_C_BEGIN
+<a name="line3">  3: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/seq/aij.h&gt;          </font><font color="#B22222">/*I "petscmat.h" I*/</font><font color="#A020F0"></font>
+<a name="line4">  4: </a><font color="#A020F0">#include &lt;petscbt.h&gt;</font>
+<a name="line5">  5: </a><font color="#A020F0">#include &lt;../src/vec/vec/impls/dvecimpl.h&gt;</font>
+<a name="line6">  6: </a><font color="#A020F0">#include &lt;petsc-private/vecimpl.h&gt;</font>
+<a name="line7">  7: </a>PETSC_CUDA_EXTERN_C_END
+<a name="line8">  8: </a><strong><font color="#228B22">#undef <A href="../../../../../../docs/manualpages/Vec/VecType.html#VecType">VecType</A></font></strong>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;../src/mat/impls/aij/seq/seqcusp/cuspmatimpl.h&gt;</font>
+
+<a name="line11"> 11: </a><font color="#A020F0">#include &lt;thrust/reduce.h&gt;</font>
+<a name="line12"> 12: </a><font color="#A020F0">#include &lt;thrust/inner_product.h&gt;</font>
+
+<a name="line14"> 14: </a><font color="#A020F0">#include &lt;cusp/array1d.h&gt;</font>
+<a name="line15"> 15: </a><font color="#A020F0">#include &lt;cusp/print.h&gt;</font>
+<a name="line16"> 16: </a><font color="#A020F0">#include &lt;cusp/coo_matrix.h&gt;</font>
+
+<a name="line18"> 18: </a><font color="#A020F0">#include &lt;cusp/io/matrix_market.h&gt;</font>
+
+<a name="line20"> 20: </a><font color="#A020F0">#include &lt;thrust/iterator/counting_iterator.h&gt;</font>
+<a name="line21"> 21: </a><font color="#A020F0">#include &lt;thrust/iterator/transform_iterator.h&gt;</font>
+<a name="line22"> 22: </a><font color="#A020F0">#include &lt;thrust/iterator/permutation_iterator.h&gt;</font>
+<a name="line23"> 23: </a><font color="#A020F0">#include &lt;thrust/functional.h&gt;</font>
+
+<a name="line25"> 25: </a>// this example illustrates how to make repeated access to a range of values
+<a name="line26"> 26: </a>// examples:
+<a name="line27"> 27: </a>//   repeated_range([0, 1, 2, 3], 1) -&gt; [0, 1, 2, 3]
+<a name="line28"> 28: </a>//   repeated_range([0, 1, 2, 3], 2) -&gt; [0, 0, 1, 1, 2, 2, 3, 3]
+<a name="line29"> 29: </a>//   repeated_range([0, 1, 2, 3], 3) -&gt; [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
+<a name="line30"> 30: </a>//   ...
+
+<a name="line32"> 32: </a>template &lt;typename Iterator&gt;
+<a name="line33"> 33: </a>class repeated_range
+<a name="line34"> 34: </a>{
+<a name="line35"> 35: </a><strong><font color="#FF0000">public:</font></strong>
+
+<a name="line37"> 37: </a>  <font color="#4169E1">typedef</font> typename thrust::iterator_difference&lt;Iterator&gt;::type difference_type;
+
+<a name="line39"> 39: </a>  <font color="#4169E1">struct repeat_functor</font> : public thrust::unary_function&lt;difference_type,difference_type&gt;
+<a name="line40"> 40: </a>  {
+<a name="line41"> 41: </a>    difference_type repeats;
+
+<a name="line43"> 43: </a>    repeat_functor(difference_type repeats) : repeats(repeats) {}
+
+<a name="line45"> 45: </a>    __host__ __device__
+<a name="line46"> 46: </a>    difference_type operator()(const difference_type &amp;i) const {
+<a name="line47"> 47: </a>      <font color="#4169E1">return</font> i / repeats;
+<a name="line48"> 48: </a>    }
+<a name="line49"> 49: </a>  };
+
+<a name="line51"> 51: </a>  <font color="#4169E1">typedef</font> typename thrust::counting_iterator&lt;difference_type&gt;                   CountingIterator;
+<a name="line52"> 52: </a>  <font color="#4169E1">typedef</font> typename thrust::transform_iterator&lt;repeat_functor, CountingIterator&gt; TransformIterator;
+<a name="line53"> 53: </a>  <font color="#4169E1">typedef</font> typename thrust::permutation_iterator&lt;Iterator,TransformIterator&gt;     PermutationIterator;
+
+<a name="line55"> 55: </a>  // type of the repeated_range iterator
+<a name="line56"> 56: </a>  <font color="#4169E1">typedef</font> PermutationIterator iterator;
+
+<a name="line58"> 58: </a>  // construct repeated_range <font color="#4169E1">for</font> the range [first,last)
+<a name="line59"> 59: </a>  repeated_range(Iterator first, Iterator last, difference_type repeats) : first(first), last(last), repeats(repeats) {}
+
+<a name="line61"> 61: </a>  iterator begin(void) const
+<a name="line62"> 62: </a>  {
+<a name="line63"> 63: </a>    <font color="#4169E1">return</font> PermutationIterator(first, TransformIterator(CountingIterator(0), repeat_functor(repeats)));
+<a name="line64"> 64: </a>  }
+
+<a name="line66"> 66: </a>  iterator end(void) const
+<a name="line67"> 67: </a>  {
+<a name="line68"> 68: </a>    <font color="#4169E1">return</font> begin() + repeats * (last - first);
+<a name="line69"> 69: </a>  }
+
+<a name="line71"> 71: </a><strong><font color="#FF0000">protected:</font></strong>
+<a name="line72"> 72: </a>  difference_type repeats;
+<a name="line73"> 73: </a>  Iterator        first;
+<a name="line74"> 74: </a>  Iterator        last;
+
+<a name="line76"> 76: </a>};
+
+<a name="line78"> 78: </a>// this example illustrates how to repeat blocks in a range multiple times
+<a name="line79"> 79: </a>// examples:
+<a name="line80"> 80: </a>//   tiled_range([0, 1, 2, 3], 2)    -&gt; [0, 1, 2, 3, 0, 1, 2, 3]
+<a name="line81"> 81: </a>//   tiled_range([0, 1, 2, 3], 4, 2) -&gt; [0, 1, 2, 3, 0, 1, 2, 3]
+<a name="line82"> 82: </a>//   tiled_range([0, 1, 2, 3], 2, 2) -&gt; [0, 1, 0, 1, 2, 3, 2, 3]
+<a name="line83"> 83: </a>//   tiled_range([0, 1, 2, 3], 2, 3) -&gt; [0, 1, 0, 1 0, 1, 2, 3, 2, 3, 2, 3]
+<a name="line84"> 84: </a>//   ...
+
+<a name="line86"> 86: </a>template &lt;typename Iterator&gt;
+<a name="line87"> 87: </a>class tiled_range
+<a name="line88"> 88: </a>{
+<a name="line89"> 89: </a><strong><font color="#FF0000">public:</font></strong>
+
+<a name="line91"> 91: </a>  <font color="#4169E1">typedef</font> typename thrust::iterator_difference&lt;Iterator&gt;::type difference_type;
+
+<a name="line93"> 93: </a>  <font color="#4169E1">struct tile_functor</font> : public thrust::unary_function&lt;difference_type,difference_type&gt;
+<a name="line94"> 94: </a>  {
+<a name="line95"> 95: </a>    difference_type repeats;
+<a name="line96"> 96: </a>    difference_type tile_size;
+
+<a name="line98"> 98: </a>    tile_functor(difference_type repeats, difference_type tile_size) : tile_size(tile_size), repeats(repeats) {}
+
+<a name="line100">100: </a>    __host__ __device__
+<a name="line101">101: </a>    difference_type operator()(const difference_type &amp;i) const {
+<a name="line102">102: </a>      <font color="#4169E1">return</font> tile_size * (i / (tile_size * repeats)) + i % tile_size;
+<a name="line103">103: </a>    }
+<a name="line104">104: </a>  };
+
+<a name="line106">106: </a>  <font color="#4169E1">typedef</font> typename thrust::counting_iterator&lt;difference_type&gt;                   CountingIterator;
+<a name="line107">107: </a>  <font color="#4169E1">typedef</font> typename thrust::transform_iterator&lt;tile_functor, CountingIterator&gt;   TransformIterator;
+<a name="line108">108: </a>  <font color="#4169E1">typedef</font> typename thrust::permutation_iterator&lt;Iterator,TransformIterator&gt;     PermutationIterator;
+
+<a name="line110">110: </a>  // type of the tiled_range iterator
+<a name="line111">111: </a>  <font color="#4169E1">typedef</font> PermutationIterator iterator;
+
+<a name="line113">113: </a>  // construct repeated_range <font color="#4169E1">for</font> the range [first,last)
+<a name="line114">114: </a>  tiled_range(Iterator first, Iterator last, difference_type repeats)
+<a name="line115">115: </a>    : first(first), last(last), repeats(repeats), tile_size(last - first) {}
+
+<a name="line117">117: </a>  tiled_range(Iterator first, Iterator last, difference_type repeats, difference_type tile_size)
+<a name="line118">118: </a>    : first(first), last(last), repeats(repeats), tile_size(tile_size)
+<a name="line119">119: </a>  {
+<a name="line120">120: </a>    // ASSERT((last - first) % tile_size == 0)
+<a name="line121">121: </a>  }
+
+<a name="line123">123: </a>  iterator begin(void) const
+<a name="line124">124: </a>  {
+<a name="line125">125: </a>    <font color="#4169E1">return</font> PermutationIterator(first, TransformIterator(CountingIterator(0), tile_functor(repeats, tile_size)));
+<a name="line126">126: </a>  }
+
+<a name="line128">128: </a>  iterator end(void) const
+<a name="line129">129: </a>  {
+<a name="line130">130: </a>    <font color="#4169E1">return</font> begin() + repeats * (last - first);
+<a name="line131">131: </a>  }
+
+<a name="line133">133: </a><strong><font color="#FF0000">protected:</font></strong>
+<a name="line134">134: </a>  difference_type repeats;
+<a name="line135">135: </a>  difference_type tile_size;
+<a name="line136">136: </a>  Iterator        first;
+<a name="line137">137: </a>  Iterator        last;
+<a name="line138">138: </a>};
+
+<a name="line140">140: </a><font color="#4169E1">typedef</font> cusp::device_memory memSpace;
+<a name="line141">141: </a><font color="#4169E1">typedef int IndexType;</font>
+<a name="line142">142: </a><font color="#4169E1">typedef <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> ValueType;</font>
+<a name="line143">143: </a><font color="#4169E1">typedef</font> cusp::array1d&lt;IndexType, memSpace&gt; IndexArray;
+<a name="line144">144: </a><font color="#4169E1">typedef</font> cusp::array1d&lt;ValueType, memSpace&gt; ValueArray;
+<a name="line145">145: </a><font color="#4169E1">typedef</font> IndexArray::iterator IndexArrayIterator;
+<a name="line146">146: </a><font color="#4169E1">typedef</font> ValueArray::iterator ValueArrayIterator;
+
+<a name="line148">148: </a>// Ne: Number of elements
+<a name="line149">149: </a>// Nl: Number of dof per element
+<a name="line152">152: </a><strong><font color="#4169E1"><a name="MatSetValuesBatch_SeqAIJCUSP"></a><A href="../../../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatSetValuesBatch_SeqAIJCUSP(<A href="../../../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> J, <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> Ne, <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> Nl, <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *elemRows, const <A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *elemMats)</font></strong>
+<a name="line153">153: </a>{
+<a name="line154">154: </a>  size_t         N  = Ne * Nl;
+<a name="line155">155: </a>  size_t         No = Ne * Nl*Nl;
+<a name="line156">156: </a>  <A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       Nr; // Number of rows
+
+<a name="line159">159: </a>  // copy elemRows and elemMat to device
+<a name="line160">160: </a>  IndexArray d_elemRows(elemRows, elemRows + N);
+<a name="line161">161: </a>  ValueArray d_elemMats(elemMats, elemMats + No);
+
+<a name="line164">164: </a>  <A href="../../../../../../docs/manualpages/Mat/MatGetSize.html#MatGetSize">MatGetSize</A>(J, &amp;Nr, NULL);
+<a name="line165">165: </a>  // allocate storage <font color="#4169E1">for</font> <font color="#666666">"fat"</font> COO representation of matrix
+<a name="line166">166: </a>  PetscInfo1(J, <font color="#666666">"Making COO matrix of size %d\n"</font>, Nr);
+<a name="line167">167: </a><strong><font color="#FF0000">  cusp:</font></strong>:coo_matrix&lt;IndexType,ValueType, memSpace&gt; COO(Nr, Nr, No);
+
+<a name="line169">169: </a>  // repeat elemRows entries Nl times
+<a name="line170">170: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Making row indices\n"</font>);
+<a name="line171">171: </a>  repeated_range&lt;IndexArrayIterator&gt; rowInd(d_elemRows.begin(), d_elemRows.end(), Nl);
+<a name="line172">172: </a><strong><font color="#FF0000">  thrust:</font></strong>:copy(rowInd.begin(), rowInd.end(), COO.row_indices.begin());
+
+<a name="line174">174: </a>  // tile rows of elemRows Nl times
+<a name="line175">175: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Making column indices\n"</font>);
+<a name="line176">176: </a>  tiled_range&lt;IndexArrayIterator&gt; colInd(d_elemRows.begin(), d_elemRows.end(), Nl, Nl);
+<a name="line177">177: </a><strong><font color="#FF0000">  thrust:</font></strong>:copy(colInd.begin(), colInd.end(), COO.column_indices.begin());
+
+<a name="line179">179: </a>  // copy values from elemMats into COO structure (could be avoided)
+<a name="line180">180: </a><strong><font color="#FF0000">  thrust:</font></strong>:copy(d_elemMats.begin(), d_elemMats.end(), COO.values.begin());
+
+<a name="line182">182: </a>  // For MPIAIJ, split this into two COO matrices, and <font color="#4169E1">return</font> both
+<a name="line183">183: </a>  //   Need the column map
+
+<a name="line185">185: </a>  // print the <font color="#666666">"fat"</font> COO representation
+<a name="line186">186: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line187">187: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) cusp::print(COO);
+<a name="line188">188: </a><font color="#A020F0">#endif</font>
+<a name="line189">189: </a>  // sort COO format by (i,j), this is the most costly step
+<a name="line190">190: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Sorting rows and columns\n"</font>);
+<a name="line191">191: </a><font color="#A020F0">#if 1</font>
+<a name="line192">192: </a>  COO.sort_by_row_and_column();
+<a name="line193">193: </a><font color="#A020F0">#else</font>
+<a name="line194">194: </a>  {
+<a name="line195">195: </a>    <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Making permutation\n"</font>);
+<a name="line196">196: </a>    IndexArray permutation(No);
+<a name="line197">197: </a><strong><font color="#FF0000">    thrust:</font></strong>:sequence(permutation.begin(), permutation.end());
+
+<a name="line199">199: </a>    // compute permutation and sort by (I,J)
+<a name="line200">200: </a>    {
+<a name="line201">201: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Sorting columns\n"</font>);
+<a name="line202">202: </a>      IndexArray temp(No);
+<a name="line203">203: </a><strong><font color="#FF0000">      thrust:</font></strong>:copy(COO.column_indices.begin(), COO.column_indices.end(), temp.begin());
+<a name="line204">204: </a><strong><font color="#FF0000">      thrust:</font></strong>:stable_sort_by_key(temp.begin(), temp.end(), permutation.begin());
+<a name="line205">205: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"    Sorted columns\n"</font>);
+<a name="line206">206: </a>      <font color="#4169E1">if</font> (PetscLogPrintInfo) {
+<a name="line207">207: </a>        <font color="#4169E1">for</font> (IndexArrayIterator t_iter = temp.begin(), p_iter = permutation.begin(); t_iter != temp.end(); ++t_iter, ++p_iter) {
+<a name="line208">208: </a>          PetscInfo2(J, <font color="#666666">"%d(%d)\n"</font>, *t_iter, *p_iter);
+<a name="line209">209: </a>        }
+<a name="line210">210: </a>      }
+
+<a name="line212">212: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Copying rows\n"</font>);
+<a name="line213">213: </a>      //cusp::copy(COO.row_indices, temp);
+<a name="line214">214: </a><strong><font color="#FF0000">      thrust:</font></strong>:copy(COO.row_indices.begin(), COO.row_indices.end(), temp.begin());
+<a name="line215">215: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Gathering rows\n"</font>);
+<a name="line216">216: </a><strong><font color="#FF0000">      thrust:</font></strong>:gather(permutation.begin(), permutation.end(), temp.begin(), COO.row_indices.begin());
+<a name="line217">217: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Sorting rows\n"</font>);
+<a name="line218">218: </a><strong><font color="#FF0000">      thrust:</font></strong>:stable_sort_by_key(COO.row_indices.begin(), COO.row_indices.end(), permutation.begin());
+
+<a name="line220">220: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Gathering columns\n"</font>);
+<a name="line221">221: </a><strong><font color="#FF0000">      cusp:</font></strong>:copy(COO.column_indices, temp);
+<a name="line222">222: </a><strong><font color="#FF0000">      thrust:</font></strong>:gather(permutation.begin(), permutation.end(), temp.begin(), COO.column_indices.begin());
+<a name="line223">223: </a>    }
+
+<a name="line225">225: </a>    // use permutation to reorder the values
+<a name="line226">226: </a>    {
+<a name="line227">227: </a>      <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"  Sorting values\n"</font>);
+<a name="line228">228: </a>      ValueArray temp(COO.values);
+<a name="line229">229: </a><strong><font color="#FF0000">      cusp:</font></strong>:copy(COO.values, temp);
+<a name="line230">230: </a><strong><font color="#FF0000">      thrust:</font></strong>:gather(permutation.begin(), permutation.end(), temp.begin(), COO.values.begin());
+<a name="line231">231: </a>    }
+<a name="line232">232: </a>  }
+<a name="line233">233: </a><font color="#A020F0">#endif</font>
+
+<a name="line235">235: </a>  // print the <font color="#666666">"fat"</font> COO representation
+<a name="line236">236: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line237">237: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) cusp::print(COO);
+<a name="line238">238: </a><font color="#A020F0">#endif</font>
+<a name="line239">239: </a>  // compute number of unique (i,j) entries
+<a name="line240">240: </a>  //   this counts the number of changes as we move along the (i,j) list
+<a name="line241">241: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Computing number of unique entries\n"</font>);
+<a name="line242">242: </a>  size_t num_entries = thrust::inner_product
+<a name="line243">243: </a>                         (thrust::make_zip_iterator(thrust::make_tuple(COO.row_indices.begin(), COO.column_indices.begin())),
+<a name="line244">244: </a><strong><font color="#FF0000">                         thrust:</font></strong>:make_zip_iterator(thrust::make_tuple(COO.row_indices.end (),  COO.column_indices.end()))   - 1,
+<a name="line245">245: </a><strong><font color="#FF0000">                         thrust:</font></strong>:make_zip_iterator(thrust::make_tuple(COO.row_indices.begin(), COO.column_indices.begin())) + 1,
+<a name="line246">246: </a>                         size_t(1),
+<a name="line247">247: </a><strong><font color="#FF0000">                         thrust:</font></strong>:plus&lt;size_t&gt;(),
+<a name="line248">248: </a><strong><font color="#FF0000">                         thrust:</font></strong>:not_equal_to&lt; thrust::tuple&lt;IndexType,IndexType&gt; &gt;());
+
+<a name="line250">250: </a>  // allocate COO storage <font color="#4169E1">for</font> final matrix
+<a name="line251">251: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Allocating compressed matrix\n"</font>);
+<a name="line252">252: </a><strong><font color="#FF0000">  cusp:</font></strong>:coo_matrix&lt;IndexType, ValueType, memSpace&gt; A(Nr, Nr, num_entries);
+
+<a name="line254">254: </a>  // sum values with the same (i,j) index
+<a name="line255">255: </a>  // XXX thrust::reduce_by_key is unoptimized right now, so we provide a SpMV-based one in cusp::detail
+<a name="line256">256: </a>  //     the Cusp one is 2x faster, but still not optimal
+<a name="line257">257: </a>  // This could possibly be done in-place
+<a name="line258">258: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Compressing matrix\n"</font>);
+<a name="line259">259: </a><strong><font color="#FF0000">  thrust:</font></strong>:reduce_by_key(thrust::make_zip_iterator(thrust::make_tuple(COO.row_indices.begin(), COO.column_indices.begin())),
+<a name="line260">260: </a><strong><font color="#FF0000">                        thrust:</font></strong>:make_zip_iterator(thrust::make_tuple(COO.row_indices.end(),   COO.column_indices.end())),
+<a name="line261">261: </a>                        COO.values.begin(),
+<a name="line262">262: </a><strong><font color="#FF0000">                        thrust:</font></strong>:make_zip_iterator(thrust::make_tuple(A.row_indices.begin(), A.column_indices.begin())),
+<a name="line263">263: </a>                        A.values.begin(),
+<a name="line264">264: </a><strong><font color="#FF0000">                        thrust:</font></strong>:equal_to&lt; thrust::tuple&lt;IndexType,IndexType&gt; &gt;(),
+<a name="line265">265: </a><strong><font color="#FF0000">                        thrust:</font></strong>:plus&lt;ValueType&gt;());
+
+<a name="line267">267: </a>  // print the final matrix
+<a name="line268">268: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line269">269: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) cusp::print(A);
+<a name="line270">270: </a><font color="#A020F0">#endif</font>
+<a name="line271">271: </a>  //std::cout &lt;&lt; <font color="#666666">"Writing matrix"</font> &lt;&lt; std::endl;
+<a name="line272">272: </a>  //cusp::io::write_matrix_market_file(A, <font color="#666666">"A.mtx"</font>);
+
+<a name="line274">274: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Converting to PETSc matrix\n"</font>);
+<a name="line275">275: </a>  <A href="../../../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(J, <A href="../../../../../../docs/manualpages/Mat/MATSEQAIJCUSP.html#MATSEQAIJCUSP">MATSEQAIJCUSP</A>);
+<a name="line276">276: </a>  //cusp::csr_matrix&lt;<A href="../../../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>,<A href="../../../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>,cusp::device_memory&gt; Jgpu;
+<a name="line277">277: </a>  CUSPMATRIX *Jgpu = new CUSPMATRIX;
+<a name="line278">278: </a><strong><font color="#FF0000">  cusp:</font></strong>:convert(A, *Jgpu);
+<a name="line279">279: </a><font color="#A020F0">#if !defined(PETSC_USE_COMPLEX)</font>
+<a name="line280">280: </a>  <font color="#4169E1">if</font> (PetscLogPrintInfo) cusp::print(*Jgpu);
+<a name="line281">281: </a><font color="#A020F0">#endif</font>
+<a name="line282">282: </a>  <A href="../../../../../../docs/manualpages/Profiling/PetscInfo.html#PetscInfo">PetscInfo</A>(J, <font color="#666666">"Copying to CPU matrix\n"</font>);
+<a name="line283">283: </a>  MatCUSPCopyFromGPU(J, Jgpu);
+<a name="line284">284: </a>  <font color="#4169E1">return</font>(0);
+<a name="line285">285: </a>}
+</pre>
+</body>
+
+</html>

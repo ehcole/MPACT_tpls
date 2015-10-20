@@ -1,0 +1,984 @@
+<center><a href="ex633d_db.c">Actual source code: ex633d_db.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/examples/tutorials/ex633d_db.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:36:15+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/snes/examples/tutorials/ex633d_db.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a>static char help[] = <font color="#666666">"3D coupled Allen-Cahn and Cahn-Hilliard equation for degenerate mobility and triangular elements.\n\</font>
+<a name="line2">  2: </a><font color="#666666">Runtime options include:\n\</font>
+<a name="line3">  3: </a><font color="#666666">-xmin &lt;xmin&gt;\n\</font>
+<a name="line4">  4: </a><font color="#666666">-xmax &lt;xmax&gt;\n\</font>
+<a name="line5">  5: </a><font color="#666666">-ymin &lt;ymin&gt;\n\</font>
+<a name="line6">  6: </a><font color="#666666">-T &lt;T&gt;, where &lt;T&gt; is the end time for the time domain simulation\n\</font>
+<a name="line7">  7: </a><font color="#666666">-dt &lt;dt&gt;,where &lt;dt&gt; is the step size for the numerical integration\n\</font>
+<a name="line8">  8: </a><font color="#666666">-gamma &lt;gamma&gt;\n\</font>
+<a name="line9">  9: </a><font color="#666666">-theta_c &lt;theta_c&gt;\n\n"</font>;
+
+<a name="line11"> 11: </a><font color="#B22222">/*</font>
+<a name="line12"> 12: </a><font color="#B22222">./ex633d_db -ksp_type fgmres -snes_vi_monitor -snes_atol 1.e-11 -snes_converged_reason -ksp_converged_reason -snes_linesearch_monitor -VG 10000000  -pc_type mg -pc_mg_galerkin -log_summary -dt .000001 -mg_coarse_pc_type svd  -ksp_monitor_true_residual -ksp_rtol 1.e-9 -snes_linesearch_type basic -T .0020 -P_casc .0005 -snes_monitor_solution -da_refine 1</font>
+<a name="line13"> 13: </a><font color="#B22222">./ex633d_db -ksp_type fgmres -snes_vi_monitor -snes_atol 1.e-11 -snes_converged_reason -ksp_converged_reason -snes_linesearch_monitor -VG 10000000  -pc_type mg -pc_mg_galerkin -log_summary  -da_refine 1</font>
+
+<a name="line15"> 15: </a><font color="#B22222"> */</font>
+
+<a name="line17"> 17: </a><font color="#A020F0">#include &lt;petscsnes.h&gt;</font>
+<a name="line18"> 18: </a><font color="#A020F0">#include &lt;petscdmda.h&gt;</font>
+
+<a name="line20"> 20: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line21"> 21: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   dt,T; <font color="#B22222">/* Time step and end time */</font>
+<a name="line22"> 22: </a>  DM          da1,da1_clone,da2;
+<a name="line23"> 23: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         M;    <font color="#B22222">/* Jacobian matrix */</font>
+<a name="line24"> 24: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         M_0;
+<a name="line25"> 25: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         q,wv,cv,wi,ci,eta,cvi,DPsiv,DPsii,DPsieta,Pv,Pi,Piv,logcv,logci,logcvi,Riv;
+<a name="line26"> 26: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         work1,work2,work3,work4;
+<a name="line27"> 27: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> Dv,Di,Evf,Eif,A,kBT,kav,kai,kaeta,Rsurf,Rbulk,L,P_casc,VG; <font color="#B22222">/* physics parameters */</font>
+<a name="line28"> 28: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   xmin,xmax,ymin,ymax,zmin,zmax;
+<a name="line29"> 29: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    nx;
+<a name="line30"> 30: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>   voidgrowth;
+<a name="line31"> 31: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>   degenerate;
+<a name="line32"> 32: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>   periodic;
+<a name="line33"> 33: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   smallnumber;
+<a name="line34"> 34: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   initv;
+<a name="line35"> 35: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>   initeta;
+<a name="line36"> 36: </a>} AppCtx;
+
+<a name="line38"> 38: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> GetParams(AppCtx*)</font></strong>;
+<a name="line39"> 39: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetRandomVectors(AppCtx*)</font></strong>;
+<a name="line40"> 40: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetVariableBounds(DM,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line41"> 41: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetUpMatrices(AppCtx*)</font></strong>;
+<a name="line42"> 42: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> UpdateMatrices(AppCtx*)</font></strong>;
+<a name="line43"> 43: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,void*)</font></strong>;
+<a name="line44"> 44: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormJacobian(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,void*)</font></strong>;
+<a name="line45"> 45: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetInitialGuess(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,AppCtx*)</font></strong>;
+<a name="line46"> 46: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Update_q(AppCtx*)</font></strong>;
+<a name="line47"> 47: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Update_u(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,AppCtx*)</font></strong>;
+<a name="line48"> 48: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DPsi(AppCtx*)</font></strong>;
+<a name="line49"> 49: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Llog(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line50"> 50: </a><strong><font color="#4169E1"><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> CheckRedundancy(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A>,<A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A>*,DM)</font></strong>;
+
+<a name="line54"> 54: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char **argv)</font></strong>
+<a name="line55"> 55: </a>{
+<a name="line57"> 57: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            x,r;  <font color="#B22222">/* olution and residual vectors */</font>
+<a name="line58"> 58: </a>  <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>           snes; <font color="#B22222">/* Nonlinear solver context */</font>
+<a name="line59"> 59: </a>  AppCtx         user; <font color="#B22222">/* Application context */</font>
+<a name="line60"> 60: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            xl,xu; <font color="#B22222">/* Upper and lower bounds on variables */</font>
+<a name="line61"> 61: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>            J;
+<a name="line62"> 62: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    t=0.0;
+<a name="line63"> 63: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    view_out, view_p, view_q, view_psi, view_mat;
+<a name="line64"> 64: </a>  <A href="../../../../docs/manualpages/Sys/PetscReal.html#PetscReal">PetscReal</A>      bounds[] = {1000.0,-1000.,0.0,1.0,1000.0,-1000.0,0.0,1.0,1000.0,-1000.0};
+
+
+<a name="line67"> 67: </a>  <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(&amp;argc,&amp;argv, (char*)0, help);
+
+
+<a name="line70"> 70: </a>  <font color="#B22222">/* Get physics and time parameters */</font>
+<a name="line71"> 71: </a>  GetParams(&amp;user);
+
+<a name="line73"> 73: </a>  <font color="#4169E1">if</font> (user.periodic) {
+<a name="line74"> 74: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 5, 1,NULL,NULL,NULL,&amp;user.da1);
+<a name="line75"> 75: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 5, 1,NULL,NULL,NULL,&amp;user.da1_clone);
+<a name="line76"> 76: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,DM_BOUNDARY_PERIODIC,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 1, 1,NULL,NULL,NULL,&amp;user.da2);
+
+<a name="line78"> 78: </a>  } <font color="#4169E1">else</font> {
+<a name="line79"> 79: </a>    <font color="#B22222">/* Create a 1D DA with dof = 5; the whole thing */</font>
+<a name="line80"> 80: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 5, 1,NULL,NULL,NULL,&amp;user.da1);
+<a name="line81"> 81: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 5, 1,NULL,NULL,NULL,&amp;user.da1_clone);
+<a name="line82"> 82: </a>    <font color="#B22222">/* Create a 1D DA with dof = 1; for individual componentes */</font>
+<a name="line83"> 83: </a>    <A href="../../../../docs/manualpages/DM/DMDACreate3d.html#DMDACreate3d">DMDACreate3d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,DM_BOUNDARY_NONE,<A href="../../../../docs/manualpages/DM/DMDA_STENCIL_BOX.html#DMDA_STENCIL_BOX">DMDA_STENCIL_BOX</A>, -3,-3,-3,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>, 1, 1,NULL,NULL,NULL,&amp;user.da2);
+<a name="line84"> 84: </a>  }
+
+<a name="line86"> 86: </a>  <font color="#B22222">/* Set Element type (rectangular) */</font>
+<a name="line87"> 87: </a>  <A href="../../../../docs/manualpages/DM/DMDASetElementType.html#DMDASetElementType">DMDASetElementType</A>(user.da1,DMDA_ELEMENT_Q1);
+<a name="line88"> 88: </a>  <A href="../../../../docs/manualpages/DM/DMDASetElementType.html#DMDASetElementType">DMDASetElementType</A>(user.da2,DMDA_ELEMENT_Q1);
+
+<a name="line90"> 90: </a>  <font color="#B22222">/* Set x and y coordinates */</font>
+<a name="line91"> 91: </a>  <A href="../../../../docs/manualpages/DM/DMDASetUniformCoordinates.html#DMDASetUniformCoordinates">DMDASetUniformCoordinates</A>(user.da1,user.xmin,user.xmax,user.ymin,user.ymax, user.zmin,user.zmax);
+<a name="line92"> 92: </a>  <A href="../../../../docs/manualpages/DM/DMDASetUniformCoordinates.html#DMDASetUniformCoordinates">DMDASetUniformCoordinates</A>(user.da2,user.xmin,user.xmax,user.ymin,user.ymax, user.zmin,user.zmax);
+
+<a name="line94"> 94: </a>  <font color="#B22222">/* Get global vector x from DM (da1) and duplicate vectors r,xl,xu */</font>
+<a name="line95"> 95: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(user.da1,&amp;x);
+<a name="line96"> 96: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,&amp;r);
+<a name="line97"> 97: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,&amp;xl);
+<a name="line98"> 98: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,&amp;xu);
+<a name="line99"> 99: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,&amp;user.q);
+
+
+<a name="line102">102: </a>  <font color="#B22222">/* Get global vector user-&gt;wv from da2 and duplicate other vectors */</font>
+<a name="line103">103: </a>  <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(user.da2,&amp;user.wv);
+<a name="line104">104: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.cv);
+<a name="line105">105: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.wi);
+<a name="line106">106: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.ci);
+<a name="line107">107: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.eta);
+<a name="line108">108: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.cvi);
+<a name="line109">109: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.DPsiv);
+<a name="line110">110: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.DPsii);
+<a name="line111">111: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.DPsieta);
+<a name="line112">112: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.Pv);
+<a name="line113">113: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.Pi);
+<a name="line114">114: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.Piv);
+<a name="line115">115: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.Riv);
+<a name="line116">116: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.logcv);
+<a name="line117">117: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.logci);
+<a name="line118">118: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.logcvi);
+<a name="line119">119: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.work1);
+<a name="line120">120: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.work2);
+<a name="line121">121: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.work3);
+<a name="line122">122: </a>  <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(user.wv,&amp;user.work4);
+
+<a name="line124">124: </a>  <font color="#B22222">/* Get Jacobian matrix structure from the da for the entire thing, da1 */</font>
+<a name="line125">125: </a>  <A href="../../../../docs/manualpages/DM/DMSetMatType.html#DMSetMatType">DMSetMatType</A>(user.da1,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>);
+<a name="line126">126: </a>  <A href="../../../../docs/manualpages/DM/DMCreateMatrix.html#DMCreateMatrix">DMCreateMatrix</A>(user.da1,&amp;user.M);
+<a name="line127">127: </a>  <font color="#B22222">/* Get the (usual) mass matrix structure from da2 */</font>
+<a name="line128">128: </a>  <A href="../../../../docs/manualpages/DM/DMSetMatType.html#DMSetMatType">DMSetMatType</A>(user.da2,<A href="../../../../docs/manualpages/Mat/MATAIJ.html#MATAIJ">MATAIJ</A>);
+<a name="line129">129: </a>  <A href="../../../../docs/manualpages/DM/DMCreateMatrix.html#DMCreateMatrix">DMCreateMatrix</A>(user.da2,&amp;user.M_0);
+
+<a name="line131">131: </a>  SetInitialGuess(x,&amp;user);
+
+<a name="line133">133: </a>  <font color="#B22222">/* Form the jacobian matrix and M_0 */</font>
+<a name="line134">134: </a>  SetUpMatrices(&amp;user);
+
+
+<a name="line137">137: </a>  <A href="../../../../docs/manualpages/Mat/MatDuplicate.html#MatDuplicate">MatDuplicate</A>(user.M,MAT_DO_NOT_COPY_VALUES,&amp;J);
+
+<a name="line139">139: </a>  <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;snes);
+<a name="line140">140: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetDM.html#SNESSetDM">SNESSetDM</A>(snes,user.da1);
+
+<a name="line142">142: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(snes,r,FormFunction,(void*)&amp;user);
+<a name="line143">143: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,FormJacobian,(void*)&amp;user);
+
+<a name="line145">145: </a>  SetVariableBounds(user.da1,xl,xu);
+<a name="line146">146: </a>  <font color="#B22222">/* SNESVISetRedundancyCheck(snes,(<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>,<A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A>,<A href="../../../../docs/manualpages/IS/IS.html#IS">IS</A>*,void*))CheckRedundancy,user.da1_clone); */</font>
+<a name="line147">147: </a>  <A href="../../../../docs/manualpages/SNES/SNESVISetVariableBounds.html#SNESVISetVariableBounds">SNESVISetVariableBounds</A>(snes,xl,xu);
+<a name="line148">148: </a>  <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(snes);
+
+<a name="line150">150: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_out"</font>,FILE_MODE_WRITE,&amp;view_out);
+<a name="line151">151: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_p"</font>,FILE_MODE_WRITE,&amp;view_p);
+<a name="line152">152: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_q"</font>,FILE_MODE_WRITE,&amp;view_q);
+<a name="line153">153: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_psi"</font>,FILE_MODE_WRITE,&amp;view_psi);
+<a name="line154">154: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_mat"</font>,FILE_MODE_WRITE,&amp;view_mat);
+
+
+<a name="line157">157: </a>  <font color="#B22222">/*</font>
+<a name="line158">158: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,"file_q",FILE_MODE_WRITE,&amp;view_q);</font>
+<a name="line159">159: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,"file_mat",FILE_MODE_WRITE,&amp;view_mat);</font>
+
+<a name="line161">161: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.q,view_q);</font>
+<a name="line162">162: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>(user.M,view_mat);</font>
+
+<a name="line164">164: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_q);</font>
+<a name="line165">165: </a><font color="#B22222">  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_mat);</font>
+<a name="line166">166: </a><font color="#B22222"> */</font>
+
+
+
+<a name="line170">170: </a>  <font color="#4169E1">while</font> (t&lt;user.T) {
+<a name="line171">171: </a>    char        filename[PETSC_MAX_PATH_LEN];
+<a name="line172">172: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a = 1.0;
+<a name="line173">173: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    i;
+<a name="line174">174: </a>    <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> view;
+
+
+<a name="line177">177: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(snes,r,FormFunction,(void*)&amp;user);
+<a name="line178">178: </a>    <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,FormJacobian,(void*)&amp;user);
+
+<a name="line180">180: </a>    SetRandomVectors(&amp;user);
+<a name="line181">181: </a>    DPsi(&amp;user);
+<a name="line182">182: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.DPsiv,view_psi);
+<a name="line183">183: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.DPsii,view_psi);
+<a name="line184">184: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.DPsieta,view_psi);
+
+<a name="line186">186: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.Pv,view_p);
+<a name="line187">187: </a>    Update_q(&amp;user);
+<a name="line188">188: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.q,view_q);
+
+<a name="line190">190: </a>    printf(<font color="#666666">"after <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>\n"</font>);
+<a name="line191">191: </a>    <A href="../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>(user.M,view_mat);
+
+<a name="line193">193: </a>    printf(<font color="#666666">"after <A href="../../../../docs/manualpages/Mat/MatView.html#MatView">MatView</A>\n"</font>);
+
+<a name="line195">195: </a>    <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,NULL,x);
+
+<a name="line197">197: </a>    <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(x,view_out);
+
+<a name="line199">199: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> its;
+<a name="line200">200: </a>    <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(snes,&amp;its);
+<a name="line201">201: </a>    <A href="../../../../docs/manualpages/Sys/PetscPrintf.html#PetscPrintf">PetscPrintf</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"SNESVI solver converged at t = %5.4g in %d iterations\n"</font>,t,its);
+
+<a name="line203">203: </a>    Update_u(x,&amp;user);
+<a name="line204">204: </a>    <font color="#B22222">/*</font>
+<a name="line205">205: </a><font color="#B22222">    for (i=0; i &lt; (int)(user.T/a) ; i++) {</font>
+<a name="line206">206: </a><font color="#B22222">      if (t/a &gt; i - user.dt/a &amp;&amp; t/a &lt; i + user.dt/a) {</font>
+<a name="line207">207: </a><font color="#B22222">        sprintf(filename,"output_%f",t);</font>
+<a name="line208">208: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,filename,FILE_MODE_WRITE,&amp;view);</font>
+<a name="line209">209: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.cv,view);</font>
+<a name="line210">210: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.ci,view);</font>
+<a name="line211">211: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user.eta,view);</font>
+<a name="line212">212: </a><font color="#B22222">        <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view);</font>
+<a name="line213">213: </a><font color="#B22222">      }</font>
+
+<a name="line215">215: </a><font color="#B22222">    }</font>
+<a name="line216">216: </a><font color="#B22222">    */</font>
+<a name="line217">217: </a>    UpdateMatrices(&amp;user);
+<a name="line218">218: </a>    t    = t + user.dt;
+
+<a name="line220">220: </a>  }
+
+<a name="line222">222: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_out);
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_p);
+<a name="line224">224: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_q);
+<a name="line225">225: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_psi);
+<a name="line226">226: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_mat);
+<a name="line227">227: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;x);
+<a name="line228">228: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;r);
+<a name="line229">229: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;xl);
+<a name="line230">230: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;xu);
+<a name="line231">231: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.q);
+<a name="line232">232: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.wv);
+<a name="line233">233: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.cv);
+<a name="line234">234: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.wi);
+<a name="line235">235: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.ci);
+<a name="line236">236: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.eta);
+<a name="line237">237: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.cvi);
+<a name="line238">238: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.DPsiv);
+<a name="line239">239: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.DPsii);
+<a name="line240">240: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.DPsieta);
+<a name="line241">241: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.Pv);
+<a name="line242">242: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.Pi);
+<a name="line243">243: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.Piv);
+<a name="line244">244: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.Riv);
+<a name="line245">245: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.logcv);
+<a name="line246">246: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.logci);
+<a name="line247">247: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.logcvi);
+<a name="line248">248: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.work1);
+<a name="line249">249: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.work2);
+<a name="line250">250: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.work3);
+<a name="line251">251: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;user.work4);
+<a name="line252">252: </a>  <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;user.M);
+<a name="line253">253: </a>  <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(&amp;user.M_0);
+<a name="line254">254: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;user.da1);
+<a name="line255">255: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;user.da1_clone);
+<a name="line256">256: </a>  <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(&amp;user.da2);
+<a name="line257">257: </a>  <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(&amp;snes);
+
+<a name="line259">259: </a>  printf(<font color="#666666">"I am finalize \n"</font>);
+<a name="line260">260: </a>  <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>();
+<a name="line261">261: </a>  <font color="#4169E1">return</font> 0;
+<a name="line262">262: </a>}
+
+<a name="line266">266: </a><strong><font color="#4169E1"><a name="Update_u"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Update_u(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,AppCtx *user)</font></strong>
+<a name="line267">267: </a>{
+<a name="line269">269: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,n;
+<a name="line270">270: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *xx,*wv_p,*cv_p,*wi_p,*ci_p,*eta_p;
+
+<a name="line273">273: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(user-&gt;wv,&amp;n);
+
+<a name="line275">275: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;xx);
+<a name="line276">276: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;wv,&amp;wv_p);
+<a name="line277">277: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line278">278: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;wi,&amp;wi_p);
+<a name="line279">279: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line280">280: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;eta,&amp;eta_p);
+
+
+<a name="line283">283: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line284">284: </a>    wv_p[i]  = xx[5*i];
+<a name="line285">285: </a>    cv_p[i]  = xx[5*i+1];
+<a name="line286">286: </a>    wi_p[i]  = xx[5*i+2];
+<a name="line287">287: </a>    ci_p[i]  = xx[5*i+3];
+<a name="line288">288: </a>    eta_p[i] = xx[5*i+4];
+<a name="line289">289: </a>  }
+<a name="line290">290: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,&amp;xx);
+<a name="line291">291: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;wv,&amp;wv_p);
+<a name="line292">292: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line293">293: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;wi,&amp;wi_p);
+<a name="line294">294: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line295">295: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line296">296: </a>  <font color="#4169E1">return</font>(0);
+<a name="line297">297: </a>}
+
+<a name="line301">301: </a><strong><font color="#4169E1"><a name="Update_q"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Update_q(AppCtx *user)</font></strong>
+<a name="line302">302: </a>{
+<a name="line304">304: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *q_p, *w1, *w2;
+<a name="line305">305: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,n;
+
+<a name="line308">308: </a>  <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(user-&gt;Riv,user-&gt;eta,user-&gt;eta); <font color="#B22222">/* Riv = eta.^2                             */</font>
+<a name="line309">309: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;Riv,user-&gt;Rsurf);                 <font color="#B22222">/* Riv = Rsurf * eta.^2                     */</font>
+<a name="line310">310: </a>  <A href="../../../../docs/manualpages/Vec/VecShift.html#VecShift">VecShift</A>(user-&gt;Riv,user-&gt;Rbulk);                 <font color="#B22222">/* Riv = Rbulk + Rsurf * eta.^2             */</font>
+<a name="line311">311: </a>  <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(user-&gt;Riv,user-&gt;ci,user-&gt;Riv);  <font color="#B22222">/* Riv = (Rbulk + Rsurf * eta.^2) * ci      */</font>
+<a name="line312">312: </a>  <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(user-&gt;Riv,user-&gt;cv,user-&gt;Riv);  <font color="#B22222">/* Riv = (Rbulk + Rsurf * eta.^2) * ci * cv */</font>
+
+<a name="line314">314: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;Riv,user-&gt;work1);
+<a name="line315">315: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;work1,user-&gt;dt);             <font color="#B22222">/* work1 = dt * Riv              */</font>
+<a name="line316">316: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(user-&gt;work1,-1.0,user-&gt;cv);         <font color="#B22222">/* work1 = dt * Riv - cv         */</font>
+<a name="line317">317: </a>  <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(user-&gt;M_0,user-&gt;work1,user-&gt;work2); <font color="#B22222">/* work2 = M_0 * (dt * Riv - cv) */</font>
+
+<a name="line319">319: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;q,&amp;q_p);
+<a name="line320">320: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;work1,&amp;w1);
+<a name="line321">321: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;work2,&amp;w2);
+<a name="line322">322: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(user-&gt;wv,&amp;n);
+<a name="line323">323: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) q_p[5*i]=w2[i];
+
+<a name="line325">325: </a>  <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(user-&gt;M_0,user-&gt;DPsiv,user-&gt;work1);
+<a name="line326">326: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) q_p[5*i+1]=w1[i];
+
+<a name="line328">328: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;Riv,user-&gt;work1);
+<a name="line329">329: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;work1,user-&gt;dt);
+<a name="line330">330: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(user-&gt;work1,-1.0,user-&gt;ci);
+<a name="line331">331: </a>  <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(user-&gt;M_0,user-&gt;work1,user-&gt;work2);
+<a name="line332">332: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) q_p[5*i+2]=w2[i];
+
+<a name="line334">334: </a>  <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(user-&gt;M_0,user-&gt;DPsii,user-&gt;work1);
+<a name="line335">335: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) q_p[5*i+3]=w1[i];
+
+<a name="line337">337: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;DPsieta,user-&gt;work1);
+<a name="line338">338: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;work1,user-&gt;L);
+<a name="line339">339: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(user-&gt;work1,-1.0/user-&gt;dt,user-&gt;eta);
+<a name="line340">340: </a>  <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(user-&gt;M_0,user-&gt;work1,user-&gt;work2);
+<a name="line341">341: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) q_p[5*i+4]=w2[i];
+
+<a name="line343">343: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;q,&amp;q_p);
+<a name="line344">344: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;work1,&amp;w1);
+<a name="line345">345: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;work2,&amp;w2);
+<a name="line346">346: </a>  <font color="#4169E1">return</font>(0);
+<a name="line347">347: </a>}
+
+<a name="line351">351: </a><strong><font color="#4169E1"><a name="DPsi"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> DPsi(AppCtx *user)</font></strong>
+<a name="line352">352: </a>{
+<a name="line354">354: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    Evf=user-&gt;Evf,Eif=user-&gt;Eif,kBT=user-&gt;kBT,A=user-&gt;A;
+<a name="line355">355: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *cv_p,*ci_p,*eta_p,*logcv_p,*logci_p,*logcvi_p,*DPsiv_p,*DPsii_p,*DPsieta_p;
+<a name="line356">356: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       n,i;
+
+<a name="line359">359: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(user-&gt;cv,&amp;n);
+<a name="line360">360: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line361">361: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line362">362: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line363">363: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logcv,&amp;logcv_p);
+<a name="line364">364: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logci,&amp;logci_p);
+<a name="line365">365: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logcvi,&amp;logcvi_p);
+<a name="line366">366: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;DPsiv,&amp;DPsiv_p);
+<a name="line367">367: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;DPsii,&amp;DPsii_p);
+<a name="line368">368: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;DPsieta,&amp;DPsieta_p);
+
+<a name="line370">370: </a>  Llog(user-&gt;cv,user-&gt;logcv);
+<a name="line371">371: </a>  Llog(user-&gt;ci,user-&gt;logci);
+
+<a name="line373">373: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;cv,user-&gt;cvi);
+<a name="line374">374: </a>  <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(user-&gt;cvi,1.0,user-&gt;ci);
+<a name="line375">375: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;cvi,-1.0);
+<a name="line376">376: </a>  <A href="../../../../docs/manualpages/Vec/VecShift.html#VecShift">VecShift</A>(user-&gt;cvi,1.0);
+<a name="line377">377: </a>  Llog(user-&gt;cvi,user-&gt;logcvi);
+
+<a name="line379">379: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++)
+<a name="line380">380: </a>  {
+<a name="line381">381: </a>    DPsiv_p[i] = (eta_p[i]-1.0)*(eta_p[i]-1.0)*(Evf + kBT*(logcv_p[i] - logcvi_p[i])) + eta_p[i]*eta_p[i]*2*A*(cv_p[i]-1);
+<a name="line382">382: </a>    DPsii_p[i] = (eta_p[i]-1.0)*(eta_p[i]-1.0)*(Eif + kBT*(logci_p[i] - logcvi_p[i])) + eta_p[i]*eta_p[i]*2*A*ci_p[i];
+
+<a name="line384">384: </a>    DPsieta_p[i] = 2.0*(eta_p[i]-1.0)*(Evf*cv_p[i] + Eif*ci_p[i] + kBT*(cv_p[i]* logcv_p[i] + ci_p[i]* logci_p[i] + (1-cv_p[i]-ci_p[i])*logcvi_p[i])) + 2.0*eta_p[i]*A*((cv_p[i]-1.0)*(cv_p[i]-1.0) + ci_p[i]*ci_p[i]);
+<a name="line385">385: </a>  }
+
+<a name="line387">387: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line388">388: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line389">389: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line390">390: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logcv,&amp;logcv_p);
+<a name="line391">391: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logci,&amp;logci_p);
+<a name="line392">392: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;logcvi,&amp;logcvi_p);
+<a name="line393">393: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;DPsiv,&amp;DPsiv_p);
+<a name="line394">394: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;DPsii,&amp;DPsii_p);
+<a name="line395">395: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;DPsieta,&amp;DPsieta_p);
+<a name="line396">396: </a>  <font color="#4169E1">return</font>(0);
+<a name="line397">397: </a>}
+
+
+<a name="line402">402: </a><strong><font color="#4169E1"><a name="Llog"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> Llog(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X, <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Y)</font></strong>
+<a name="line403">403: </a>{
+<a name="line405">405: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *x,*y;
+<a name="line406">406: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       n,i;
+
+<a name="line409">409: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;x);
+<a name="line410">410: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(Y,&amp;y);
+<a name="line411">411: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(X,&amp;n);
+<a name="line412">412: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line413">413: </a>    <font color="#4169E1">if</font> (x[i] &lt; 1.0e-12) y[i] = log(1.0e-12);
+<a name="line414">414: </a>    <font color="#4169E1">else</font> y[i] = log(x[i]);
+<a name="line415">415: </a>  }
+<a name="line416">416: </a>  <font color="#4169E1">return</font>(0);
+<a name="line417">417: </a>}
+
+<a name="line421">421: </a><strong><font color="#4169E1"><a name="SetInitialGuess"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetInitialGuess(<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,AppCtx *user)</font></strong>
+<a name="line422">422: </a>{
+<a name="line423">423: </a>  <font color="#B22222">/******************** 3D ********************/</font>
+<a name="line425">425: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       n,i,j,Xda,Yda,Zda;
+<a name="line426">426: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *xx,*cv_p,*ci_p,*wv_p,*wi_p,*eta_p;
+<a name="line427">427: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>    view_out;
+
+<a name="line429">429: </a>  <font color="#B22222">/* needed for the void growth case */</font>
+<a name="line430">430: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       cv_v=1.0,cv_m=0.122,ci_v=0.0,ci_m=.00069,eta_v=1.0,eta_m=0.0,h,lambda;
+<a name="line431">431: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       xmid,ymid,zmid;
+<a name="line432">432: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          nele,nen,idx[8];
+<a name="line433">433: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    *ele;
+<a name="line434">434: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       x[8],y[8],z[8];
+<a name="line435">435: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>               coords;
+<a name="line436">436: </a>  const <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *_coords;
+<a name="line437">437: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>       view;
+<a name="line438">438: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       xwidth = user-&gt;xmax - user-&gt;xmin, ywidth = user-&gt;ymax - user-&gt;ymin, zwidth = user-&gt;zmax - user-&gt;zmin;
+
+<a name="line441">441: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(X,&amp;n);
+
+<a name="line443">443: </a>  <font color="#4169E1">if</font> (user-&gt;voidgrowth) {
+<a name="line444">444: </a>    <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(user-&gt;da2,NULL,&amp;Xda,&amp;Yda,&amp;Zda,NULL,NULL,
+<a name="line445">445: </a>                       NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+<a name="line446">446: </a>    <A href="../../../../docs/manualpages/DM/DMGetCoordinatesLocal.html#DMGetCoordinatesLocal">DMGetCoordinatesLocal</A>(user-&gt;da2,&amp;coords);
+<a name="line447">447: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArrayRead.html#VecGetArrayRead">VecGetArrayRead</A>(coords,&amp;_coords);
+
+<a name="line449">449: </a>    <font color="#4169E1">if</font> (user-&gt;periodic) h = (user-&gt;xmax-user-&gt;xmin)/Xda;
+<a name="line450">450: </a>    <font color="#4169E1">else</font> h = (user-&gt;xmax-user-&gt;xmin)/(Xda-1.0);
+
+<a name="line452">452: </a>    xmid   = (user-&gt;xmax + user-&gt;xmin)/2.0;
+<a name="line453">453: </a>    ymid   = (user-&gt;ymax + user-&gt;ymin)/2.0;
+<a name="line454">454: </a>    zmid   = (user-&gt;zmax + user-&gt;zmin)/2.0;
+<a name="line455">455: </a>    lambda = 4.0*h;
+
+<a name="line457">457: </a>    <A href="../../../../docs/manualpages/DM/DMDAGetElements.html#DMDAGetElements">DMDAGetElements</A>(user-&gt;da2,&amp;nele,&amp;nen,&amp;ele); <font color="#B22222">/* number of local elements, number of element nodes, the local indices of the elements' vertices */</font>
+<a name="line458">458: </a>    <font color="#4169E1">for</font> (i=0; i &lt; nele; i++) {
+<a name="line459">459: </a>      <font color="#4169E1">for</font> (j = 0; j&lt;8; j++) {
+<a name="line460">460: </a>        idx[j] = ele[8*i + j];
+<a name="line461">461: </a>        x[j]   = _coords[3*idx[j]];
+<a name="line462">462: </a>        y[j]   = _coords[3*idx[j]+1];
+<a name="line463">463: </a>        z[j]   = _coords[3*idx[j]+2];
+<a name="line464">464: </a>      }
+
+<a name="line466">466: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    k;
+<a name="line467">467: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> vals_cv[8],vals_ci[8],vals_eta[8],s,hhr,r;
+<a name="line468">468: </a>      <font color="#4169E1">for</font> (k=0; k &lt; 8; k++) {
+<a name="line469">469: </a>        s = PetscSqrtScalar((x[k] - xmid)*(x[k] - xmid) + (y[k] - ymid)*(y[k] - ymid) + (z[k] - zmid)*(z[k] - zmid));
+<a name="line470">470: </a>        <font color="#4169E1">if</font> (s &lt; xwidth*(5.0/64.0)) {
+<a name="line471">471: </a>          vals_cv[k]  = cv_v;
+<a name="line472">472: </a>          vals_ci[k]  = ci_v;
+<a name="line473">473: </a>          vals_eta[k] = eta_v;
+<a name="line474">474: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (s&gt;= xwidth*(5.0/64.0) &amp;&amp; s&lt;= xwidth*(7.0/64.0)) {
+<a name="line475">475: </a>          <font color="#B22222">/*r = (s - xwidth*(6.0/64.0))/(0.5*lambda);*/</font>
+<a name="line476">476: </a>          r           = (s - xwidth*(6.0/64.0))/(xwidth/64.0);
+<a name="line477">477: </a>          hhr         = 0.25*(-r*r*r + 3*r + 2);
+<a name="line478">478: </a>          vals_cv[k]  = cv_m + (1.0 - hhr)*(cv_v - cv_m);
+<a name="line479">479: </a>          vals_ci[k]  = ci_m + (1.0 - hhr)*(ci_v - ci_m);
+<a name="line480">480: </a>          vals_eta[k] = eta_m + (1.0 - hhr)*(eta_v - eta_m);
+<a name="line481">481: </a>        } <font color="#4169E1">else</font> {
+<a name="line482">482: </a>          vals_cv[k]  = cv_m;
+<a name="line483">483: </a>          vals_ci[k]  = ci_m;
+<a name="line484">484: </a>          vals_eta[k] = eta_m;
+<a name="line485">485: </a>        }
+<a name="line486">486: </a>      }
+
+<a name="line488">488: </a>      <A href="../../../../docs/manualpages/Vec/VecSetValuesLocal.html#VecSetValuesLocal">VecSetValuesLocal</A>(user-&gt;cv,8,idx,vals_cv,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line489">489: </a>      <A href="../../../../docs/manualpages/Vec/VecSetValuesLocal.html#VecSetValuesLocal">VecSetValuesLocal</A>(user-&gt;ci,8,idx,vals_ci,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line490">490: </a>      <A href="../../../../docs/manualpages/Vec/VecSetValuesLocal.html#VecSetValuesLocal">VecSetValuesLocal</A>(user-&gt;eta,8,idx,vals_eta,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line491">491: </a>    }
+<a name="line492">492: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(user-&gt;cv);
+<a name="line493">493: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(user-&gt;cv);
+<a name="line494">494: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(user-&gt;ci);
+<a name="line495">495: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(user-&gt;ci);
+<a name="line496">496: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(user-&gt;eta);
+<a name="line497">497: </a>    <A href="../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(user-&gt;eta);
+
+<a name="line499">499: </a>    <A href="../../../../docs/manualpages/DM/DMDARestoreElements.html#DMDARestoreElements">DMDARestoreElements</A>(user-&gt;da2,&amp;nele,&amp;nen,&amp;ele);
+<a name="line500">500: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArrayRead.html#VecRestoreArrayRead">VecRestoreArrayRead</A>(coords,&amp;_coords);
+
+<a name="line502">502: </a>  } <font color="#4169E1">else</font> {
+
+<a name="line504">504: </a>    <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(user-&gt;cv,6.9e-4);
+<a name="line505">505: </a>    <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(user-&gt;ci,6.9e-4);
+<a name="line506">506: </a>    <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(user-&gt;eta,0.0);
+<a name="line507">507: </a>  }
+
+<a name="line509">509: </a>  DPsi(user);
+<a name="line510">510: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;DPsiv,user-&gt;wv);
+<a name="line511">511: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;DPsii,user-&gt;wi);
+
+<a name="line513">513: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(X,&amp;xx);
+<a name="line514">514: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line515">515: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line516">516: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line517">517: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;wv,&amp;wv_p);
+<a name="line518">518: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;wi,&amp;wi_p);
+<a name="line519">519: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n/5; i++) {
+<a name="line520">520: </a>    xx[5*i]  =wv_p[i];
+<a name="line521">521: </a>    xx[5*i+1]=cv_p[i];
+<a name="line522">522: </a>    xx[5*i+2]=wi_p[i];
+<a name="line523">523: </a>    xx[5*i+3]=ci_p[i];
+<a name="line524">524: </a>    xx[5*i+4]=eta_p[i];
+<a name="line525">525: </a>  }
+
+<a name="line527">527: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerBinaryOpen.html#PetscViewerBinaryOpen">PetscViewerBinaryOpen</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<font color="#666666">"file_initial"</font>,FILE_MODE_WRITE,&amp;view_out);
+<a name="line528">528: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user-&gt;wv,view_out);
+<a name="line529">529: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user-&gt;cv,view_out);
+<a name="line530">530: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user-&gt;wi,view_out);
+<a name="line531">531: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user-&gt;ci,view_out);
+<a name="line532">532: </a>  <A href="../../../../docs/manualpages/Vec/VecView.html#VecView">VecView</A>(user-&gt;eta,view_out);
+<a name="line533">533: </a>  <A href="../../../../docs/manualpages/Viewer/PetscViewerDestroy.html#PetscViewerDestroy">PetscViewerDestroy</A>(&amp;view_out);
+
+<a name="line535">535: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(X,&amp;xx);
+<a name="line536">536: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;cv,&amp;cv_p);
+<a name="line537">537: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;ci,&amp;ci_p);
+<a name="line538">538: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;wv,&amp;wv_p);
+<a name="line539">539: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;wi,&amp;wi_p);
+<a name="line540">540: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line541">541: </a>  <font color="#4169E1">return</font>(0);
+<a name="line542">542: </a>}
+
+<a name="line546">546: </a><strong><font color="#4169E1"><a name="SetRandomVectors"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetRandomVectors(AppCtx *user)</font></strong>
+<a name="line547">547: </a>{
+<a name="line549">549: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       i,n,count=0;
+<a name="line550">550: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    *w1,*w2,*Pv_p,*eta_p;
+
+<a name="line552">552: </a>  <font color="#B22222">/* static <A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A> viewer=0; */</font>
+<a name="line553">553: </a>  static <A href="../../../../docs/manualpages/Sys/PetscRandom.html#PetscRandom">PetscRandom</A> rand = 0;
+<a name="line554">554: </a>  static <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    step = 0;
+
+<a name="line557">557: </a>  <font color="#4169E1">if</font> (!rand) {
+<a name="line558">558: </a>    <A href="../../../../docs/manualpages/Sys/PetscRandomCreate.html#PetscRandomCreate">PetscRandomCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,&amp;rand);
+<a name="line559">559: </a>    <A href="../../../../docs/manualpages/Sys/PetscRandomSetFromOptions.html#PetscRandomSetFromOptions">PetscRandomSetFromOptions</A>(rand);
+<a name="line560">560: </a>  }
+
+<a name="line562">562: </a>  <A href="../../../../docs/manualpages/Vec/VecSetRandom.html#VecSetRandom">VecSetRandom</A>(user-&gt;work1,rand);
+<a name="line563">563: </a>  <A href="../../../../docs/manualpages/Vec/VecSetRandom.html#VecSetRandom">VecSetRandom</A>(user-&gt;work2,rand);
+<a name="line564">564: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;work1,&amp;w1);
+<a name="line565">565: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;work2,&amp;w2);
+<a name="line566">566: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;Pv,&amp;Pv_p);
+<a name="line567">567: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line568">568: </a>  <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(user-&gt;work1,&amp;n);
+<a name="line569">569: </a>  <font color="#4169E1">for</font> (i=0; i&lt;n; i++) {
+<a name="line570">570: </a>    <font color="#4169E1">if</font> (eta_p[i]&gt;=0.8 || w1[i]&gt;user-&gt;P_casc) Pv_p[i]=0;
+<a name="line571">571: </a>    <font color="#4169E1">else</font> {
+<a name="line572">572: </a>      Pv_p[i] = w2[i]*user-&gt;VG;
+<a name="line573">573: </a>      count   = count + 1;
+<a name="line574">574: </a>    }
+<a name="line575">575: </a>  }
+<a name="line576">576: </a>  step++;
+
+<a name="line578">578: </a>  <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(user-&gt;Pv,user-&gt;Pi);
+<a name="line579">579: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(user-&gt;Pi,0.9);
+<a name="line580">580: </a>  <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(user-&gt;Piv,user-&gt;Pi,user-&gt;Pv);
+<a name="line581">581: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;work1,&amp;w1);
+<a name="line582">582: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;work2,&amp;w2);
+<a name="line583">583: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;Pv,&amp;Pv_p);
+<a name="line584">584: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(user-&gt;eta,&amp;eta_p);
+<a name="line585">585: </a>  printf(<font color="#666666">"Number of radiations count %d out of total mesh points n %d\n"</font>,count,n);
+<a name="line586">586: </a>  <font color="#4169E1">return</font>(0);
+<a name="line587">587: </a>}
+
+<a name="line591">591: </a><strong><font color="#4169E1"><a name="FormFunction"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormFunction(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> F,void *ctx)</font></strong>
+<a name="line592">592: </a>{
+<a name="line594">594: </a>  AppCtx         *user=(AppCtx*)ctx;
+
+<a name="line597">597: </a>  <A href="../../../../docs/manualpages/Mat/MatMultAdd.html#MatMultAdd">MatMultAdd</A>(user-&gt;M,X,user-&gt;q,F);
+<a name="line598">598: </a>  <font color="#4169E1">return</font>(0);
+<a name="line599">599: </a>}
+
+<a name="line603">603: </a><strong><font color="#4169E1"><a name="FormJacobian"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> FormJacobian(<A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> snes,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> J,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> B,void *ctx)</font></strong>
+<a name="line604">604: </a>{
+<a name="line606">606: </a>  AppCtx         *user=(AppCtx*)ctx;
+
+<a name="line609">609: </a>  <A href="../../../../docs/manualpages/Mat/MatCopy.html#MatCopy">MatCopy</A>(user-&gt;M,J,*flg);
+<a name="line610">610: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(J,MAT_FINAL_ASSEMBLY);
+<a name="line611">611: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(J,MAT_FINAL_ASSEMBLY);
+<a name="line612">612: </a>  <font color="#4169E1">return</font>(0);
+<a name="line613">613: </a>}
+
+<a name="line617">617: </a><strong><font color="#4169E1"><a name="SetVariableBounds"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetVariableBounds(DM da,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xl,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> xu)</font></strong>
+<a name="line618">618: </a>{
+<a name="line620">620: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    ****l,****u;
+<a name="line621">621: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       xs,xm,ys,ym,zs,zm;
+<a name="line622">622: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       k,j,i;
+
+<a name="line625">625: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArrayDOF.html#DMDAVecGetArrayDOF">DMDAVecGetArrayDOF</A>(da,xl,&amp;l);
+<a name="line626">626: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecGetArrayDOF.html#DMDAVecGetArrayDOF">DMDAVecGetArrayDOF</A>(da,xu,&amp;u);
+
+<a name="line628">628: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetCorners.html#DMDAGetCorners">DMDAGetCorners</A>(da,&amp;xs,&amp;ys,&amp;zs,&amp;xm,&amp;ym,&amp;zm);
+
+<a name="line630">630: </a>  <font color="#4169E1">for</font> (k = zs; k &lt; zs + zm; k++) {
+<a name="line631">631: </a>    <font color="#4169E1">for</font> (j=ys; j&lt;ys+ym; j++) {
+<a name="line632">632: </a>      <font color="#4169E1">for</font> (i=xs; i &lt; xs+xm; i++) {
+<a name="line633">633: </a>        l[k][j][i][0] = -PETSC_INFINITY;
+<a name="line634">634: </a>        l[k][j][i][1] = 0.0;
+<a name="line635">635: </a>        l[k][j][i][2] = -PETSC_INFINITY;
+<a name="line636">636: </a>        l[k][j][i][3] = 0.0;
+<a name="line637">637: </a>        l[k][j][i][4] = 0.0;
+<a name="line638">638: </a>        u[k][j][i][0] = PETSC_INFINITY;
+<a name="line639">639: </a>        u[k][j][i][1] = 1.0;
+<a name="line640">640: </a>        u[k][j][i][2] = PETSC_INFINITY;
+<a name="line641">641: </a>        u[k][j][i][3] = 1.0;
+<a name="line642">642: </a>        u[k][j][i][4] = 1.0;
+<a name="line643">643: </a>      }
+<a name="line644">644: </a>    }
+<a name="line645">645: </a>  }
+
+<a name="line647">647: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArrayDOF.html#DMDAVecRestoreArrayDOF">DMDAVecRestoreArrayDOF</A>(da,xl,&amp;l);
+<a name="line648">648: </a>  <A href="../../../../docs/manualpages/DM/DMDAVecRestoreArrayDOF.html#DMDAVecRestoreArrayDOF">DMDAVecRestoreArrayDOF</A>(da,xu,&amp;u);
+<a name="line649">649: </a>  <font color="#4169E1">return</font>(0);
+<a name="line650">650: </a>}
+
+<a name="line654">654: </a><strong><font color="#4169E1"><a name="GetParams"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> GetParams(AppCtx *user)</font></strong>
+<a name="line655">655: </a>{
+<a name="line657">657: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+
+<a name="line660">660: </a>  <font color="#B22222">/* Set default parameters */</font>
+<a name="line661">661: </a>  user-&gt;xmin    = 0.0; user-&gt;xmax = 64.0;
+<a name="line662">662: </a>  user-&gt;ymin    = 0.0; user-&gt;ymax = 64.0;
+<a name="line663">663: </a>  user-&gt;zmin    = 0.0; user-&gt;zmax = 64.0;
+<a name="line664">664: </a>  user-&gt;Dv      = 1.0; user-&gt;Di=1.0;
+<a name="line665">665: </a>  user-&gt;Evf     = 0.8; user-&gt;Eif = 0.8;
+<a name="line666">666: </a>  user-&gt;A       = 1.0;
+<a name="line667">667: </a>  user-&gt;kBT     = 0.11;
+<a name="line668">668: </a>  user-&gt;kav     = 1.0; user-&gt;kai = 1.0; user-&gt;kaeta = 1.0;
+<a name="line669">669: </a>  user-&gt;Rsurf   = 10.0; user-&gt;Rbulk = 0.0;
+<a name="line670">670: </a>  user-&gt;L       = 10.0; user-&gt;P_casc = 0.05;
+<a name="line671">671: </a>  user-&gt;T       = 1.0e-2;    user-&gt;dt = 1.0e-4;
+<a name="line672">672: </a>  user-&gt;VG      = 100.0;
+<a name="line673">673: </a>  user-&gt;initv   = .0001;
+<a name="line674">674: </a>  user-&gt;initeta = 0.0;
+
+<a name="line676">676: </a>  user-&gt;degenerate = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line677">677: </a>  <font color="#B22222">/* void growth */</font>
+<a name="line678">678: </a>  user-&gt;voidgrowth = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line680">680: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(NULL,<font color="#666666">"-xmin"</font>,&amp;user-&gt;xmin,&amp;flg);
+<a name="line681">681: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(NULL,<font color="#666666">"-xmax"</font>,&amp;user-&gt;xmax,&amp;flg);
+<a name="line682">682: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(NULL,<font color="#666666">"-T"</font>,&amp;user-&gt;T,&amp;flg);
+<a name="line683">683: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsGetReal.html#PetscOptionsGetReal">PetscOptionsGetReal</A>(NULL,<font color="#666666">"-dt"</font>,&amp;user-&gt;dt,&amp;flg);
+<a name="line684">684: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-degenerate"</font>,<font color="#666666">"Run with degenerate mobility\n"</font>,<font color="#666666">"None"</font>,user-&gt;degenerate,&amp;user-&gt;degenerate,&amp;flg);
+<a name="line685">685: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsReal.html#PetscOptionsReal">PetscOptionsReal</A>(<font color="#666666">"-smallnumber"</font>,<font color="#666666">"Small number added to degenerate mobility\n"</font>,<font color="#666666">"None"</font>,user-&gt;smallnumber,&amp;user-&gt;smallnumber,&amp;flg);
+<a name="line686">686: </a>  <A href="../../../../docs/manualpages/Sys/PetscOptionsBool.html#PetscOptionsBool">PetscOptionsBool</A>(<font color="#666666">"-voidgrowth"</font>,<font color="#666666">"Use initial conditions for void growth\n"</font>,<font color="#666666">"None"</font>,user-&gt;voidgrowth,&amp;user-&gt;voidgrowth,&amp;flg);
+<a name="line687">687: </a>  <font color="#4169E1">return</font>(0);
+<a name="line688">688: </a>}
+
+
+<a name="line693">693: </a><strong><font color="#4169E1"><a name="SetUpMatrices"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> SetUpMatrices(AppCtx *user)</font></strong>
+<a name="line694">694: </a>{
+<a name="line696">696: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       nele,nen,i,j,n;
+<a name="line697">697: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *ele;
+<a name="line698">698: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>    dt=user-&gt;dt,hx,hy,hz;
+
+<a name="line700">700: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    idx[8];
+<a name="line701">701: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> eM_0[8][8],eM_2[8][8];
+<a name="line702">702: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> cv_sum, ci_sum;
+<a name="line703">703: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> tp_cv, tp_ci;
+
+<a name="line705">705: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         M  =user-&gt;M;
+<a name="line706">706: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         M_0=user-&gt;M_0;
+<a name="line707">707: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    Xda,Yda,Zda;
+<a name="line708">708: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *cv_p,*ci_p;
+<a name="line709">709: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         cvlocal,cilocal;
+
+<a name="line712">712: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(user-&gt;da2,&amp;cvlocal);
+<a name="line713">713: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(user-&gt;da2,&amp;cilocal);
+<a name="line714">714: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(user-&gt;da2,user-&gt;cv,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cvlocal);
+<a name="line715">715: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(user-&gt;da2,user-&gt;cv,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cvlocal);
+<a name="line716">716: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(user-&gt;da2,user-&gt;ci,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cilocal);
+<a name="line717">717: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(user-&gt;da2,user-&gt;ci,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cilocal);
+
+<a name="line719">719: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cvlocal,&amp;cv_p);
+<a name="line720">720: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cilocal,&amp;ci_p);
+
+<a name="line722">722: </a>  <A href="../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>(M,&amp;n,NULL);
+<a name="line723">723: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(user-&gt;da1,NULL,&amp;Xda,&amp;Yda,&amp;Zda,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+
+<a name="line725">725: </a>  <font color="#4169E1">if</font> (Xda!=Yda) printf(<font color="#666666">"Currently different Xda and Yda are not supported"</font>);
+<a name="line726">726: </a>  <font color="#4169E1">if</font> (user-&gt;periodic) {
+<a name="line727">727: </a>    hx = (user-&gt;xmax-user-&gt;xmin)/Xda;
+<a name="line728">728: </a>    hy = (user-&gt;ymax-user-&gt;ymin)/Yda;
+<a name="line729">729: </a>    hz = (user-&gt;zmax-user-&gt;zmin)/Zda;
+<a name="line730">730: </a>  } <font color="#4169E1">else</font> {
+<a name="line731">731: </a>    hx = (user-&gt;xmax-user-&gt;xmin)/(Xda-1.0);
+<a name="line732">732: </a>    hy = (user-&gt;ymax-user-&gt;ymin)/(Yda-1.0);
+<a name="line733">733: </a>    hz = (user-&gt;zmax-user-&gt;zmin)/(Zda-1.0);
+<a name="line734">734: </a>  }
+
+<a name="line736">736: </a>  <font color="#B22222">/** blocks of M_0 **/</font>
+<a name="line737">737: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) eM_0[i][i] = 1;
+
+<a name="line739">739: </a>  eM_0[0][1] = 0.5; eM_0[0][2] = 0.25; eM_0[0][3] = 0.5; eM_0[0][4] = 0.5; eM_0[0][5] = 0.25; eM_0[0][6] = 0.125; eM_0[0][7] = 0.25;
+<a name="line740">740: </a>  eM_0[1][2] = 0.5; eM_0[1][3] = 0.25; eM_0[1][4] = 0.25;eM_0[1][5] = 0.5; eM_0[1][6] = 0.25; eM_0[1][7] = 0.125;
+<a name="line741">741: </a>  eM_0[2][3] = 0.5; eM_0[2][4] = 0.125;eM_0[2][5] = 0.25;eM_0[2][6] = 0.5;eM_0[2][7] = 0.25;
+<a name="line742">742: </a>  eM_0[3][4] = 0.25;eM_0[3][5] = 0.125;eM_0[3][6] = 0.25;eM_0[3][7] = 0.5;
+<a name="line743">743: </a>  eM_0[4][5] = 0.5; eM_0[4][6] = 0.25; eM_0[4][7] = 0.5;
+<a name="line744">744: </a>  eM_0[5][6] = 0.5; eM_0[5][7] = 0.25;
+<a name="line745">745: </a>  eM_0[6][7] = 0.5;
+
+<a name="line747">747: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line748">748: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line749">749: </a>      <font color="#4169E1">if</font> (i&gt;j) eM_0[i][j] = eM_0[j][i];
+<a name="line750">750: </a>    }
+<a name="line751">751: </a>  }
+<a name="line752">752: </a>
+<a name="line753">753: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line754">754: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line755">755: </a>      eM_0[i][j] = hx*hy*hz/27.0 * eM_0[i][j];
+<a name="line756">756: </a>    }
+<a name="line757">757: </a>  }
+
+<a name="line759">759: </a>  <font color="#B22222">/** blocks of M_2 **/</font>
+
+<a name="line761">761: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) eM_2[i][i] = 12;
+
+<a name="line763">763: </a>  eM_2[0][1] = 0; eM_2[0][2] = -3; eM_2[0][3] = 0;  eM_2[0][4] = 0;  eM_2[0][5] = -3; eM_2[0][6] = -3; eM_2[0][7] = -3;
+<a name="line764">764: </a>  eM_2[1][2] = 0; eM_2[1][3] = -3; eM_2[1][4] = -3; eM_2[1][5] = 0;  eM_2[1][6] = -3; eM_2[1][7] = -3;
+<a name="line765">765: </a>  eM_2[2][3] = 0; eM_2[2][4] = -3; eM_2[2][5] = -3; eM_2[2][6] = 0;  eM_2[2][7] = -3;
+<a name="line766">766: </a>  eM_2[3][4] = -3;eM_2[3][5] = -3; eM_2[3][6] = -3; eM_2[3][7] = 0;
+<a name="line767">767: </a>  eM_2[4][5] = 0; eM_2[4][6] = -3; eM_2[4][7] = 0;
+<a name="line768">768: </a>  eM_2[5][6] = 0; eM_2[5][7] = -3;
+<a name="line769">769: </a>  eM_2[6][7] = 0;
+
+<a name="line771">771: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line772">772: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line773">773: </a>      <font color="#4169E1">if</font> (i&gt;j) eM_2[i][j] = eM_2[j][i];
+<a name="line774">774: </a>    }
+<a name="line775">775: </a>  }
+
+<a name="line777">777: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line778">778: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line779">779: </a>      eM_2[i][j] = hx*hy*hz/36.0 * eM_2[i][j];
+<a name="line780">780: </a>    }
+<a name="line781">781: </a>  }
+
+<a name="line783">783: </a>  <font color="#B22222">/* Get local element info */</font>
+<a name="line784">784: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetElements.html#DMDAGetElements">DMDAGetElements</A>(user-&gt;da1,&amp;nele,&amp;nen,&amp;ele);
+<a name="line785">785: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    row,cols[16],r,row_M_0,cols3[8];
+<a name="line786">786: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> vals[16],vals_M_0[8],vals3[8];
+
+<a name="line788">788: </a>  <font color="#4169E1">for</font> (i=0;i &lt; nele;i++) {
+<a name="line789">789: </a>    <font color="#4169E1">for</font> (j=0; j&lt;8; j++) idx[j] = ele[8*i + j];
+
+<a name="line791">791: </a>    <font color="#4169E1">for</font> (r=0;r&lt;8;r++) {
+<a name="line792">792: </a>      row_M_0 = idx[r];
+<a name="line793">793: </a>      <font color="#4169E1">for</font> (j=0; j&lt;8; j++) vals_M_0[j]=eM_0[r][j];
+
+<a name="line795">795: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M_0,1,&amp;row_M_0,8,idx,vals_M_0,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line797">797: </a>      tp_cv = 0.0;
+<a name="line798">798: </a>      tp_ci = 0.0;
+<a name="line799">799: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line800">800: </a>        tp_cv = tp_cv + cv_p[idx[j]];
+<a name="line801">801: </a>        tp_ci = tp_ci + ci_p[idx[j]];
+<a name="line802">802: </a>      }
+
+<a name="line804">804: </a>      cv_sum = tp_cv * user-&gt;Dv/user-&gt;kBT;
+<a name="line805">805: </a>      ci_sum = tp_ci * user-&gt;Di/user-&gt;kBT;
+
+<a name="line807">807: </a>      row = 5*idx[r];
+<a name="line808">808: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line809">809: </a>        cols[j]     = 5 * idx[j];
+<a name="line810">810: </a>        vals[j]     = dt*eM_2[r][j]*cv_sum;
+<a name="line811">811: </a>        cols[j + 8] = 5 * idx[j] + 1;
+<a name="line812">812: </a>        vals[j + 8] = eM_0[r][j];
+<a name="line813">813: </a>      }
+
+<a name="line815">815: </a>      <font color="#B22222">/* Insert values in matrix M for 1st dof */</font>
+
+<a name="line817">817: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,16,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line819">819: </a>      row = 5*idx[r]+1;
+<a name="line820">820: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line821">821: </a>        cols[j]     = 5 * idx[j];
+<a name="line822">822: </a>        vals[j]     = -eM_0[r][j];
+<a name="line823">823: </a>        cols[j + 8] = 5 * idx[j] + 1;
+<a name="line824">824: </a>        vals[j + 8] = user-&gt;kav*eM_2[r][j];
+<a name="line825">825: </a>      }
+
+<a name="line827">827: </a>      <font color="#B22222">/* Insert values in matrix M for 2nd dof */</font>
+<a name="line828">828: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,16,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line830">830: </a>      row = 5*idx[r]+2;
+<a name="line831">831: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line832">832: </a>        cols[j]     = 5 * idx[j] + 2;
+<a name="line833">833: </a>        vals[j]     = dt*eM_2[r][j]*ci_sum;
+<a name="line834">834: </a>        cols[j + 8] = 5 * idx[j] + 3;
+<a name="line835">835: </a>        vals[j + 8] = eM_0[r][j];
+<a name="line836">836: </a>      }
+
+<a name="line838">838: </a>      <font color="#B22222">/* Insert values in matrix M for 3rd dof */</font>
+<a name="line839">839: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,16,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line841">841: </a>      row = 5*idx[r]+3;
+<a name="line842">842: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line843">843: </a>        cols[j]     = 5 * idx[j] + 2;
+<a name="line844">844: </a>        vals[j]     = -eM_0[r][j];
+<a name="line845">845: </a>        cols[j + 8] = 5 * idx[j] + 3;
+<a name="line846">846: </a>        vals[j + 8] = user-&gt;kai*eM_2[r][j];
+<a name="line847">847: </a>      }
+
+<a name="line849">849: </a>      <font color="#B22222">/* Insert values in matrix M for 4th dof */</font>
+<a name="line850">850: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,16,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line852">852: </a>      row = 5*idx[r]+4;
+<a name="line853">853: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line854">854: </a>        cols3[j] = 5 * idx[j] + 4;
+<a name="line855">855: </a>        vals3[j] = eM_0[r][j]/dt + user-&gt;L*user-&gt;kaeta*eM_2[r][j];
+<a name="line856">856: </a>      }
+
+<a name="line858">858: </a>      <font color="#B22222">/* Insert values in matrix M for 5th dof */</font>
+<a name="line859">859: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,8,cols3,vals3,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line860">860: </a>    }
+<a name="line861">861: </a>  }
+
+
+<a name="line864">864: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cvlocal,&amp;cv_p);
+<a name="line865">865: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cilocal,&amp;ci_p);
+
+<a name="line867">867: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(user-&gt;da2,&amp;cvlocal);
+<a name="line868">868: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(user-&gt;da2,&amp;cilocal);
+
+<a name="line870">870: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(M_0,MAT_FINAL_ASSEMBLY);
+<a name="line871">871: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(M_0,MAT_FINAL_ASSEMBLY);
+
+<a name="line873">873: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(M,MAT_FINAL_ASSEMBLY);
+<a name="line874">874: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(M,MAT_FINAL_ASSEMBLY);
+
+<a name="line876">876: </a>  <A href="../../../../docs/manualpages/DM/DMDARestoreElements.html#DMDARestoreElements">DMDARestoreElements</A>(user-&gt;da1,&amp;nele,&amp;nen,&amp;ele);
+<a name="line877">877: </a>  <font color="#4169E1">return</font>(0);
+<a name="line878">878: </a>}
+
+
+<a name="line883">883: </a><strong><font color="#4169E1"><a name="UpdateMatrices"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> UpdateMatrices(AppCtx *user)</font></strong>
+<a name="line884">884: </a>{
+<a name="line886">886: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>       nele,nen,i,j,n,Xda,Yda,Zda;
+<a name="line887">887: </a>  const <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> *ele;
+
+<a name="line889">889: </a>  <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    idx[8];
+<a name="line890">890: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> eM_2[8][8],h;
+<a name="line891">891: </a>  <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>         M=user-&gt;M;
+<a name="line892">892: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *cv_p,*ci_p,cv_sum,ci_sum;
+<a name="line893">893: </a>  <font color="#B22222">/* newly added */</font>
+<a name="line894">894: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> cvlocal,cilocal;
+
+<a name="line897">897: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(user-&gt;da2,&amp;cvlocal);
+<a name="line898">898: </a>  <A href="../../../../docs/manualpages/DM/DMGetLocalVector.html#DMGetLocalVector">DMGetLocalVector</A>(user-&gt;da2,&amp;cilocal);
+<a name="line899">899: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(user-&gt;da2,user-&gt;cv,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cvlocal);
+<a name="line900">900: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(user-&gt;da2,user-&gt;cv,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cvlocal);
+<a name="line901">901: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(user-&gt;da2,user-&gt;ci,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cilocal);
+<a name="line902">902: </a>  <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(user-&gt;da2,user-&gt;ci,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,cilocal);
+
+<a name="line904">904: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cvlocal,&amp;cv_p);
+<a name="line905">905: </a>  <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(cilocal,&amp;ci_p);
+
+<a name="line907">907: </a>  <font color="#B22222">/* Create the mass matrix M_0 */</font>
+<a name="line908">908: </a>  <A href="../../../../docs/manualpages/Mat/MatGetLocalSize.html#MatGetLocalSize">MatGetLocalSize</A>(M,&amp;n,NULL);
+<a name="line909">909: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetInfo.html#DMDAGetInfo">DMDAGetInfo</A>(user-&gt;da1,NULL,&amp;Xda,&amp;Yda,&amp;Zda,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+
+<a name="line911">911: </a>  <font color="#4169E1">if</font> (Xda!=Yda) printf(<font color="#666666">"Currently different Xda and Yda are not supported"</font>);
+<a name="line912">912: </a>  <font color="#4169E1">if</font> (user-&gt;periodic) h = (user-&gt;xmax-user-&gt;xmin)/Xda;
+<a name="line913">913: </a>  <font color="#4169E1">else</font> h = (user-&gt;xmax-user-&gt;xmin)/(Xda-1.0);
+
+<a name="line915">915: </a>  <font color="#B22222">/* Get local element info */</font>
+<a name="line916">916: </a>  <A href="../../../../docs/manualpages/DM/DMDAGetElements.html#DMDAGetElements">DMDAGetElements</A>(user-&gt;da1,&amp;nele,&amp;nen,&amp;ele);
+
+<a name="line918">918: </a>  <font color="#4169E1">for</font> (i=0; i&lt;nele; i++) {
+<a name="line919">919: </a>    <font color="#4169E1">for</font> (j=0; j&lt;8; j++) idx[j] = ele[8*i + j];
+
+<a name="line921">921: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    r,row,cols[8];
+<a name="line922">922: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> vals[8];
+
+<a name="line924">924: </a>    <font color="#4169E1">for</font> (r=0; r&lt;8; r++) {
+<a name="line925">925: </a>      row = 5*idx[r];
+<a name="line926">926: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line927">927: </a>        cols[j] = 5*idx[j];
+<a name="line928">928: </a>        vals[j] = 0.0;
+<a name="line929">929: </a>      }
+
+<a name="line931">931: </a>      <font color="#B22222">/* Insert values in matrix M for 1st dof */</font>
+<a name="line932">932: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,8,cols,vals,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+
+<a name="line934">934: </a>      row = 5*idx[r]+2;
+<a name="line935">935: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; 8; j++) {
+<a name="line936">936: </a>        cols[j] = 5*idx[j]+2;
+<a name="line937">937: </a>        vals[j] = 0.0;
+<a name="line938">938: </a>      }
+
+<a name="line940">940: </a>      <font color="#B22222">/* Insert values in matrix M for 3nd dof */</font>
+<a name="line941">941: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,8,cols,vals,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>);
+<a name="line942">942: </a>    }
+<a name="line943">943: </a>  }
+
+<a name="line945">945: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(M,MAT_FINAL_ASSEMBLY);
+<a name="line946">946: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(M,MAT_FINAL_ASSEMBLY);
+
+<a name="line948">948: </a>  <font color="#B22222">/** blocks of M_2 **/</font>
+
+<a name="line950">950: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) eM_2[i][i] = 12;
+
+<a name="line952">952: </a>  eM_2[0][1] = 0; eM_2[0][2] = -3; eM_2[0][3] = 0;  eM_2[0][4] = 0;  eM_2[0][5] = -3; eM_2[0][6] = -3; eM_2[0][7] = -3;
+<a name="line953">953: </a>  eM_2[1][2] = 0; eM_2[1][3] = -3; eM_2[1][4] = -3; eM_2[1][5] = 0;  eM_2[1][6] = -3; eM_2[1][7] = -3;
+<a name="line954">954: </a>  eM_2[2][3] = 0; eM_2[2][4] = -3; eM_2[2][5] = -3; eM_2[2][6] = 0;  eM_2[2][7] = -3;
+<a name="line955">955: </a>  eM_2[3][4] = -3;eM_2[3][5] = -3; eM_2[3][6] = -3; eM_2[3][7] = 0;
+<a name="line956">956: </a>  eM_2[4][5] = 0; eM_2[4][6] = -3; eM_2[4][7] = 0;
+<a name="line957">957: </a>  eM_2[5][6] = 0; eM_2[5][7] = -3;
+<a name="line958">958: </a>  eM_2[6][7] = 0;
+
+<a name="line960">960: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line961">961: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line962">962: </a>      <font color="#4169E1">if</font> (i&gt;j) eM_2[i][j] = eM_2[j][i];
+<a name="line963">963: </a>    }
+<a name="line964">964: </a>  }
+
+<a name="line966">966: </a>  <font color="#4169E1">for</font> (i = 0; i&lt;8; i++) {
+<a name="line967">967: </a>    <font color="#4169E1">for</font> (j =0; j&lt;8; j++) {
+<a name="line968">968: </a>      eM_2[i][j] = h*h*h/36.0 * eM_2[i][j];
+<a name="line969">969: </a>    }
+<a name="line970">970: </a>  }
+
+<a name="line972">972: </a>  <font color="#4169E1">for</font> (i=0;i&lt;nele;i++) {
+<a name="line973">973: </a>    <font color="#4169E1">for</font> (j=0; j&lt;8; j++) idx[j] = ele[8*i + j];
+
+<a name="line975">975: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>    row,cols[8],r;
+<a name="line976">976: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> vals[8];
+
+<a name="line978">978: </a>    <font color="#4169E1">for</font> (r=0;r&lt;8;r++) {
+
+<a name="line980">980: </a>      <font color="#4169E1">if</font> (user-&gt;degenerate) {
+<a name="line981">981: </a>        cv_sum = (2.0*user-&gt;smallnumber + cv_p[idx[0]] + cv_p[idx[1]])*user-&gt;Dv/(2.0*user-&gt;kBT);
+<a name="line982">982: </a>        ci_sum = (2.0*user-&gt;smallnumber + ci_p[idx[0]] + ci_p[idx[1]])*user-&gt;Di/(2.0*user-&gt;kBT);
+<a name="line983">983: </a>      } <font color="#4169E1">else</font> {
+<a name="line984">984: </a>        cv_sum = user-&gt;initv*user-&gt;Dv/user-&gt;kBT;
+<a name="line985">985: </a>        ci_sum = user-&gt;initv*user-&gt;Di/user-&gt;kBT;
+<a name="line986">986: </a>      }
+
+<a name="line988">988: </a>      row = 5*idx[r];
+<a name="line989">989: </a>      <font color="#4169E1">for</font> (j=0; j&lt;8; j++) {
+<a name="line990">990: </a>        cols[j] = 5*idx[j];
+<a name="line991">991: </a>        vals[j] = user-&gt;dt*eM_2[r][j]*cv_sum;
+<a name="line992">992: </a>      }
+
+<a name="line994">994: </a>      <font color="#B22222">/* Insert values in matrix M for 1st dof */</font>
+<a name="line995">995: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,8,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+
+<a name="line997">997: </a>      row = 5*idx[r]+2;
+<a name="line998">998: </a>      <font color="#4169E1">for</font> (j=0; j&lt;8; j++) {
+<a name="line999">999: </a>        cols[j] = 5*idx[j]+2;
+<a name="line1000">1000: </a>        vals[j] = user-&gt;dt*eM_2[r][j]*ci_sum;
+<a name="line1001">1001: </a>      }
+
+<a name="line1003">1003: </a>      <font color="#B22222">/* Insert values in matrix M for 3nd dof */</font>
+<a name="line1004">1004: </a>      <A href="../../../../docs/manualpages/Mat/MatSetValuesLocal.html#MatSetValuesLocal">MatSetValuesLocal</A>(M,1,&amp;row,8,cols,vals,<A href="../../../../docs/manualpages/Sys/ADD_VALUES.html#ADD_VALUES">ADD_VALUES</A>);
+<a name="line1005">1005: </a>    }
+<a name="line1006">1006: </a>  }
+
+<a name="line1008">1008: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cvlocal,&amp;cv_p);
+<a name="line1009">1009: </a>  <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(cilocal,&amp;ci_p);
+<a name="line1010">1010: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(user-&gt;da2,&amp;cvlocal);
+<a name="line1011">1011: </a>  <A href="../../../../docs/manualpages/DM/DMRestoreLocalVector.html#DMRestoreLocalVector">DMRestoreLocalVector</A>(user-&gt;da2,&amp;cilocal);
+
+<a name="line1013">1013: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(M,MAT_FINAL_ASSEMBLY);
+<a name="line1014">1014: </a>  <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(M,MAT_FINAL_ASSEMBLY);
+<a name="line1015">1015: </a>  <A href="../../../../docs/manualpages/DM/DMDARestoreElements.html#DMDARestoreElements">DMDARestoreElements</A>(user-&gt;da1,&amp;nele,&amp;nen,&amp;ele);
+<a name="line1016">1016: </a>  <font color="#4169E1">return</font>(0);
+<a name="line1017">1017: </a>}
+
+
+</pre>
+</body>
+
+</html>

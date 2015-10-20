@@ -1,0 +1,413 @@
+<center><a href="ex14f.F">Actual source code: ex14f.F</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/snes/examples/tests/ex14f.F.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:35:24+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/snes/examples/tests/ex14f.F.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80"><a name="line1">  1: </a>!
+<a name="line2">  2: </a>!
+<a name="line3">  3: </a>!  This example demonstrates use of the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> Fortran interface.
+<a name="line4">  4: </a>!
+<a name="line5">  5: </a>!  Note:  The program is modified from ex12f.F
+<a name="line6">  6: </a>!         Used <font color="#4169E1">for</font> testing MUMPS interface, and control when the Jacobian is rebuilt
+<a name="line7">  7: </a>!
+<a name="line8">  8: </a>!  In this example the application context is a Fortran integer array:
+<a name="line9">  9: </a>!      ctx(1) = da    - distributed array
+<a name="line10"> 10: </a>!          2  = F     - global vector where the function is stored
+<a name="line11"> 11: </a>!          3  = xl    - local work vector
+<a name="line12"> 12: </a>!          4  = rank  - processor rank
+<a name="line13"> 13: </a>!          5  = size  - number of processors
+<a name="line14"> 14: </a>!          6  = N     - system size
+<a name="line15"> 15: </a>!
+<a name="line16"> 16: </a>!  Note: Any user-defined Fortran routines (such as FormJacobian)
+<a name="line17"> 17: </a>!  MUST be declared as external.
+<a name="line18"> 18: </a>!
+<a name="line19"> 19: </a>!
+<a name="line20"> 20: </a>! Macros to make setting/getting  values into vector clearer.
+<a name="line21"> 21: </a>! The element xx(ib) is the ibth element in the vector indicated by ctx(3)
+
+<a name="line23"> 23: </a><strong><font color="#228B22">#define xx(ib)  vxx(ixx + (ib))</font></strong>
+<a name="line24"> 24: </a><strong><font color="#228B22">#define ff(ib)  vff(iff + (ib))</font></strong>
+<a name="line25"> 25: </a><strong><font color="#228B22">#define F2(ib)  vF2(iF2 + (ib))</font></strong>
+
+<a name="line27"> 27: </a>      module Petscmod
+<a name="line28"> 28: </a>      implicit none
+<a name="line29"> 29: </a><font color="#A020F0">#include &lt;finclude/petscsys.h&gt;</font>
+<a name="line30"> 30: </a><font color="#A020F0">#include &lt;finclude/petscvec.h&gt;</font>
+<a name="line31"> 31: </a><font color="#A020F0">#include &lt;finclude/petscvec.h90&gt;</font>
+<a name="line32"> 32: </a><font color="#A020F0">#include &lt;finclude/petscmat.h&gt;</font>
+<a name="line33"> 33: </a><font color="#A020F0">#include &lt;finclude/petscmat.h90&gt;</font>
+<a name="line34"> 34: </a><font color="#A020F0">#include &lt;finclude/petscviewer.h&gt;</font>
+<a name="line35"> 35: </a><font color="#A020F0">#include &lt;finclude/petscksp.h&gt;</font>
+<a name="line36"> 36: </a><font color="#A020F0">#include &lt;finclude/petscpc.h&gt;</font>
+<a name="line37"> 37: </a><font color="#A020F0">#include &lt;finclude/petscsnes.h&gt;</font>
+<a name="line38"> 38: </a><font color="#A020F0">#include &lt;finclude/petscis.h&gt;</font>
+<a name="line39"> 39: </a><font color="#A020F0">#include &lt;finclude/petscdm.h&gt;</font>
+<a name="line40"> 40: </a><font color="#A020F0">#include &lt;finclude/petscdmda.h&gt;</font>
+<a name="line41"> 41: </a>      end module Petscmod
+
+<a name="line43"> 43: </a>      module Snesmonitormod
+<a name="line44"> 44: </a>      use Petscmod
+<a name="line45"> 45: </a>      implicit none
+<a name="line46"> 46: </a>      save
+<a name="line47"> 47: </a>      type monctx
+<a name="line48"> 48: </a>        <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> :: its,lag
+<a name="line49"> 49: </a>      end type monctx
+<a name="line50"> 50: </a>      end module Snesmonitormod
+
+<a name="line52"> 52: </a>! ---------------------------------------------------------------------
+<a name="line53"> 53: </a>! ---------------------------------------------------------------------
+<a name="line54"> 54: </a>!  Subroutine FormMonitor
+<a name="line55"> 55: </a>!  This function lets up keep track of the <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> progress at each step
+<a name="line56"> 56: </a>!  In this routine, we determine when the Jacobian is rebuilt with the parameter 'jag'
+<a name="line57"> 57: </a>!
+<a name="line58"> 58: </a>!  Input Parameters:
+<a name="line59"> 59: </a>!    snes    - <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> nonlinear solver context
+<a name="line60"> 60: </a>!    its     - current nonlinear iteration, starting from a call of <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>()
+<a name="line61"> 61: </a>!    norm    - 2-norm of current residual (may be approximate)
+<a name="line62"> 62: </a>!    snesmonitor - monctx designed module (included in Snesmonitormod)
+<a name="line63"> 63: </a>! ---------------------------------------------------------------------
+<a name="line64"> 64: </a>      subroutine FormMonitor(snes,its,norm,snesmonitor,ierr)
+
+<a name="line66"> 66: </a>      use Snesmonitormod
+<a name="line67"> 67: </a>      implicit none
+
+<a name="line69"> 69: </a>      <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> ::           snes
+<a name="line70"> 70: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ::       its
+<a name="line71"> 71: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> ::    norm
+<a name="line72"> 72: </a>      type(monctx) ::   snesmonitor
+<a name="line73"> 73: </a>      <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> :: ierr
+
+<a name="line75"> 75: </a>c      write(6,*) <font color="#666666">" "</font>
+<a name="line76"> 76: </a>c      write(6,*) <font color="#666666">"    its "</font>,its,snesmonitor%its,<font color="#666666">"lag"</font>,
+<a name="line77"> 77: </a>c     &amp;            snesmonitor%lag
+<a name="line78"> 78: </a>c      call flush(6)
+<a name="line79"> 79: </a>      <font color="#4169E1">if</font> (mod(snesmonitor%its,snesmonitor%lag).eq.0)
+<a name="line80"> 80: </a>     &amp;      then
+<a name="line81"> 81: </a>        call <A href="../../../../docs/manualpages/SNES/SNESSetLagJacobian.html#SNESSetLagJacobian">SNESSetLagJacobian</A>(snes,1,ierr)  ! build jacobian
+<a name="line82"> 82: </a>      <font color="#4169E1">else</font>
+<a name="line83"> 83: </a>        call <A href="../../../../docs/manualpages/SNES/SNESSetLagJacobian.html#SNESSetLagJacobian">SNESSetLagJacobian</A>(snes,-1,ierr) ! <font color="#4169E1">do</font> NOT build jacobian
+<a name="line84"> 84: </a>      endif
+<a name="line85"> 85: </a>      snesmonitor%its = snesmonitor%its + 1
+<a name="line86"> 86: </a>      end subroutine FormMonitor
+
+<a name="line88"> 88: </a>! ---------------------------------------------------------------------
+<a name="line89"> 89: </a>! ---------------------------------------------------------------------
+<a name="line90"> 90: </a>      program main
+
+<a name="line92"> 92: </a>      use Petscmod
+<a name="line93"> 93: </a>      use Snesmonitormod
+
+<a name="line95"> 95: </a>      implicit none
+
+<a name="line97"> 97: </a>      type(monctx) :: snesmonitor
+<a name="line98"> 98: </a>      <A href="../../../../docs/manualpages/Sys/PetscFortranAddr.html#PetscFortranAddr">PetscFortranAddr</A> ctx(6)
+<a name="line99"> 99: </a>      <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A> rank,size
+<a name="line100">100: </a>      <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr
+<a name="line101">101: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> N,start,end,nn,i
+<a name="line102">102: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> ii,its,i1,i0,i3
+<a name="line103">103: </a>      <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>  flg
+<a name="line104">104: </a>      <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>             snes
+<a name="line105">105: </a>      <A href="../../../../docs/manualpages/PC/PC.html#PC">PC</A>               pc
+<a name="line106">106: </a>      <A href="../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A>              ksp
+<a name="line107">107: </a>      <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              J,F
+<a name="line108">108: </a>      <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              x,r,u
+<a name="line109">109: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      xp,FF,UU,h
+<a name="line110">110: </a>      character*(10)   matrixname
+<a name="line111">111: </a>      external         FormJacobian,FormFunction
+<a name="line112">112: </a>      external         FormMonitor
+
+<a name="line114">114: </a>      call <A href="../../../../docs/manualpages/Sys/PetscInitialize.html#PetscInitialize">PetscInitialize</A>(PETSC_NULL_CHARACTER,ierr)
+<a name="line115">115: </a>      i1 = 1
+<a name="line116">116: </a>      i0 = 0
+<a name="line117">117: </a>      i3 = 3
+<a name="line118">118: </a>      N  = 10
+<a name="line119">119: </a>      call <A href="../../../../docs/manualpages/Sys/PetscOptionsGetInt.html#PetscOptionsGetInt">PetscOptionsGetInt</A>(PETSC_NULL_CHARACTER,'-n',N,flg,ierr)
+<a name="line120">120: </a>      h = 1.d0/(N-1.d0)
+<a name="line121">121: </a>      ctx(6) = N
+
+<a name="line123">123: </a>      call <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,rank,ierr)
+<a name="line124">124: </a>      call <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,size,ierr)
+<a name="line125">125: </a>      ctx(4) = rank
+<a name="line126">126: </a>      ctx(5) = size
+
+<a name="line128">128: </a>! Set up data structures
+<a name="line129">129: </a>      call <A href="../../../../docs/manualpages/DM/DMDACreate1d.html#DMDACreate1d">DMDACreate1d</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,DM_BOUNDARY_NONE,N,i1,i1,            &amp;
+<a name="line130">130: </a>     &amp;     PETSC_NULL_INTEGER,ctx(1),ierr)
+
+<a name="line132">132: </a>      call <A href="../../../../docs/manualpages/DM/DMCreateGlobalVector.html#DMCreateGlobalVector">DMCreateGlobalVector</A>(ctx(1),x,ierr)
+<a name="line133">133: </a>      call <A href="../../../../docs/manualpages/DM/DMCreateLocalVector.html#DMCreateLocalVector">DMCreateLocalVector</A>(ctx(1),ctx(3),ierr)
+
+<a name="line135">135: </a>      call <A href="../../../../docs/manualpages/Sys/PetscObjectSetName.html#PetscObjectSetName">PetscObjectSetName</A>(x,'Approximate Solution',ierr)
+<a name="line136">136: </a>      call <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,r,ierr)
+<a name="line137">137: </a>      call <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,ctx(2),ierr)
+<a name="line138">138: </a>      call <A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(x,U,ierr)
+<a name="line139">139: </a>      call <A href="../../../../docs/manualpages/Sys/PetscObjectSetName.html#PetscObjectSetName">PetscObjectSetName</A>(U,'Exact Solution',ierr)
+
+<a name="line141">141: </a>      call <A href="../../../../docs/manualpages/Mat/MatCreateAIJ.html#MatCreateAIJ">MatCreateAIJ</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,N,           &amp;
+<a name="line142">142: </a>     &amp;     N,i3,PETSC_NULL_INTEGER,i0,PETSC_NULL_INTEGER,J,ierr)
+
+<a name="line144">144: </a>      call <A href="../../../../docs/manualpages/Mat/MatGetType.html#MatGetType">MatGetType</A>(J,matrixname,ierr)
+
+<a name="line146">146: </a>! Store right-hand-side of PDE and exact solution
+<a name="line147">147: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRange.html#VecGetOwnershipRange">VecGetOwnershipRange</A>(x,start,end,ierr)
+<a name="line148">148: </a>      xp = h*start
+<a name="line149">149: </a>      nn = end - start
+<a name="line150">150: </a>      ii = start
+<a name="line151">151: </a>      <font color="#4169E1">do</font> 10, i=0,nn-1
+<a name="line152">152: </a>        FF = 6.0*xp + (xp+1.e-12)**6.e0
+<a name="line153">153: </a>        UU = xp*xp*xp
+<a name="line154">154: </a>        call <A href="../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>(ctx(2),i1,ii,FF,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line155">155: </a>        call <A href="../../../../docs/manualpages/Vec/VecSetValues.html#VecSetValues">VecSetValues</A>(U,i1,ii,UU,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line156">156: </a>        xp = xp + h
+<a name="line157">157: </a>        ii = ii + 1
+<a name="line158">158: </a> 10   <font color="#4169E1">continue</font>
+<a name="line159">159: </a>      call <A href="../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(ctx(2),ierr)
+<a name="line160">160: </a>      call <A href="../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(ctx(2),ierr)
+<a name="line161">161: </a>      call <A href="../../../../docs/manualpages/Vec/VecAssemblyBegin.html#VecAssemblyBegin">VecAssemblyBegin</A>(U,ierr)
+<a name="line162">162: </a>      call <A href="../../../../docs/manualpages/Vec/VecAssemblyEnd.html#VecAssemblyEnd">VecAssemblyEnd</A>(U,ierr)
+
+<a name="line164">164: </a>! Create nonlinear solver
+<a name="line165">165: </a>      call <A href="../../../../docs/manualpages/SNES/SNESCreate.html#SNESCreate">SNESCreate</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,snes,ierr)
+
+<a name="line167">167: </a>! Set various routines and options
+<a name="line168">168: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSetFunction.html#SNESSetFunction">SNESSetFunction</A>(snes,r,FormFunction,ctx,ierr)
+<a name="line169">169: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSetJacobian.html#SNESSetJacobian">SNESSetJacobian</A>(snes,J,J,FormJacobian,ctx,ierr)
+<a name="line170">170: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSetLagJacobian.html#SNESSetLagJacobian">SNESSetLagJacobian</A>(snes,3,ierr)
+
+<a name="line172">172: </a>! Set linear solver defaults <font color="#4169E1">for</font> this problem.
+<a name="line173">173: </a>      call <A href="../../../../docs/manualpages/SNES/SNESGetKSP.html#SNESGetKSP">SNESGetKSP</A>(snes,ksp,ierr)
+<a name="line174">174: </a>      call <A href="../../../../docs/manualpages/KSP/KSPGetPC.html#KSPGetPC">KSPGetPC</A>(ksp,pc,ierr)
+<a name="line175">175: </a><font color="#A020F0">#ifdef PETSC_HAVE_MUMPS</font>
+<a name="line176">176: </a>      call <A href="../../../../docs/manualpages/PC/PCSetType.html#PCSetType">PCSetType</A>(pc,<A href="../../../../docs/manualpages/PC/PCLU.html#PCLU">PCLU</A>,ierr)
+<a name="line177">177: </a>      call <A href="../../../../docs/manualpages/PC/PCFactorSetMatSolverPackage.html#PCFactorSetMatSolverPackage">PCFactorSetMatSolverPackage</A>(pc,<A href="../../../../docs/manualpages/Mat/MATSOLVERMUMPS.html#MATSOLVERMUMPS">MATSOLVERMUMPS</A>,ierr)
+<a name="line178">178: </a><font color="#A020F0">#endif</font>
+
+<a name="line180">180: </a>      snesmonitor%its = 0
+<a name="line181">181: </a>      call <A href="../../../../docs/manualpages/SNES/SNESGetLagJacobian.html#SNESGetLagJacobian">SNESGetLagJacobian</A>(snes,snesmonitor%lag,ierr)
+<a name="line182">182: </a>      call <A href="../../../../docs/manualpages/SNES/SNESMonitorSet.html#SNESMonitorSet">SNESMonitorSet</A>(snes,FormMonitor,snesmonitor,
+<a name="line183">183: </a>     &amp;                    PETSC_NULL_FUNCTION,ierr)
+<a name="line184">184: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSetFromOptions.html#SNESSetFromOptions">SNESSetFromOptions</A>(snes,ierr)
+<a name="line185">185: </a>      call FormInitialGuess(snes,x,ierr)
+
+<a name="line187">187: </a>! Setup nonlinear solver, and call <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>() <font color="#4169E1">for</font> first few iterations, which calls <A href="../../../../docs/manualpages/SNES/SNESSetUp.html#SNESSetUp">SNESSetUp</A>() :-(
+<a name="line188">188: </a>!--------------------------------------------------------------------------------------------------
+<a name="line189">189: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSetTolerances.html#SNESSetTolerances">SNESSetTolerances</A>(snes,PETSC_DEFAULT_REAL,                     &amp;
+<a name="line190">190: </a>     &amp;                            PETSC_DEFAULT_REAL,                     &amp;
+<a name="line191">191: </a>     &amp;                            PETSC_DEFAULT_REAL,                     &amp;
+<a name="line192">192: </a>     &amp;                          3,PETSC_DEFAULT_INTEGER,ierr)
+<a name="line193">193: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,PETSC_NULL_OBJECT,x,ierr)
+
+<a name="line195">195: </a><font color="#A020F0">#ifdef PETSC_HAVE_MUMPS</font>
+<a name="line196">196: </a>! Get PCFactor to set MUMPS matrix ordering option
+<a name="line197">197: </a>      call <A href="../../../../docs/manualpages/PC/PCFactorGetMatrix.html#PCFactorGetMatrix">PCFactorGetMatrix</A>(pc,F,ierr)
+<a name="line198">198: </a>      call <A href="../../../../docs/manualpages/Mat/MatMumpsSetIcntl.html#MatMumpsSetIcntl">MatMumpsSetIcntl</A>(F,7,2,ierr) ! must be called before next <A href="../../../../docs/manualpages/SNES/SNESSetUp.html#SNESSetUp">SNESSetUp</A>? -- not being used!!!
+<a name="line199">199: </a><font color="#A020F0">#endif</font>
+
+<a name="line201">201: </a>! Solve nonlinear system
+<a name="line202">202: </a>       call <A href="../../../../docs/manualpages/SNES/SNESSetTolerances.html#SNESSetTolerances">SNESSetTolerances</A>(snes,PETSC_DEFAULT_REAL,                     &amp;
+<a name="line203">203: </a>     &amp;                            PETSC_DEFAULT_REAL,                      &amp;
+<a name="line204">204: </a>     &amp;                            PETSC_DEFAULT_REAL,                      &amp;
+<a name="line205">205: </a>     &amp;      1000,PETSC_DEFAULT_INTEGER,ierr)
+
+<a name="line207">207: </a>! Call <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>() <font color="#4169E1">for</font> next few iterations
+<a name="line208">208: </a>!--------------------------------------------------
+<a name="line209">209: </a>      snesmonitor%its = snesmonitor%its - 1 !<font color="#4169E1">do</font> not count the 0-th iteration
+<a name="line210">210: </a>      call <A href="../../../../docs/manualpages/SNES/SNESSolve.html#SNESSolve">SNESSolve</A>(snes,PETSC_NULL_OBJECT,x,ierr)
+<a name="line211">211: </a>      call <A href="../../../../docs/manualpages/SNES/SNESGetIterationNumber.html#SNESGetIterationNumber">SNESGetIterationNumber</A>(snes,its,ierr);
+
+<a name="line213">213: </a>! Write results <font color="#4169E1">if</font> first processor
+<a name="line214">214: </a>      <font color="#4169E1">if</font> (ctx(4) .eq. 0) then
+<a name="line215">215: </a>        write(6,100) its
+<a name="line216">216: </a>      endif
+<a name="line217">217: </a>  100 format('Number of <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A> iterations = ',i5)
+
+<a name="line219">219: </a>!  Free work space.  All PETSc objects should be destroyed when they
+<a name="line220">220: </a>!  are no longer needed.
+<a name="line221">221: </a>      call <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(x,ierr)
+<a name="line222">222: </a>      call <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(ctx(3),ierr)
+<a name="line223">223: </a>      call <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(r,ierr)
+<a name="line224">224: </a>      call <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(U,ierr)
+<a name="line225">225: </a>      call <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(ctx(2),ierr)
+<a name="line226">226: </a>      call <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(J,ierr)
+<a name="line227">227: </a>      call <A href="../../../../docs/manualpages/SNES/SNESDestroy.html#SNESDestroy">SNESDestroy</A>(snes,ierr)
+<a name="line228">228: </a>      call <A href="../../../../docs/manualpages/DM/DMDestroy.html#DMDestroy">DMDestroy</A>(ctx(1),ierr)
+<a name="line229">229: </a>      call <A href="../../../../docs/manualpages/Sys/PetscFinalize.html#PetscFinalize">PetscFinalize</A>(ierr)
+<a name="line230">230: </a>      end
+
+
+<a name="line233">233: </a>! --------------------  Evaluate Function F(x) ---------------------
+
+<a name="line235">235: </a>      subroutine FormFunction(snes,x,f,ctx,ierr)
+<a name="line236">236: </a>      implicit none
+<a name="line237">237: </a>      <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>             snes
+<a name="line238">238: </a>      <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              x,f
+<a name="line239">239: </a>      <A href="../../../../docs/manualpages/Sys/PetscFortranAddr.html#PetscFortranAddr">PetscFortranAddr</A> ctx(*)
+<a name="line240">240: </a>      <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>  rank,size
+<a name="line241">241: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> i,s,n
+<a name="line242">242: </a>      <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> ierr
+<a name="line243">243: </a>      <A href="../../../../docs/manualpages/Sys/PetscOffset.html#PetscOffset">PetscOffset</A>      ixx,iff,iF2
+<a name="line244">244: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      h,d,vf2(1),vxx(1),vff(1)
+<a name="line245">245: </a><font color="#A020F0">#include &lt;finclude/petscsys.h&gt;</font>
+<a name="line246">246: </a><font color="#A020F0">#include &lt;finclude/petscvec.h&gt;</font>
+<a name="line247">247: </a><font color="#A020F0">#include &lt;finclude/petscdm.h&gt;</font>
+<a name="line248">248: </a><font color="#A020F0">#include &lt;finclude/petscdmda.h&gt;</font>
+<a name="line249">249: </a><font color="#A020F0">#include &lt;finclude/petscmat.h&gt;</font>
+<a name="line250">250: </a><font color="#A020F0">#include &lt;finclude/petscsnes.h&gt;</font>
+
+
+<a name="line253">253: </a>      rank  = ctx(4)
+<a name="line254">254: </a>      size  = ctx(5)
+<a name="line255">255: </a>      h     = 1.d0/(ctx(6) - 1.d0)
+<a name="line256">256: </a>      call <A href="../../../../docs/manualpages/DM/DMGlobalToLocalBegin.html#DMGlobalToLocalBegin">DMGlobalToLocalBegin</A>(ctx(1),x,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ctx(3),ierr)
+<a name="line257">257: </a>      call <A href="../../../../docs/manualpages/DM/DMGlobalToLocalEnd.html#DMGlobalToLocalEnd">DMGlobalToLocalEnd</A>(ctx(1),x,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ctx(3),ierr)
+
+<a name="line259">259: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(ctx(3),n,ierr)
+<a name="line260">260: </a>      <font color="#4169E1">if</font> (n .gt. 1000) then
+<a name="line261">261: </a>        print*, 'Local work array not big enough'
+<a name="line262">262: </a>        call <A href="http://www.mcs.anl.gov/mpi/www/www3/MPI_Abort.html#MPI_Abort">MPI_Abort</A>(<A href="../../../../docs/manualpages/Sys/PETSC_COMM_WORLD.html#PETSC_COMM_WORLD">PETSC_COMM_WORLD</A>,0,ierr)
+<a name="line263">263: </a>      endif
+
+<a name="line265">265: </a>!
+<a name="line266">266: </a>! This sets the index ixx so that vxx(ixx+1) is the first local
+<a name="line267">267: </a>! element in the vector indicated by ctx(3).
+<a name="line268">268: </a>!
+<a name="line269">269: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(ctx(3),vxx,ixx,ierr)
+<a name="line270">270: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(f,vff,iff,ierr)
+<a name="line271">271: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(ctx(2),vF2,iF2,ierr)
+
+<a name="line273">273: </a>      d = h*h
+
+<a name="line275">275: </a>!
+<a name="line276">276: </a>!  Note that the array vxx() was obtained from a ghosted local vector
+<a name="line277">277: </a>!  ctx(3) <font color="#4169E1">while</font> the array vff() was obtained from the non-ghosted parallel
+<a name="line278">278: </a>!  vector F. This is why there is a need <font color="#4169E1">for</font> shift variable s. Since vff()
+<a name="line279">279: </a>!  does not have locations <font color="#4169E1">for</font> the ghost variables we need to index in it
+<a name="line280">280: </a>!  slightly different then indexing into vxx(). For example on processor
+<a name="line281">281: </a>!  1 (the second processor)
+<a name="line282">282: </a>!
+<a name="line283">283: </a>!        xx(1)        xx(2)             xx(3)             .....
+<a name="line284">284: </a>!      ^^^^^^^        ^^^^^             ^^^^^
+<a name="line285">285: </a>!      ghost value   1st local value   2nd local value
+<a name="line286">286: </a>!
+<a name="line287">287: </a>!                      ff(1)             ff(2)
+<a name="line288">288: </a>!                     ^^^^^^^           ^^^^^^^
+<a name="line289">289: </a>!                    1st local value   2nd local value
+<a name="line290">290: </a>!
+<a name="line291">291: </a>       <font color="#4169E1">if</font> (rank .eq. 0) then
+<a name="line292">292: </a>        s = 0
+<a name="line293">293: </a>        ff(1) = xx(1)
+<a name="line294">294: </a>      <font color="#4169E1">else</font>
+<a name="line295">295: </a>        s = 1
+<a name="line296">296: </a>      endif
+
+<a name="line298">298: </a>      <font color="#4169E1">do</font> 10 i=1,n-2
+<a name="line299">299: </a>       ff(i-s+1) = d*(xx(i) - 2.d0*xx(i+1)                              &amp;
+<a name="line300">300: </a>     &amp;      + xx(i+2)) + xx(i+1)*xx(i+1)                                &amp;
+<a name="line301">301: </a>     &amp;      - F2(i-s+1)
+<a name="line302">302: </a> 10   <font color="#4169E1">continue</font>
+
+<a name="line304">304: </a>      <font color="#4169E1">if</font> (rank .eq. size-1) then
+<a name="line305">305: </a>        ff(n-s) = xx(n) - 1.d0
+<a name="line306">306: </a>      endif
+
+<a name="line308">308: </a>      call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(f,vff,iff,ierr)
+<a name="line309">309: </a>      call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(ctx(3),vxx,ixx,ierr)
+<a name="line310">310: </a>      call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(ctx(2),vF2,iF2,ierr)
+<a name="line311">311: </a>      <font color="#4169E1">return</font>
+<a name="line312">312: </a>      end
+
+<a name="line314">314: </a>! --------------------  Form initial approximation -----------------
+
+<a name="line316">316: </a>      subroutine FormInitialGuess(snes,x,ierr)
+<a name="line317">317: </a>      implicit none
+<a name="line318">318: </a><font color="#A020F0">#include &lt;finclude/petscsys.h&gt;</font>
+<a name="line319">319: </a><font color="#A020F0">#include &lt;finclude/petscvec.h&gt;</font>
+<a name="line320">320: </a><font color="#A020F0">#include &lt;finclude/petscsnes.h&gt;</font>
+<a name="line321">321: </a>      <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr
+<a name="line322">322: </a>      <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              x
+<a name="line323">323: </a>      <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>             snes
+<a name="line324">324: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      five
+
+<a name="line326">326: </a>      five = 5.d-1
+<a name="line327">327: </a>      call <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(x,five,ierr)
+<a name="line328">328: </a>      <font color="#4169E1">return</font>
+<a name="line329">329: </a>      end
+
+<a name="line331">331: </a>! --------------------  Evaluate Jacobian --------------------
+
+<a name="line333">333: </a>      subroutine FormJacobian(snes,x,jac,B,flag,ctx,ierr)
+
+<a name="line335">335: </a>      use Petscmod
+<a name="line336">336: </a>      implicit none
+
+<a name="line338">338: </a>      <A href="../../../../docs/manualpages/SNES/SNES.html#SNES">SNES</A>             snes
+<a name="line339">339: </a>      <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>              x
+<a name="line340">340: </a>      <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>              jac,B
+<a name="line341">341: </a>      <A href="../../../../docs/manualpages/Sys/PetscFortranAddr.html#PetscFortranAddr">PetscFortranAddr</A> ctx(*)
+<a name="line342">342: </a>      <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>        flag
+<a name="line343">343: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         ii,istart,iend
+<a name="line344">344: </a>      <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>         i,j,n,end,start,i1
+<a name="line345">345: </a>      <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>   ierr
+<a name="line346">346: </a>      <A href="../../../../docs/manualpages/Sys/PetscMPIInt.html#PetscMPIInt">PetscMPIInt</A>      rank,size
+<a name="line347">347: </a>      <A href="../../../../docs/manualpages/Sys/PetscOffset.html#PetscOffset">PetscOffset</A>      ixx
+<a name="line348">348: </a>      <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>      d,A,h,vxx(1)
+
+<a name="line350">350: </a>      rank = ctx(4)
+<a name="line351">351: </a>      size = ctx(5)
+<a name="line352">352: </a>      <font color="#4169E1">if</font> (rank .eq. 0) then
+<a name="line353">353: </a>        write(6,*)<font color="#666666">"   Jacobian is built ..."</font>
+<a name="line354">354: </a>        call flush(6)
+<a name="line355">355: </a>      endif
+<a name="line356">356: </a>      i1 = 1
+<a name="line357">357: </a>      h = 1.d0/(ctx(6) - 1.d0)
+<a name="line358">358: </a>      d = h*h
+<a name="line359">359: </a>      rank = ctx(4)
+<a name="line360">360: </a>      size = ctx(5)
+
+<a name="line362">362: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(x,vxx,ixx,ierr)
+<a name="line363">363: </a>      call <A href="../../../../docs/manualpages/Vec/VecGetOwnershipRange.html#VecGetOwnershipRange">VecGetOwnershipRange</A>(x,start,end,ierr)
+<a name="line364">364: </a>      n = end - start
+
+<a name="line366">366: </a>      <font color="#4169E1">if</font> (rank .eq. 0) then
+<a name="line367">367: </a>        A = 1.0
+<a name="line368">368: </a>        call <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(jac,i1,start,i1,start,A,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line369">369: </a>        istart = 1
+<a name="line370">370: </a>      <font color="#4169E1">else</font>
+<a name="line371">371: </a>        istart = 0
+<a name="line372">372: </a>      endif
+<a name="line373">373: </a>      <font color="#4169E1">if</font> (rank .eq. size-1) then
+<a name="line374">374: </a>        i = ctx(6)-1
+<a name="line375">375: </a>        A = 1.0
+<a name="line376">376: </a>        call <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(jac,i1,i,i1,i,A,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line377">377: </a>        iend = n-1
+<a name="line378">378: </a>      <font color="#4169E1">else</font>
+<a name="line379">379: </a>        iend = n
+<a name="line380">380: </a>      endif
+<a name="line381">381: </a>      <font color="#4169E1">do</font> 10 i=istart,iend-1
+<a name="line382">382: </a>        ii = i + start
+<a name="line383">383: </a>        j = start + i - 1
+<a name="line384">384: </a>        call <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(jac,i1,ii,i1,j,d,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line385">385: </a>        j = start + i + 1
+<a name="line386">386: </a>        call <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(jac,i1,ii,i1,j,d,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line387">387: </a>        A = -2.0*d + 2.0*xx(i+1)
+<a name="line388">388: </a>        call <A href="../../../../docs/manualpages/Mat/MatSetValues.html#MatSetValues">MatSetValues</A>(jac,i1,ii,i1,ii,A,<A href="../../../../docs/manualpages/Sys/INSERT_VALUES.html#INSERT_VALUES">INSERT_VALUES</A>,ierr)
+<a name="line389">389: </a> 10   <font color="#4169E1">continue</font>
+<a name="line390">390: </a>      call <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(x,vxx,ixx,ierr)
+<a name="line391">391: </a>      call <A href="../../../../docs/manualpages/Mat/MatAssemblyBegin.html#MatAssemblyBegin">MatAssemblyBegin</A>(jac,MAT_FINAL_ASSEMBLY,ierr)
+<a name="line392">392: </a>      call <A href="../../../../docs/manualpages/Mat/MatAssemblyEnd.html#MatAssemblyEnd">MatAssemblyEnd</A>(jac,MAT_FINAL_ASSEMBLY,ierr)
+<a name="line393">393: </a>      <font color="#4169E1">return</font>
+<a name="line394">394: </a>      end
+
+
+
+</pre>
+</body>
+
+</html>

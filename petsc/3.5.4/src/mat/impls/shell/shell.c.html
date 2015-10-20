@@ -1,0 +1,775 @@
+<center><a href="shell.c">Actual source code: shell.c</a></center><br>
+
+<html>
+<head> <link rel="canonical" href="http://www.mcs.anl.gov/petsc/petsc-current/src/mat/impls/shell/shell.c.html" />
+<title></title>
+<meta name="generator" content="c2html 0.9.5">
+<meta name="date" content="2015-05-23T23:22:54+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+   <div id="version" align=right><b>petsc-3.5.4 2015-05-23</b></div>
+   <div id="bugreport" align=right><a href="mailto:petsc-maint@mcs.anl.gov?subject=Typo or Error in Documentation &body=Please describe the typo or error in the documentation: petsc-3.5.4 v3.5.3-68-g9fbf19a src/mat/impls/shell/shell.c.html "><small>Report Typos and Errors</small></a></div>
+<pre width="80">
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">   This provides a simple shell for Fortran (and C programmers) to</font>
+<a name="line4">  4: </a><font color="#B22222">  create a very simple matrix class for use with <A href="../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> without coding</font>
+<a name="line5">  5: </a><font color="#B22222">  much of anything.</font>
+<a name="line6">  6: </a><font color="#B22222">*/</font>
+
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;petsc-private/matimpl.h&gt;        </font><font color="#B22222">/*I "petscmat.h" I*/</font><font color="#A020F0"></font>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;petsc-private/vecimpl.h&gt;</font>
+
+<a name="line11"> 11: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line12"> 12: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*destroy)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>);
+<a name="line13"> 13: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*mult)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);
+<a name="line14"> 14: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*multtranspose)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);
+<a name="line15"> 15: </a>  <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*getdiagonal)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);
+
+<a name="line17"> 17: </a>  <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> vscale,vshift;
+<a name="line18"> 18: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         dshift;
+<a name="line19"> 19: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         left,right;
+<a name="line20"> 20: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         dshift_owned,left_owned,right_owned;
+<a name="line21"> 21: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         left_work,right_work;
+<a name="line22"> 22: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>         left_add_work,right_add_work;
+<a name="line23"> 23: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>   usingscaled;
+<a name="line24"> 24: </a>  void        *ctx;
+<a name="line25"> 25: </a>} Mat_Shell;
+<a name="line26"> 26: </a><font color="#B22222">/*</font>
+<a name="line27"> 27: </a><font color="#B22222"> The most general expression for the matrix is</font>
+
+<a name="line29"> 29: </a><font color="#B22222"> S = L (a A + B) R</font>
+
+<a name="line31"> 31: </a><font color="#B22222"> where</font>
+<a name="line32"> 32: </a><font color="#B22222"> A is the matrix defined by the user's function</font>
+<a name="line33"> 33: </a><font color="#B22222"> a is a scalar multiple</font>
+<a name="line34"> 34: </a><font color="#B22222"> L is left scaling</font>
+<a name="line35"> 35: </a><font color="#B22222"> R is right scaling</font>
+<a name="line36"> 36: </a><font color="#B22222"> B is a diagonal shift defined by</font>
+<a name="line37"> 37: </a><font color="#B22222">   diag(dshift) if the vector dshift is non-NULL</font>
+<a name="line38"> 38: </a><font color="#B22222">   vscale*identity otherwise</font>
+
+<a name="line40"> 40: </a><font color="#B22222"> The following identities apply:</font>
+
+<a name="line42"> 42: </a><font color="#B22222"> Scale by c:</font>
+<a name="line43"> 43: </a><font color="#B22222">  c [L (a A + B) R] = L [(a c) A + c B] R</font>
+
+<a name="line45"> 45: </a><font color="#B22222"> Shift by c:</font>
+<a name="line46"> 46: </a><font color="#B22222">  [L (a A + B) R] + c = L [a A + (B + c Linv Rinv)] R</font>
+
+<a name="line48"> 48: </a><font color="#B22222"> Diagonal scaling is achieved by simply multiplying with existing L and R vectors</font>
+
+<a name="line50"> 50: </a><font color="#B22222"> In the data structure:</font>
+
+<a name="line52"> 52: </a><font color="#B22222"> vscale=1.0  means no special scaling will be applied</font>
+<a name="line53"> 53: </a><font color="#B22222"> dshift=NULL means a constant diagonal shift (fall back to vshift)</font>
+<a name="line54"> 54: </a><font color="#B22222"> vshift=0.0  means no constant diagonal shift, note that vshift is only used if dshift is NULL</font>
+<a name="line55"> 55: </a><font color="#B22222">*/</font>
+
+<a name="line57"> 57: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMult_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line58"> 58: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultTranspose_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+<a name="line59"> 59: </a><strong><font color="#4169E1">static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatGetDiagonal_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font></strong>;
+
+<a name="line63"> 63: </a><strong><font color="#4169E1"><a name="MatShellUseScaledMethods"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellUseScaledMethods(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Y)</font></strong>
+<a name="line64"> 64: </a>{
+<a name="line65"> 65: </a>  Mat_Shell *shell = (Mat_Shell*)Y-&gt;data;
+
+<a name="line68"> 68: </a>  <font color="#4169E1">if</font> (shell-&gt;usingscaled) <font color="#4169E1">return</font>(0);
+<a name="line69"> 69: </a>  shell-&gt;mult  = Y-&gt;ops-&gt;mult;
+<a name="line70"> 70: </a>  Y-&gt;ops-&gt;mult = MatMult_Shell;
+<a name="line71"> 71: </a>  <font color="#4169E1">if</font> (Y-&gt;ops-&gt;multtranspose) {
+<a name="line72"> 72: </a>    shell-&gt;multtranspose  = Y-&gt;ops-&gt;multtranspose;
+<a name="line73"> 73: </a>    Y-&gt;ops-&gt;multtranspose = MatMultTranspose_Shell;
+<a name="line74"> 74: </a>  }
+<a name="line75"> 75: </a>  <font color="#4169E1">if</font> (Y-&gt;ops-&gt;getdiagonal) {
+<a name="line76"> 76: </a>    shell-&gt;getdiagonal  = Y-&gt;ops-&gt;getdiagonal;
+<a name="line77"> 77: </a>    Y-&gt;ops-&gt;getdiagonal = MatGetDiagonal_Shell;
+<a name="line78"> 78: </a>  }
+<a name="line79"> 79: </a>  shell-&gt;usingscaled = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line80"> 80: </a>  <font color="#4169E1">return</font>(0);
+<a name="line81"> 81: </a>}
+
+<a name="line85"> 85: </a><strong><font color="#4169E1"><a name="MatShellPreScaleLeft"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellPreScaleLeft(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *xx)</font></strong>
+<a name="line86"> 86: </a>{
+<a name="line87"> 87: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line91"> 91: </a>  *xx = NULL;
+<a name="line92"> 92: </a>  <font color="#4169E1">if</font> (!shell-&gt;left) {
+<a name="line93"> 93: </a>    *xx = x;
+<a name="line94"> 94: </a>  } <font color="#4169E1">else</font> {
+<a name="line95"> 95: </a>    <font color="#4169E1">if</font> (!shell-&gt;left_work) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(shell-&gt;left,&amp;shell-&gt;left_work);}
+<a name="line96"> 96: </a>    <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(shell-&gt;left_work,x,shell-&gt;left);
+<a name="line97"> 97: </a>    *xx  = shell-&gt;left_work;
+<a name="line98"> 98: </a>  }
+<a name="line99"> 99: </a>  <font color="#4169E1">return</font>(0);
+<a name="line100">100: </a>}
+
+<a name="line104">104: </a><strong><font color="#4169E1"><a name="MatShellPreScaleRight"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellPreScaleRight(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> *xx)</font></strong>
+<a name="line105">105: </a>{
+<a name="line106">106: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line110">110: </a>  *xx = NULL;
+<a name="line111">111: </a>  <font color="#4169E1">if</font> (!shell-&gt;right) {
+<a name="line112">112: </a>    *xx = x;
+<a name="line113">113: </a>  } <font color="#4169E1">else</font> {
+<a name="line114">114: </a>    <font color="#4169E1">if</font> (!shell-&gt;right_work) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(shell-&gt;right,&amp;shell-&gt;right_work);}
+<a name="line115">115: </a>    <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(shell-&gt;right_work,x,shell-&gt;right);
+<a name="line116">116: </a>    *xx  = shell-&gt;right_work;
+<a name="line117">117: </a>  }
+<a name="line118">118: </a>  <font color="#4169E1">return</font>(0);
+<a name="line119">119: </a>}
+
+<a name="line123">123: </a><strong><font color="#4169E1"><a name="MatShellPostScaleLeft"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellPostScaleLeft(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x)</font></strong>
+<a name="line124">124: </a>{
+<a name="line125">125: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line129">129: </a>  <font color="#4169E1">if</font> (shell-&gt;left) {<A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(x,x,shell-&gt;left);}
+<a name="line130">130: </a>  <font color="#4169E1">return</font>(0);
+<a name="line131">131: </a>}
+
+<a name="line135">135: </a><strong><font color="#4169E1"><a name="MatShellPostScaleRight"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellPostScaleRight(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x)</font></strong>
+<a name="line136">136: </a>{
+<a name="line137">137: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line141">141: </a>  <font color="#4169E1">if</font> (shell-&gt;right) {<A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(x,x,shell-&gt;right);}
+<a name="line142">142: </a>  <font color="#4169E1">return</font>(0);
+<a name="line143">143: </a>}
+
+<a name="line147">147: </a><strong><font color="#4169E1"><a name="MatShellShiftAndScale"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShellShiftAndScale(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> X,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> Y)</font></strong>
+<a name="line148">148: </a>{
+<a name="line149">149: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line153">153: </a>  <font color="#4169E1">if</font> (shell-&gt;dshift) {          <font color="#B22222">/* get arrays because there is no VecPointwiseMultAdd() */</font>
+<a name="line154">154: </a>    <A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A>          i,m;
+<a name="line155">155: </a>    const <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> *x,*d;
+<a name="line156">156: </a>    <A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A>       *y;
+<a name="line157">157: </a>    <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(X,&amp;m);
+<a name="line158">158: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArrayRead.html#VecGetArrayRead">VecGetArrayRead</A>(shell-&gt;dshift,&amp;d);
+<a name="line159">159: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArrayRead.html#VecGetArrayRead">VecGetArrayRead</A>(X,&amp;x);
+<a name="line160">160: </a>    <A href="../../../../docs/manualpages/Vec/VecGetArray.html#VecGetArray">VecGetArray</A>(Y,&amp;y);
+<a name="line161">161: </a>    <font color="#4169E1">for</font> (i=0; i&lt;m; i++) y[i] = shell-&gt;vscale*y[i] + d[i]*x[i];
+<a name="line162">162: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArrayRead.html#VecRestoreArrayRead">VecRestoreArrayRead</A>(shell-&gt;dshift,&amp;d);
+<a name="line163">163: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArrayRead.html#VecRestoreArrayRead">VecRestoreArrayRead</A>(X,&amp;x);
+<a name="line164">164: </a>    <A href="../../../../docs/manualpages/Vec/VecRestoreArray.html#VecRestoreArray">VecRestoreArray</A>(Y,&amp;y);
+<a name="line165">165: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (PetscAbsScalar(shell-&gt;vshift) != 0) {
+<a name="line166">166: </a>    <A href="../../../../docs/manualpages/Vec/VecAXPBY.html#VecAXPBY">VecAXPBY</A>(Y,shell-&gt;vshift,shell-&gt;vscale,X);
+<a name="line167">167: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (shell-&gt;vscale != 1.0) {
+<a name="line168">168: </a>    <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(Y,shell-&gt;vscale);
+<a name="line169">169: </a>  }
+<a name="line170">170: </a>  <font color="#4169E1">return</font>(0);
+<a name="line171">171: </a>}
+
+<a name="line175">175: </a><font color="#B22222">/*@</font>
+<a name="line176">176: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A> - Returns the user-provided context associated with a shell matrix.</font>
+
+<a name="line178">178: </a><font color="#B22222">    Not Collective</font>
+
+<a name="line180">180: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line181">181: </a><font color="#B22222">.   mat - the matrix, should have been created with <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>()</font>
+
+<a name="line183">183: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line184">184: </a><font color="#B22222">.   ctx - the user provided context</font>
+
+<a name="line186">186: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line188">188: </a><font color="#B22222">    Notes:</font>
+<a name="line189">189: </a><font color="#B22222">    This routine is intended for use within various shell matrix routines,</font>
+<a name="line190">190: </a><font color="#B22222">    as set with <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>().</font>
+
+<a name="line192">192: </a><font color="#B22222">.keywords: matrix, shell, get, context</font>
+
+<a name="line194">194: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>()</font>
+<a name="line195">195: </a><font color="#B22222">@*/</font>
+<a name="line196">196: </a><strong><font color="#4169E1"><a name="MatShellGetContext"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat,void *ctx)</font></strong>
+<a name="line197">197: </a>{
+<a name="line199">199: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+
+<a name="line204">204: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>,&amp;flg);
+<a name="line205">205: </a>  <font color="#4169E1">if</font> (flg) *(void**)ctx = ((Mat_Shell*)(mat-&gt;data))-&gt;ctx;
+<a name="line206">206: </a>  <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat),PETSC_ERR_SUP,<font color="#666666">"Cannot get context from non-shell matrix"</font>);
+<a name="line207">207: </a>  <font color="#4169E1">return</font>(0);
+<a name="line208">208: </a>}
+
+<a name="line212">212: </a><strong><font color="#4169E1"><a name="MatDestroy_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDestroy_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat)</font></strong>
+<a name="line213">213: </a>{
+<a name="line215">215: </a>  Mat_Shell      *shell = (Mat_Shell*)mat-&gt;data;
+
+<a name="line218">218: </a>  <font color="#4169E1">if</font> (shell-&gt;destroy) {
+<a name="line219">219: </a>    (*shell-&gt;destroy)(mat);
+<a name="line220">220: </a>  }
+<a name="line221">221: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;left_owned);
+<a name="line222">222: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;right_owned);
+<a name="line223">223: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;dshift_owned);
+<a name="line224">224: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;left_work);
+<a name="line225">225: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;right_work);
+<a name="line226">226: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;left_add_work);
+<a name="line227">227: </a>  <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(&amp;shell-&gt;right_add_work);
+<a name="line228">228: </a>  <A href="../../../../docs/manualpages/Sys/PetscFree.html#PetscFree">PetscFree</A>(mat-&gt;data);
+<a name="line229">229: </a>  <font color="#4169E1">return</font>(0);
+<a name="line230">230: </a>}
+
+<a name="line234">234: </a><strong><font color="#4169E1"><a name="MatMult_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMult_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line235">235: </a>{
+<a name="line236">236: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+<a name="line238">238: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            xx;
+
+<a name="line241">241: </a>  MatShellPreScaleRight(A,x,&amp;xx);
+<a name="line242">242: </a>  (*shell-&gt;mult)(A,xx,y);
+<a name="line243">243: </a>  MatShellShiftAndScale(A,xx,y);
+<a name="line244">244: </a>  MatShellPostScaleLeft(A,y);
+<a name="line245">245: </a>  <font color="#4169E1">return</font>(0);
+<a name="line246">246: </a>}
+
+<a name="line250">250: </a><strong><font color="#4169E1"><a name="MatMultAdd_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultAdd_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> z)</font></strong>
+<a name="line251">251: </a>{
+<a name="line252">252: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line256">256: </a>  <font color="#4169E1">if</font> (y == z) {
+<a name="line257">257: </a>    <font color="#4169E1">if</font> (!shell-&gt;right_add_work) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(z,&amp;shell-&gt;right_add_work);}
+<a name="line258">258: </a>    <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(A,x,shell-&gt;right_add_work);
+<a name="line259">259: </a>    <A href="../../../../docs/manualpages/Vec/VecWAXPY.html#VecWAXPY">VecWAXPY</A>(z,1.0,shell-&gt;right_add_work,y);
+<a name="line260">260: </a>  } <font color="#4169E1">else</font> {
+<a name="line261">261: </a>    <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(A,x,z);
+<a name="line262">262: </a>    <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(z,1.0,y);
+<a name="line263">263: </a>  }
+<a name="line264">264: </a>  <font color="#4169E1">return</font>(0);
+<a name="line265">265: </a>}
+
+<a name="line269">269: </a><strong><font color="#4169E1"><a name="MatMultTranspose_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultTranspose_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y)</font></strong>
+<a name="line270">270: </a>{
+<a name="line271">271: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+<a name="line273">273: </a>  <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>            xx;
+
+<a name="line276">276: </a>  MatShellPreScaleLeft(A,x,&amp;xx);
+<a name="line277">277: </a>  (*shell-&gt;multtranspose)(A,xx,y);
+<a name="line278">278: </a>  MatShellShiftAndScale(A,xx,y);
+<a name="line279">279: </a>  MatShellPostScaleRight(A,y);
+<a name="line280">280: </a>  <font color="#4169E1">return</font>(0);
+<a name="line281">281: </a>}
+
+<a name="line285">285: </a><strong><font color="#4169E1"><a name="MatMultTransposeAdd_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatMultTransposeAdd_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> z)</font></strong>
+<a name="line286">286: </a>{
+<a name="line287">287: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line291">291: </a>  <font color="#4169E1">if</font> (y == z) {
+<a name="line292">292: </a>    <font color="#4169E1">if</font> (!shell-&gt;left_add_work) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(z,&amp;shell-&gt;left_add_work);}
+<a name="line293">293: </a>    <A href="../../../../docs/manualpages/Mat/MatMultTranspose.html#MatMultTranspose">MatMultTranspose</A>(A,x,shell-&gt;left_add_work);
+<a name="line294">294: </a>    <A href="../../../../docs/manualpages/Vec/VecWAXPY.html#VecWAXPY">VecWAXPY</A>(z,1.0,shell-&gt;left_add_work,y);
+<a name="line295">295: </a>  } <font color="#4169E1">else</font> {
+<a name="line296">296: </a>    <A href="../../../../docs/manualpages/Mat/MatMultTranspose.html#MatMultTranspose">MatMultTranspose</A>(A,x,z);
+<a name="line297">297: </a>    <A href="../../../../docs/manualpages/Vec/VecAXPY.html#VecAXPY">VecAXPY</A>(z,1.0,y);
+<a name="line298">298: </a>  }
+<a name="line299">299: </a>  <font color="#4169E1">return</font>(0);
+<a name="line300">300: </a>}
+
+<a name="line304">304: </a><strong><font color="#4169E1"><a name="MatGetDiagonal_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatGetDiagonal_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> v)</font></strong>
+<a name="line305">305: </a>{
+<a name="line306">306: </a>  Mat_Shell      *shell = (Mat_Shell*)A-&gt;data;
+
+<a name="line310">310: </a>  (*shell-&gt;getdiagonal)(A,v);
+<a name="line311">311: </a>  <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(v,shell-&gt;vscale);
+<a name="line312">312: </a>  <font color="#4169E1">if</font> (shell-&gt;dshift) {
+<a name="line313">313: </a>    <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(v,v,shell-&gt;dshift);
+<a name="line314">314: </a>  } <font color="#4169E1">else</font> {
+<a name="line315">315: </a>    <A href="../../../../docs/manualpages/Vec/VecShift.html#VecShift">VecShift</A>(v,shell-&gt;vshift);
+<a name="line316">316: </a>  }
+<a name="line317">317: </a>  <font color="#4169E1">if</font> (shell-&gt;left)  {<A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(v,v,shell-&gt;left);}
+<a name="line318">318: </a>  <font color="#4169E1">if</font> (shell-&gt;right) {<A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(v,v,shell-&gt;right);}
+<a name="line319">319: </a>  <font color="#4169E1">return</font>(0);
+<a name="line320">320: </a>}
+
+<a name="line324">324: </a><strong><font color="#4169E1"><a name="MatShift_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatShift_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a)</font></strong>
+<a name="line325">325: </a>{
+<a name="line326">326: </a>  Mat_Shell      *shell = (Mat_Shell*)Y-&gt;data;
+
+<a name="line330">330: </a>  <font color="#4169E1">if</font> (shell-&gt;left || shell-&gt;right || shell-&gt;dshift) {
+<a name="line331">331: </a>    <font color="#4169E1">if</font> (!shell-&gt;dshift) {
+<a name="line332">332: </a>      <font color="#4169E1">if</font> (!shell-&gt;dshift_owned) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(shell-&gt;left ? shell-&gt;left : shell-&gt;right, &amp;shell-&gt;dshift_owned);}
+<a name="line333">333: </a>      shell-&gt;dshift = shell-&gt;dshift_owned;
+<a name="line334">334: </a>      <A href="../../../../docs/manualpages/Vec/VecSet.html#VecSet">VecSet</A>(shell-&gt;dshift,shell-&gt;vshift+a);
+<a name="line335">335: </a>    } <font color="#4169E1">else</font> {<A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(shell-&gt;dshift,a);}
+<a name="line336">336: </a>    <font color="#4169E1">if</font> (shell-&gt;left)  {<A href="../../../../docs/manualpages/Vec/VecPointwiseDivide.html#VecPointwiseDivide">VecPointwiseDivide</A>(shell-&gt;dshift,shell-&gt;dshift,shell-&gt;left);}
+<a name="line337">337: </a>    <font color="#4169E1">if</font> (shell-&gt;right) {<A href="../../../../docs/manualpages/Vec/VecPointwiseDivide.html#VecPointwiseDivide">VecPointwiseDivide</A>(shell-&gt;dshift,shell-&gt;dshift,shell-&gt;right);}
+<a name="line338">338: </a>  } <font color="#4169E1">else</font> shell-&gt;vshift += a;
+<a name="line339">339: </a>  MatShellUseScaledMethods(Y);
+<a name="line340">340: </a>  <font color="#4169E1">return</font>(0);
+<a name="line341">341: </a>}
+
+<a name="line345">345: </a><strong><font color="#4169E1"><a name="MatScale_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatScale_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Y,<A href="../../../../docs/manualpages/Sys/PetscScalar.html#PetscScalar">PetscScalar</A> a)</font></strong>
+<a name="line346">346: </a>{
+<a name="line347">347: </a>  Mat_Shell      *shell = (Mat_Shell*)Y-&gt;data;
+
+<a name="line351">351: </a>  shell-&gt;vscale *= a;
+<a name="line352">352: </a>  <font color="#4169E1">if</font> (shell-&gt;dshift) {
+<a name="line353">353: </a>    <A href="../../../../docs/manualpages/Vec/VecScale.html#VecScale">VecScale</A>(shell-&gt;dshift,a);
+<a name="line354">354: </a>  } <font color="#4169E1">else</font> shell-&gt;vshift *= a;
+<a name="line355">355: </a>  MatShellUseScaledMethods(Y);
+<a name="line356">356: </a>  <font color="#4169E1">return</font>(0);
+<a name="line357">357: </a>}
+
+<a name="line361">361: </a><strong><font color="#4169E1"><a name="MatDiagonalScale_Shell"></a>static <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatDiagonalScale_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Y,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> left,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> right)</font></strong>
+<a name="line362">362: </a>{
+<a name="line363">363: </a>  Mat_Shell      *shell = (Mat_Shell*)Y-&gt;data;
+
+<a name="line367">367: </a>  <font color="#4169E1">if</font> (left) {
+<a name="line368">368: </a>    <font color="#4169E1">if</font> (!shell-&gt;left_owned) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(left,&amp;shell-&gt;left_owned);}
+<a name="line369">369: </a>    <font color="#4169E1">if</font> (shell-&gt;left) {
+<a name="line370">370: </a>      <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(shell-&gt;left,shell-&gt;left,left);
+<a name="line371">371: </a>    } <font color="#4169E1">else</font> {
+<a name="line372">372: </a>      shell-&gt;left = shell-&gt;left_owned;
+<a name="line373">373: </a>      <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(left,shell-&gt;left);
+<a name="line374">374: </a>    }
+<a name="line375">375: </a>  }
+<a name="line376">376: </a>  <font color="#4169E1">if</font> (right) {
+<a name="line377">377: </a>    <font color="#4169E1">if</font> (!shell-&gt;right_owned) {<A href="../../../../docs/manualpages/Vec/VecDuplicate.html#VecDuplicate">VecDuplicate</A>(right,&amp;shell-&gt;right_owned);}
+<a name="line378">378: </a>    <font color="#4169E1">if</font> (shell-&gt;right) {
+<a name="line379">379: </a>      <A href="../../../../docs/manualpages/Vec/VecPointwiseMult.html#VecPointwiseMult">VecPointwiseMult</A>(shell-&gt;right,shell-&gt;right,right);
+<a name="line380">380: </a>    } <font color="#4169E1">else</font> {
+<a name="line381">381: </a>      shell-&gt;right = shell-&gt;right_owned;
+<a name="line382">382: </a>      <A href="../../../../docs/manualpages/Vec/VecCopy.html#VecCopy">VecCopy</A>(right,shell-&gt;right);
+<a name="line383">383: </a>    }
+<a name="line384">384: </a>  }
+<a name="line385">385: </a>  MatShellUseScaledMethods(Y);
+<a name="line386">386: </a>  <font color="#4169E1">return</font>(0);
+<a name="line387">387: </a>}
+
+<a name="line391">391: </a><strong><font color="#4169E1"><a name="MatAssemblyEnd_Shell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatAssemblyEnd_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> Y,<A href="../../../../docs/manualpages/Mat/MatAssemblyType.html#MatAssemblyType">MatAssemblyType</A> t)</font></strong>
+<a name="line392">392: </a>{
+<a name="line393">393: </a>  Mat_Shell *shell = (Mat_Shell*)Y-&gt;data;
+
+<a name="line396">396: </a>  <font color="#4169E1">if</font> (t == MAT_FINAL_ASSEMBLY) {
+<a name="line397">397: </a>    shell-&gt;vshift = 0.0;
+<a name="line398">398: </a>    shell-&gt;vscale = 1.0;
+<a name="line399">399: </a>    shell-&gt;dshift = NULL;
+<a name="line400">400: </a>    shell-&gt;left   = NULL;
+<a name="line401">401: </a>    shell-&gt;right  = NULL;
+<a name="line402">402: </a>    <font color="#4169E1">if</font> (shell-&gt;mult) {
+<a name="line403">403: </a>      Y-&gt;ops-&gt;mult = shell-&gt;mult;
+<a name="line404">404: </a>      shell-&gt;mult  = NULL;
+<a name="line405">405: </a>    }
+<a name="line406">406: </a>    <font color="#4169E1">if</font> (shell-&gt;multtranspose) {
+<a name="line407">407: </a>      Y-&gt;ops-&gt;multtranspose = shell-&gt;multtranspose;
+<a name="line408">408: </a>      shell-&gt;multtranspose  = NULL;
+<a name="line409">409: </a>    }
+<a name="line410">410: </a>    <font color="#4169E1">if</font> (shell-&gt;getdiagonal) {
+<a name="line411">411: </a>      Y-&gt;ops-&gt;getdiagonal = shell-&gt;getdiagonal;
+<a name="line412">412: </a>      shell-&gt;getdiagonal  = NULL;
+<a name="line413">413: </a>    }
+<a name="line414">414: </a>    shell-&gt;usingscaled = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+<a name="line415">415: </a>  }
+<a name="line416">416: </a>  <font color="#4169E1">return</font>(0);
+<a name="line417">417: </a>}
+
+<a name="line419">419: </a><strong><font color="#4169E1">extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatConvert_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>, <A href="../../../../docs/manualpages/Mat/MatType.html#MatType">MatType</A>,<A href="../../../../docs/manualpages/Mat/MatReuse.html#MatReuse">MatReuse</A>,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>*)</font></strong>;
+
+<a name="line421">421: </a>static <font color="#4169E1">struct _MatOps</font> MatOps_Values = {0,
+<a name="line422">422: </a>                                       0,
+<a name="line423">423: </a>                                       0,
+<a name="line424">424: </a>                                       0,
+<a name="line425">425: </a>                                <font color="#B22222">/* 4*/</font> 0,
+<a name="line426">426: </a>                                       0,
+<a name="line427">427: </a>                                       0,
+<a name="line428">428: </a>                                       0,
+<a name="line429">429: </a>                                       0,
+<a name="line430">430: </a>                                       0,
+<a name="line431">431: </a>                                <font color="#B22222">/*10*/</font> 0,
+<a name="line432">432: </a>                                       0,
+<a name="line433">433: </a>                                       0,
+<a name="line434">434: </a>                                       0,
+<a name="line435">435: </a>                                       0,
+<a name="line436">436: </a>                                <font color="#B22222">/*15*/</font> 0,
+<a name="line437">437: </a>                                       0,
+<a name="line438">438: </a>                                       0,
+<a name="line439">439: </a>                                       MatDiagonalScale_Shell,
+<a name="line440">440: </a>                                       0,
+<a name="line441">441: </a>                                <font color="#B22222">/*20*/</font> 0,
+<a name="line442">442: </a>                                       MatAssemblyEnd_Shell,
+<a name="line443">443: </a>                                       0,
+<a name="line444">444: </a>                                       0,
+<a name="line445">445: </a>                                <font color="#B22222">/*24*/</font> 0,
+<a name="line446">446: </a>                                       0,
+<a name="line447">447: </a>                                       0,
+<a name="line448">448: </a>                                       0,
+<a name="line449">449: </a>                                       0,
+<a name="line450">450: </a>                                <font color="#B22222">/*29*/</font> 0,
+<a name="line451">451: </a>                                       0,
+<a name="line452">452: </a>                                       0,
+<a name="line453">453: </a>                                       0,
+<a name="line454">454: </a>                                       0,
+<a name="line455">455: </a>                                <font color="#B22222">/*34*/</font> 0,
+<a name="line456">456: </a>                                       0,
+<a name="line457">457: </a>                                       0,
+<a name="line458">458: </a>                                       0,
+<a name="line459">459: </a>                                       0,
+<a name="line460">460: </a>                                <font color="#B22222">/*39*/</font> 0,
+<a name="line461">461: </a>                                       0,
+<a name="line462">462: </a>                                       0,
+<a name="line463">463: </a>                                       0,
+<a name="line464">464: </a>                                       0,
+<a name="line465">465: </a>                                <font color="#B22222">/*44*/</font> 0,
+<a name="line466">466: </a>                                       MatScale_Shell,
+<a name="line467">467: </a>                                       MatShift_Shell,
+<a name="line468">468: </a>                                       0,
+<a name="line469">469: </a>                                       0,
+<a name="line470">470: </a>                                <font color="#B22222">/*49*/</font> 0,
+<a name="line471">471: </a>                                       0,
+<a name="line472">472: </a>                                       0,
+<a name="line473">473: </a>                                       0,
+<a name="line474">474: </a>                                       0,
+<a name="line475">475: </a>                                <font color="#B22222">/*54*/</font> 0,
+<a name="line476">476: </a>                                       0,
+<a name="line477">477: </a>                                       0,
+<a name="line478">478: </a>                                       0,
+<a name="line479">479: </a>                                       0,
+<a name="line480">480: </a>                                <font color="#B22222">/*59*/</font> 0,
+<a name="line481">481: </a>                                       MatDestroy_Shell,
+<a name="line482">482: </a>                                       0,
+<a name="line483">483: </a>                                       0,
+<a name="line484">484: </a>                                       0,
+<a name="line485">485: </a>                                <font color="#B22222">/*64*/</font> 0,
+<a name="line486">486: </a>                                       0,
+<a name="line487">487: </a>                                       0,
+<a name="line488">488: </a>                                       0,
+<a name="line489">489: </a>                                       0,
+<a name="line490">490: </a>                                <font color="#B22222">/*69*/</font> 0,
+<a name="line491">491: </a>                                       0,
+<a name="line492">492: </a>                                       MatConvert_Shell,
+<a name="line493">493: </a>                                       0,
+<a name="line494">494: </a>                                       0,
+<a name="line495">495: </a>                                <font color="#B22222">/*74*/</font> 0,
+<a name="line496">496: </a>                                       0,
+<a name="line497">497: </a>                                       0,
+<a name="line498">498: </a>                                       0,
+<a name="line499">499: </a>                                       0,
+<a name="line500">500: </a>                                <font color="#B22222">/*79*/</font> 0,
+<a name="line501">501: </a>                                       0,
+<a name="line502">502: </a>                                       0,
+<a name="line503">503: </a>                                       0,
+<a name="line504">504: </a>                                       0,
+<a name="line505">505: </a>                                <font color="#B22222">/*84*/</font> 0,
+<a name="line506">506: </a>                                       0,
+<a name="line507">507: </a>                                       0,
+<a name="line508">508: </a>                                       0,
+<a name="line509">509: </a>                                       0,
+<a name="line510">510: </a>                                <font color="#B22222">/*89*/</font> 0,
+<a name="line511">511: </a>                                       0,
+<a name="line512">512: </a>                                       0,
+<a name="line513">513: </a>                                       0,
+<a name="line514">514: </a>                                       0,
+<a name="line515">515: </a>                                <font color="#B22222">/*94*/</font> 0,
+<a name="line516">516: </a>                                       0,
+<a name="line517">517: </a>                                       0,
+<a name="line518">518: </a>                                       0,
+<a name="line519">519: </a>                                       0,
+<a name="line520">520: </a>                                <font color="#B22222">/*99*/</font> 0,
+<a name="line521">521: </a>                                       0,
+<a name="line522">522: </a>                                       0,
+<a name="line523">523: </a>                                       0,
+<a name="line524">524: </a>                                       0,
+<a name="line525">525: </a>                               <font color="#B22222">/*104*/</font> 0,
+<a name="line526">526: </a>                                       0,
+<a name="line527">527: </a>                                       0,
+<a name="line528">528: </a>                                       0,
+<a name="line529">529: </a>                                       0,
+<a name="line530">530: </a>                               <font color="#B22222">/*109*/</font> 0,
+<a name="line531">531: </a>                                       0,
+<a name="line532">532: </a>                                       0,
+<a name="line533">533: </a>                                       0,
+<a name="line534">534: </a>                                       0,
+<a name="line535">535: </a>                               <font color="#B22222">/*114*/</font> 0,
+<a name="line536">536: </a>                                       0,
+<a name="line537">537: </a>                                       0,
+<a name="line538">538: </a>                                       0,
+<a name="line539">539: </a>                                       0,
+<a name="line540">540: </a>                               <font color="#B22222">/*119*/</font> 0,
+<a name="line541">541: </a>                                       0,
+<a name="line542">542: </a>                                       0,
+<a name="line543">543: </a>                                       0,
+<a name="line544">544: </a>                                       0,
+<a name="line545">545: </a>                               <font color="#B22222">/*124*/</font> 0,
+<a name="line546">546: </a>                                       0,
+<a name="line547">547: </a>                                       0,
+<a name="line548">548: </a>                                       0,
+<a name="line549">549: </a>                                       0,
+<a name="line550">550: </a>                               <font color="#B22222">/*129*/</font> 0,
+<a name="line551">551: </a>                                       0,
+<a name="line552">552: </a>                                       0,
+<a name="line553">553: </a>                                       0,
+<a name="line554">554: </a>                                       0,
+<a name="line555">555: </a>                               <font color="#B22222">/*134*/</font> 0,
+<a name="line556">556: </a>                                       0,
+<a name="line557">557: </a>                                       0,
+<a name="line558">558: </a>                                       0,
+<a name="line559">559: </a>                                       0,
+<a name="line560">560: </a>                               <font color="#B22222">/*139*/</font> 0,
+<a name="line561">561: </a>                                       0,
+<a name="line562">562: </a>                                       0
+<a name="line563">563: </a>};
+
+<a name="line565">565: </a><font color="#B22222">/*MC</font>
+<a name="line566">566: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A> - <A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A> = "shell" - A matrix type to be used to define your own matrix type -- perhaps matrix free.</font>
+
+<a name="line568">568: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line570">570: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A></font>
+<a name="line571">571: </a><font color="#B22222">M*/</font>
+
+<a name="line575">575: </a><strong><font color="#4169E1"><a name="MatCreate_Shell"></a>PETSC_EXTERN <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> MatCreate_Shell(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A)</font></strong>
+<a name="line576">576: </a>{
+<a name="line577">577: </a>  Mat_Shell      *b;
+
+<a name="line581">581: </a>  <A href="../../../../docs/manualpages/Sys/PetscMemcpy.html#PetscMemcpy">PetscMemcpy</A>(A-&gt;ops,&amp;MatOps_Values,<font color="#4169E1">sizeof</font>(<font color="#4169E1">struct _MatOps</font>));
+
+<a name="line583">583: </a>  <A href="../../../../docs/manualpages/Sys/PetscNewLog.html#PetscNewLog">PetscNewLog</A>(A,&amp;b);
+<a name="line584">584: </a>  A-&gt;data = (void*)b;
+
+<a name="line586">586: </a>  <A href="../../../../docs/manualpages/IS/PetscLayoutSetUp.html#PetscLayoutSetUp">PetscLayoutSetUp</A>(A-&gt;rmap);
+<a name="line587">587: </a>  <A href="../../../../docs/manualpages/IS/PetscLayoutSetUp.html#PetscLayoutSetUp">PetscLayoutSetUp</A>(A-&gt;cmap);
+
+<a name="line589">589: </a>  b-&gt;ctx           = 0;
+<a name="line590">590: </a>  b-&gt;vshift        = 0.0;
+<a name="line591">591: </a>  b-&gt;vscale        = 1.0;
+<a name="line592">592: </a>  b-&gt;mult          = 0;
+<a name="line593">593: </a>  b-&gt;multtranspose = 0;
+<a name="line594">594: </a>  b-&gt;getdiagonal   = 0;
+<a name="line595">595: </a>  A-&gt;assembled     = <A href="../../../../docs/manualpages/Sys/PETSC_TRUE.html#PETSC_TRUE">PETSC_TRUE</A>;
+<a name="line596">596: </a>  A-&gt;preallocated  = <A href="../../../../docs/manualpages/Sys/PETSC_FALSE.html#PETSC_FALSE">PETSC_FALSE</A>;
+
+<a name="line598">598: </a>  PetscObjectChangeTypeName((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)A,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>);
+<a name="line599">599: </a>  <font color="#4169E1">return</font>(0);
+<a name="line600">600: </a>}
+
+<a name="line604">604: </a><font color="#B22222">/*@C</font>
+<a name="line605">605: </a><font color="#B22222">   <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A> - Creates a new matrix class for use with a user-defined</font>
+<a name="line606">606: </a><font color="#B22222">   private data storage format.</font>
+
+<a name="line608">608: </a><font color="#B22222">  Collective on <A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A></font>
+
+<a name="line610">610: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line611">611: </a><font color="#B22222">+  comm - MPI communicator</font>
+<a name="line612">612: </a><font color="#B22222">.  m - number of local rows (must be given)</font>
+<a name="line613">613: </a><font color="#B22222">.  n - number of local columns (must be given)</font>
+<a name="line614">614: </a><font color="#B22222">.  M - number of global rows (may be <A href="../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>)</font>
+<a name="line615">615: </a><font color="#B22222">.  N - number of global columns (may be <A href="../../../../docs/manualpages/Sys/PETSC_DETERMINE.html#PETSC_DETERMINE">PETSC_DETERMINE</A>)</font>
+<a name="line616">616: </a><font color="#B22222">-  ctx - pointer to data needed by the shell matrix routines</font>
+
+<a name="line618">618: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line619">619: </a><font color="#B22222">.  A - the matrix</font>
+
+<a name="line621">621: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line623">623: </a><font color="#B22222">  Usage:</font>
+<a name="line624">624: </a><font color="#B22222">$    extern int mult(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);</font>
+<a name="line625">625: </a><font color="#B22222">$    <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(comm,m,n,M,N,ctx,&amp;mat);</font>
+<a name="line626">626: </a><font color="#B22222">$    <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(mat,MATOP_MULT,(void(*)(void))mult);</font>
+<a name="line627">627: </a><font color="#B22222">$    [ Use matrix for operations that have been set ]</font>
+<a name="line628">628: </a><font color="#B22222">$    <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(mat);</font>
+
+<a name="line630">630: </a><font color="#B22222">   Notes:</font>
+<a name="line631">631: </a><font color="#B22222">   The shell matrix type is intended to provide a simple class to use</font>
+<a name="line632">632: </a><font color="#B22222">   with <A href="../../../../docs/manualpages/KSP/KSP.html#KSP">KSP</A> (such as, for use with matrix-free methods). You should not</font>
+<a name="line633">633: </a><font color="#B22222">   use the shell type if you plan to define a complete matrix class.</font>
+
+<a name="line635">635: </a><font color="#B22222">   Fortran Notes: The context can only be an integer or a <A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A></font>
+<a name="line636">636: </a><font color="#B22222">      unfortunately it cannot be a Fortran array or derived type.</font>
+
+<a name="line638">638: </a><font color="#B22222">   PETSc requires that matrices and vectors being used for certain</font>
+<a name="line639">639: </a><font color="#B22222">   operations are partitioned accordingly.  For example, when</font>
+<a name="line640">640: </a><font color="#B22222">   creating a shell matrix, A, that supports parallel matrix-vector</font>
+<a name="line641">641: </a><font color="#B22222">   products using <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(A,x,y) the user should set the number</font>
+<a name="line642">642: </a><font color="#B22222">   of local matrix rows to be the number of local elements of the</font>
+<a name="line643">643: </a><font color="#B22222">   corresponding result vector, y. Note that this is information is</font>
+<a name="line644">644: </a><font color="#B22222">   required for use of the matrix interface routines, even though</font>
+<a name="line645">645: </a><font color="#B22222">   the shell matrix may not actually be physically partitioned.</font>
+<a name="line646">646: </a><font color="#B22222">   For example,</font>
+
+<a name="line648">648: </a><font color="#B22222">$</font>
+<a name="line649">649: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A> x, y</font>
+<a name="line650">650: </a><font color="#B22222">$     extern int mult(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);</font>
+<a name="line651">651: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> A</font>
+<a name="line652">652: </a><font color="#B22222">$</font>
+<a name="line653">653: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/VecCreateMPI.html#VecCreateMPI">VecCreateMPI</A>(comm,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,M,&amp;y);</font>
+<a name="line654">654: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/VecCreateMPI.html#VecCreateMPI">VecCreateMPI</A>(comm,<A href="../../../../docs/manualpages/Sys/PETSC_DECIDE.html#PETSC_DECIDE">PETSC_DECIDE</A>,N,&amp;x);</font>
+<a name="line655">655: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(y,&amp;m);</font>
+<a name="line656">656: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/VecGetLocalSize.html#VecGetLocalSize">VecGetLocalSize</A>(x,&amp;n);</font>
+<a name="line657">657: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(comm,m,n,M,N,ctx,&amp;A);</font>
+<a name="line658">658: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(mat,MATOP_MULT,(void(*)(void))mult);</font>
+<a name="line659">659: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(A,x,y);</font>
+<a name="line660">660: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Mat/MatDestroy.html#MatDestroy">MatDestroy</A>(A);</font>
+<a name="line661">661: </a><font color="#B22222">$     <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(y); <A href="../../../../docs/manualpages/Vec/VecDestroy.html#VecDestroy">VecDestroy</A>(x);</font>
+<a name="line662">662: </a><font color="#B22222">$</font>
+
+<a name="line664">664: </a><font color="#B22222">.keywords: matrix, shell, create</font>
+
+<a name="line666">666: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(), <A href="../../../../docs/manualpages/Mat/MatHasOperation.html#MatHasOperation">MatHasOperation</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>()</font>
+<a name="line667">667: </a><font color="#B22222">@*/</font>
+<a name="line668">668: </a><strong><font color="#4169E1"><a name="MatCreateShell"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(<A href="../../../../docs/manualpages/Sys/MPI_Comm.html#MPI_Comm">MPI_Comm</A> comm,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> m,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> n,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> M,<A href="../../../../docs/manualpages/Sys/PetscInt.html#PetscInt">PetscInt</A> N,void *ctx,<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> *A)</font></strong>
+<a name="line669">669: </a>{
+
+<a name="line673">673: </a>  <A href="../../../../docs/manualpages/Mat/MatCreate.html#MatCreate">MatCreate</A>(comm,A);
+<a name="line674">674: </a>  <A href="../../../../docs/manualpages/Mat/MatSetSizes.html#MatSetSizes">MatSetSizes</A>(*A,m,n,M,N);
+<a name="line675">675: </a>  <A href="../../../../docs/manualpages/Mat/MatSetType.html#MatSetType">MatSetType</A>(*A,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>);
+<a name="line676">676: </a>  <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>(*A,ctx);
+<a name="line677">677: </a>  <A href="../../../../docs/manualpages/Mat/MatSetUp.html#MatSetUp">MatSetUp</A>(*A);
+<a name="line678">678: </a>  <font color="#4169E1">return</font>(0);
+<a name="line679">679: </a>}
+
+<a name="line683">683: </a><font color="#B22222">/*@</font>
+<a name="line684">684: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A> - sets the context for a shell matrix</font>
+
+<a name="line686">686: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A></font>
+
+<a name="line688">688: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line689">689: </a><font color="#B22222">+   mat - the shell matrix</font>
+<a name="line690">690: </a><font color="#B22222">-   ctx - the context</font>
+
+<a name="line692">692: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line694">694: </a><font color="#B22222">   Fortran Notes: The context can only be an integer or a <A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A></font>
+<a name="line695">695: </a><font color="#B22222">      unfortunately it cannot be a Fortran array or derived type.</font>
+
+<a name="line697">697: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetOperation.html#MatShellGetOperation">MatShellGetOperation</A>()</font>
+<a name="line698">698: </a><font color="#B22222">@*/</font>
+<a name="line699">699: </a><strong><font color="#4169E1"><a name="MatShellSetContext"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat,void *ctx)</font></strong>
+<a name="line700">700: </a>{
+<a name="line701">701: </a>  Mat_Shell      *shell = (Mat_Shell*)mat-&gt;data;
+<a name="line703">703: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+
+<a name="line707">707: </a>  <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>,&amp;flg);
+<a name="line708">708: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line709">709: </a>    shell-&gt;ctx = ctx;
+<a name="line710">710: </a>  } <font color="#4169E1">else</font> <A href="../../../../docs/manualpages/Sys/SETERRQ.html#SETERRQ">SETERRQ</A>(<A href="../../../../docs/manualpages/Sys/PetscObjectComm.html#PetscObjectComm">PetscObjectComm</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat),PETSC_ERR_SUP,<font color="#666666">"Cannot attach context to non-shell matrix"</font>);
+<a name="line711">711: </a>  <font color="#4169E1">return</font>(0);
+<a name="line712">712: </a>}
+
+<a name="line716">716: </a><font color="#B22222">/*@C</font>
+<a name="line717">717: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A> - Allows user to set a matrix operation for</font>
+<a name="line718">718: </a><font color="#B22222">                           a shell matrix.</font>
+
+<a name="line720">720: </a><font color="#B22222">   Logically Collective on <A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A></font>
+
+<a name="line722">722: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line723">723: </a><font color="#B22222">+   mat - the shell matrix</font>
+<a name="line724">724: </a><font color="#B22222">.   op - the name of the operation</font>
+<a name="line725">725: </a><font color="#B22222">-   f - the function that provides the operation.</font>
+
+<a name="line727">727: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line729">729: </a><font color="#B22222">    Usage:</font>
+<a name="line730">730: </a><font color="#B22222">$      extern <A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> usermult(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>);</font>
+<a name="line731">731: </a><font color="#B22222">$      <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(comm,m,n,M,N,ctx,&amp;A);</font>
+<a name="line732">732: </a><font color="#B22222">$      <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(A,MATOP_MULT,(void(*)(void))usermult);</font>
+
+<a name="line734">734: </a><font color="#B22222">    Notes:</font>
+<a name="line735">735: </a><font color="#B22222">    See the file include/petscmat.h for a complete list of matrix</font>
+<a name="line736">736: </a><font color="#B22222">    operations, which all have the form MATOP_&lt;OPERATION&gt;, where</font>
+<a name="line737">737: </a><font color="#B22222">    &lt;OPERATION&gt; is the name (in all capital letters) of the</font>
+<a name="line738">738: </a><font color="#B22222">    user interface routine (e.g., <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>() -&gt; MATOP_MULT).</font>
+
+<a name="line740">740: </a><font color="#B22222">    All user-provided functions (execept for MATOP_DESTROY) should have the same calling</font>
+<a name="line741">741: </a><font color="#B22222">    sequence as the usual matrix interface routines, since they</font>
+<a name="line742">742: </a><font color="#B22222">    are intended to be accessed via the usual matrix interface</font>
+<a name="line743">743: </a><font color="#B22222">    routines, e.g.,</font>
+<a name="line744">744: </a><font color="#B22222">$       <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>) -&gt; usermult(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font>
+
+<a name="line746">746: </a><font color="#B22222">    In particular each function MUST return an error code of 0 on success and</font>
+<a name="line747">747: </a><font color="#B22222">    nonzero on failure.</font>
+
+<a name="line749">749: </a><font color="#B22222">    Within each user-defined routine, the user should call</font>
+<a name="line750">750: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>() to obtain the user-defined context that was</font>
+<a name="line751">751: </a><font color="#B22222">    set by <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>().</font>
+
+<a name="line753">753: </a><font color="#B22222">    Fortran Notes: For <A href="../../../../docs/manualpages/Mat/MatGetVecs.html#MatGetVecs">MatGetVecs</A>() the user code should check if the input left or right matrix is -1 and in that case not</font>
+<a name="line754">754: </a><font color="#B22222">       generate a matrix. See src/mat/examples/tests/ex120f.F</font>
+
+<a name="line756">756: </a><font color="#B22222">.keywords: matrix, shell, set, operation</font>
+
+<a name="line758">758: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetOperation.html#MatShellGetOperation">MatShellGetOperation</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>()</font>
+<a name="line759">759: </a><font color="#B22222">@*/</font>
+<a name="line760">760: </a><strong><font color="#4169E1"><a name="MatShellSetOperation"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat,MatOperation op,void (*f)(void))</font></strong>
+<a name="line761">761: </a>{
+<a name="line763">763: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+
+<a name="line767">767: </a>  <font color="#4169E1">switch</font> (op) {
+<a name="line768">768: </a>  <font color="#4169E1">case</font> MATOP_DESTROY:
+<a name="line769">769: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>,&amp;flg);
+<a name="line770">770: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line771">771: </a>      Mat_Shell *shell = (Mat_Shell*)mat-&gt;data;
+<a name="line772">772: </a>      shell-&gt;destroy = (<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>))f;
+<a name="line773">773: </a>    } <font color="#4169E1">else</font> mat-&gt;ops-&gt;destroy = (<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>))f;
+<a name="line774">774: </a>    <font color="#4169E1">break</font>;
+<a name="line775">775: </a>  <font color="#4169E1">case</font> MATOP_VIEW:
+<a name="line776">776: </a>    mat-&gt;ops-&gt;view = (<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Viewer/PetscViewer.html#PetscViewer">PetscViewer</A>))f;
+<a name="line777">777: </a>    <font color="#4169E1">break</font>;
+<a name="line778">778: </a>  <font color="#4169E1">case</font> MATOP_MULT:
+<a name="line779">779: </a>    mat-&gt;ops-&gt;mult = (<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>))f;
+<a name="line780">780: </a>    <font color="#4169E1">if</font> (!mat-&gt;ops-&gt;multadd) mat-&gt;ops-&gt;multadd = MatMultAdd_Shell;
+<a name="line781">781: </a>    <font color="#4169E1">break</font>;
+<a name="line782">782: </a>  <font color="#4169E1">case</font> MATOP_MULT_TRANSPOSE:
+<a name="line783">783: </a>    mat-&gt;ops-&gt;multtranspose = (<A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A> (*)(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>))f;
+<a name="line784">784: </a>    <font color="#4169E1">if</font> (!mat-&gt;ops-&gt;multtransposeadd) mat-&gt;ops-&gt;multtransposeadd = MatMultTransposeAdd_Shell;
+<a name="line785">785: </a>    <font color="#4169E1">break</font>;
+<a name="line786">786: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line787">787: </a>    (((void(**)(void))mat-&gt;ops)[op]) = f;
+<a name="line788">788: </a>  }
+<a name="line789">789: </a>  <font color="#4169E1">return</font>(0);
+<a name="line790">790: </a>}
+
+<a name="line794">794: </a><font color="#B22222">/*@C</font>
+<a name="line795">795: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellGetOperation.html#MatShellGetOperation">MatShellGetOperation</A> - Gets a matrix function for a shell matrix.</font>
+
+<a name="line797">797: </a><font color="#B22222">    Not Collective</font>
+
+<a name="line799">799: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line800">800: </a><font color="#B22222">+   mat - the shell matrix</font>
+<a name="line801">801: </a><font color="#B22222">-   op - the name of the operation</font>
+
+<a name="line803">803: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line804">804: </a><font color="#B22222">.   f - the function that provides the operation.</font>
+
+<a name="line806">806: </a><font color="#B22222">    Level: advanced</font>
+
+<a name="line808">808: </a><font color="#B22222">    Notes:</font>
+<a name="line809">809: </a><font color="#B22222">    See the file include/petscmat.h for a complete list of matrix</font>
+<a name="line810">810: </a><font color="#B22222">    operations, which all have the form MATOP_&lt;OPERATION&gt;, where</font>
+<a name="line811">811: </a><font color="#B22222">    &lt;OPERATION&gt; is the name (in all capital letters) of the</font>
+<a name="line812">812: </a><font color="#B22222">    user interface routine (e.g., <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>() -&gt; MATOP_MULT).</font>
+
+<a name="line814">814: </a><font color="#B22222">    All user-provided functions have the same calling</font>
+<a name="line815">815: </a><font color="#B22222">    sequence as the usual matrix interface routines, since they</font>
+<a name="line816">816: </a><font color="#B22222">    are intended to be accessed via the usual matrix interface</font>
+<a name="line817">817: </a><font color="#B22222">    routines, e.g.,</font>
+<a name="line818">818: </a><font color="#B22222">$       <A href="../../../../docs/manualpages/Mat/MatMult.html#MatMult">MatMult</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>) -&gt; usermult(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>,<A href="../../../../docs/manualpages/Vec/Vec.html#Vec">Vec</A>)</font>
+
+<a name="line820">820: </a><font color="#B22222">    Within each user-defined routine, the user should call</font>
+<a name="line821">821: </a><font color="#B22222">    <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>() to obtain the user-defined context that was</font>
+<a name="line822">822: </a><font color="#B22222">    set by <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>().</font>
+
+<a name="line824">824: </a><font color="#B22222">.keywords: matrix, shell, set, operation</font>
+
+<a name="line826">826: </a><font color="#B22222">.seealso: <A href="../../../../docs/manualpages/Mat/MatCreateShell.html#MatCreateShell">MatCreateShell</A>(), <A href="../../../../docs/manualpages/Mat/MatShellGetContext.html#MatShellGetContext">MatShellGetContext</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetOperation.html#MatShellSetOperation">MatShellSetOperation</A>(), <A href="../../../../docs/manualpages/Mat/MatShellSetContext.html#MatShellSetContext">MatShellSetContext</A>()</font>
+<a name="line827">827: </a><font color="#B22222">@*/</font>
+<a name="line828">828: </a><strong><font color="#4169E1"><a name="MatShellGetOperation"></a><A href="../../../../docs/manualpages/Sys/PetscErrorCode.html#PetscErrorCode">PetscErrorCode</A>  <A href="../../../../docs/manualpages/Mat/MatShellGetOperation.html#MatShellGetOperation">MatShellGetOperation</A>(<A href="../../../../docs/manualpages/Mat/Mat.html#Mat">Mat</A> mat,MatOperation op,void(**f)(void))</font></strong>
+<a name="line829">829: </a>{
+<a name="line831">831: </a>  <A href="../../../../docs/manualpages/Sys/PetscBool.html#PetscBool">PetscBool</A>      flg;
+
+<a name="line835">835: </a>  <font color="#4169E1">if</font> (op == MATOP_DESTROY) {
+<a name="line836">836: </a>    <A href="../../../../docs/manualpages/Sys/PetscObjectTypeCompare.html#PetscObjectTypeCompare">PetscObjectTypeCompare</A>((<A href="../../../../docs/manualpages/Sys/PetscObject.html#PetscObject">PetscObject</A>)mat,<A href="../../../../docs/manualpages/Mat/MATSHELL.html#MATSHELL">MATSHELL</A>,&amp;flg);
+<a name="line837">837: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line838">838: </a>      Mat_Shell *shell = (Mat_Shell*)mat-&gt;data;
+<a name="line839">839: </a>      *f = (void (*)(void))shell-&gt;destroy;
+<a name="line840">840: </a>    } <font color="#4169E1">else</font> {
+<a name="line841">841: </a>      *f = (void (*)(void))mat-&gt;ops-&gt;destroy;
+<a name="line842">842: </a>    }
+<a name="line843">843: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (op == MATOP_VIEW) {
+<a name="line844">844: </a>    *f = (void (*)(void))mat-&gt;ops-&gt;view;
+<a name="line845">845: </a>  } <font color="#4169E1">else</font> {
+<a name="line846">846: </a>    *f = (((void (**)(void))mat-&gt;ops)[op]);
+<a name="line847">847: </a>  }
+<a name="line848">848: </a>  <font color="#4169E1">return</font>(0);
+<a name="line849">849: </a>}
+
+</pre>
+</body>
+
+</html>

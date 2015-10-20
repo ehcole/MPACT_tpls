@@ -50,7 +50,8 @@ IF ( CMAKE_BUILD_PETSC )
       --with-pthread=0
       --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/hypre-${HYPRE_VERSION}
       --with-batch=0
-      --with-openmp
+#      --with-openmp
+      --with-pic=1
       ${BUILD_OPTS}
       --with-blas-lib=${BLAS_LIBS}
       --with-lapack-lib=${LAPACK_LIBS}
@@ -67,7 +68,7 @@ IF ( CMAKE_BUILD_PETSC )
       LIST(APPEND CONFIGURE_OPTIONS
         --with-known-mpi-shared=0 --with-shared-libraries=0)
     ENDIF()
-    LIST(APPEND CONFIGURE_OPTIONS --with-dynamic-loading=0)
+#    LIST(APPEND CONFIGURE_OPTIONS --with-dynamic-loading=0)
 ENDIF()
 
 # Build petsc
@@ -93,7 +94,7 @@ IF (CMAKE_BUILD_PETSC)
         UPDATE_COMMAND      ""
         CONFIGURE_COMMAND   ${PETSC_BUILD_DIR}/configure
           --prefix=${CMAKE_INSTALL_PREFIX}/petsc-${PETSC_VERSION} ${CONFIGURE_OPTIONS}
-        BUILD_COMMAND       make -j ${PROCS_INSTALL} PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR}
+        BUILD_COMMAND       make MAKE_NP=${PROCS_INSTALL} PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR}
           PETSC_ARCH=${PETSC_ARCH} VERBOSE=1
         BUILD_IN_SOURCE     1
         INSTALL_COMMAND     make PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR} PETSC_ARCH=${PETSC_ARCH} install

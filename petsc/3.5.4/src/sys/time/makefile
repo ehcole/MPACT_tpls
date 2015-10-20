@@ -1,0 +1,16 @@
+
+ALL: lib
+
+CFLAGS    =
+FFLAGS    =
+SOURCEC	  = cputime.c fdate.c
+SOURCEF	  =
+SOURCEH	  = ../../../include/petsctime.h
+MANSEC	  = Sys
+LIBBASE	  = libpetscsys
+DIRS	  =
+LOCDIR	  = src/sys/time/
+
+include ${PETSC_DIR}/conf/variables
+include ${PETSC_DIR}/conf/rules
+include ${PETSC_DIR}/conf/test
