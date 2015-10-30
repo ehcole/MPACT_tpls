@@ -50,7 +50,7 @@ IF ( CMAKE_BUILD_PETSC )
       --with-pthread=0
       --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/hypre-${HYPRE_VERSION}
       --with-batch=0
-#      --with-openmp
+      --with-ssl=0
       --with-pic=1
       ${BUILD_OPTS}
       --with-blas-lib=${BLAS_LIBS}
