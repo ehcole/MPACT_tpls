@@ -34,6 +34,7 @@ FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(PETSC_INSTALL_DIR \"${PET
 
 # Configure petsc
 IF ( CMAKE_BUILD_PETSC )
+  IF ( CONFIGURE_HYPRE )
     IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
         SET( PETSC_ARCH linux-gnu-dbg )
         SET( BUILD_OPTS --with-debugging=1 )
@@ -69,20 +70,66 @@ IF ( CMAKE_BUILD_PETSC )
         --with-known-mpi-shared=0 --with-shared-libraries=0)
     ENDIF()
 #    LIST(APPEND CONFIGURE_OPTIONS --with-dynamic-loading=0)
+# LET PETSC CONFIGURE EVERYTHING, INCLUDING METIS, PARMETIS< SUPERLU
+  ELSEIF( NOT CONFIGURE_HYPRE )
+    IF ( ${CMAKE_BUILD_TYPE} STREQUAL "Debug" )
+        SET( PETSC_ARCH linux-gnu-dbg )
+        SET( BUILD_OPTS --with-debugging=1 )
+    ELSEIF ( ${CMAKE_BUILD_TYPE} STREQUAL "Release" )
+        SET( PETSC_ARCH linux-gnu-opt )
+        SET( BUILD_OPTS --with-debugging=0 )
+    ELSE()
+        MESSAGE ( FATAL_ERROR "Unknown CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}" )
+    ENDIF()
+    SET( CONFIGURE_OPTIONS
+      --PETSC_ARCH=${PETSC_ARCH} --PETSC_DIR=${PETSC_CMAKE_SOURCE_DIR}
+      --prefix=${CMAKE_INSTALL_PREFIX}/petsc-${PETSC_VERSION}
+      --with-x=0
+      --with-batch=0
+      --with-ssl=0
+      --with-pic=1
+      --download-hypre=1
+      --download-fblaslapack=1
+      --download-metis=1
+      --download-parmetis=1
+      --download-superlu_dist=1
+      --with-cc=${CMAKE_C_COMPILER}
+      --with-cxx=mpicxx
+      --with-fc=${CMAKE_Fortran_COMPILER}
+      CC=${CMAKE_C_COMPILER} CXX=mpicxx FC=${CMAKE_Fortran_COMPILER} F77=${CMAKE_Fortran_COMPILER} F90=${CMAKE_Fortran_COMPILER} 
+      "--CFLAGS=-fPIC -fopenmp ${CMAKE_C_FLAGS}"
+      "--CXXFLAGS=-fPIC -fopenmp ${CMAKE_CXX_FLAGS}"
+      "--FFLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
+      "--FCFLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
+      "--F90FLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
+      "--F77FLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
+      )
+    IF ( ENABLE_SHARED AND ENABLE_STATIC )
+        MESSAGE(FATAL_ERROR "Compiling petsc with both static and shared libraries is not yet supported")
+    ELSEIF ( ENABLE_SHARED )
+      LIST(APPEND CONFIGURE_OPTIONS
+        --with-shared-libraries --LDFLAGS=${CMAKE_SHARED_LINKER_FLAGS} )
+    ELSEIF ( ENABLE_STATIC )
+      LIST(APPEND CONFIGURE_OPTIONS
+        --with-known-mpi-shared=0 --with-shared-libraries=0)
+    ENDIF()  
+  ENDIF()
 ENDIF()
 
 # Build petsc
 IF (CMAKE_BUILD_PETSC)
 
     SET(DEPENDS_ARGS)
-    IF (CMAKE_BUILD_LAPACK)
-      LIST(APPEND DEPENDS_ARGS  LAPACK)
-    ENDIF()
-    IF (CMAKE_BUILD_HYPRE)
-      LIST(APPEND DEPENDS_ARGS  HYPRE)
-    ENDIF()
-    IF (DEPENDS_ARGS)
-      SET(DEPENDS_ARGS DEPENDS ${DEPENDS_ARGS})
+    IF ( CONFIGURE_HYPRE )
+      IF (CMAKE_BUILD_LAPACK)
+        LIST(APPEND DEPENDS_ARGS  LAPACK)
+      ENDIF()
+      IF (CMAKE_BUILD_HYPRE)
+        LIST(APPEND DEPENDS_ARGS  HYPRE)
+      ENDIF()
+      IF (DEPENDS_ARGS)
+        SET(DEPENDS_ARGS DEPENDS ${DEPENDS_ARGS})
+      ENDIF()
     ENDIF()
 
     PRINT_VAR(CONFIGURE_OPTIONS)
