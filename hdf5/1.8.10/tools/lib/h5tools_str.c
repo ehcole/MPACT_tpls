@@ -632,7 +632,6 @@ h5tools_str_indent(h5tools_str_t *str, const h5tool_format_t *info,
         h5tools_str_append(str, "%s", OPT(info->line_indent, ""));
     }
 
-//    ctx->need_prefix = 0;
 }
 
 /*-------------------------------------------------------------------------
