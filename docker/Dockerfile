@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y \
         libx11-dev \
         libxext-dev \
         m4 \
+        python-numpy \
+        python-vtk \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
