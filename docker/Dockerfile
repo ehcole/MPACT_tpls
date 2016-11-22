@@ -57,5 +57,7 @@ RUN mkdir -p ${VERA_SCRATCH_DIR} && \
     make && \
     rm -rf ${VERA_SCRATCH_DIR}
 
+RUN ln -s /usr/bin/mpirun.mpich  /usr/local/bin/mpiexec
+
 # Copy the ``do-configure.sh`` script into the VERA build directory.
 COPY do-configure.sh ${VERA_BUILD_DIR}/
