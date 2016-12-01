@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
         m4 \
         python-numpy \
         python-vtk \
+        python-h5py \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
