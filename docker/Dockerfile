@@ -17,13 +17,11 @@ RUN apt-get update && apt-get install -y \
         cmake \
         git \
         python \
+        python-numpy \
         perl \
         libx11-dev \
         libxext-dev \
         m4 \
-        python-numpy \
-        python-vtk \
-        python-h5py \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
