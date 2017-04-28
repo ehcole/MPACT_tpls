@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y \
         libx11-dev \
         libxext-dev \
         m4 \
+        zlib1g-dev \
+        libcurl4-gnutls-dev \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
