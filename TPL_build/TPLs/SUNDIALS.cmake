@@ -39,7 +39,8 @@ FILE( APPEND "${CMAKE_INSTALL_PREFIX}/TPLs.cmake" "SET(SUNDIALS_INSTALL_DIR \"${
 
 IF (ENABLE_SHARED)
   SET(SUNDIALS_INSTALL_CMND
-    "${PROJECT_SOURCE_DIR}/install_and_remove_static_libs.sh" "${SUNDIALS_INSTALL_DIR}")
+#    "${PROJECT_SOURCE_DIR}/install_and_remove_static_libs.sh" "${SUNDIALS_INSTALL_DIR}")
+    "")
 ELSE()
   SET(SUNDIALS_INSTALL_CMND
     "${PROJECT_SOURCE_DIR}/install_and_remove_shared_libs.sh" "${SUNDIALS_INSTALL_DIR}")
