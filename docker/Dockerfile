@@ -5,10 +5,10 @@ FROM ubuntu:16.04
 MAINTAINER Damien L-G <lebrungrandt@ornl.gov>
 
 # Here we define a variable for the number of cores to use when building this
-# image. A default value is provided but you can change it by passing the 
+# image. A default value is provided but you can change it by passing the
 # ``--build-arg NPROC=<value>`` flag to the ``docker build`` command.
 ARG NPROC=8
- 
+
 # Use the package management system as much as possible.
 RUN apt-get update && apt-get install -y \
         build-essential \
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y \
 
 # Set VERA development environment.
 ENV VERA_TPL_INSTALL_DIR=/tools/vera/gcc-5.4.0/tpls/opt \
-    VERA_SCRATCH_DIR=/scratch \  
+    VERA_SCRATCH_DIR=/scratch \
     VERA_BUILD_DIR=/scratch/vera_build \
     VERA_DIR=/scratch/vera-Source.X.Y.Z \
     VERA_INSTALL_DIR=/tools/vera_installs/YYYY-MM-DD
