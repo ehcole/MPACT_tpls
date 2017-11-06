@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
         cmake \
         git \
         curl \
-        python \
+        python-dev \
         python-numpy \
         perl \
         libx11-dev \
