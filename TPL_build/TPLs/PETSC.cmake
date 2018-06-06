@@ -54,8 +54,9 @@ IF ( CMAKE_BUILD_PETSC )
       --with-ssl=0
       --with-pic=1
       ${BUILD_OPTS}
-      --with-blas-lib=${BLAS_LIBS}
-      --with-lapack-lib=${LAPACK_LIBS}
+      --with-blas-lapack-dir=/opt/intel/mkl
+ #     --with-blas-lib=${BLAS_LIBS}
+#      --with-lapack-lib=${LAPACK_LIBS}
       "--CFLAGS=-fPIC -fopenmp ${CMAKE_C_FLAGS}" 
       "--CXXFLAGS=-fPIC -fopenmp ${CMAKE_CXX_FLAGS}" 
       "--FFLAGS=-fPIC -fopenmp ${CMAKE_Fortran_FLAGS}"
@@ -98,6 +99,7 @@ IF ( CMAKE_BUILD_PETSC )
       --with-cc=${CMAKE_C_COMPILER}
       --with-cxx=mpicxx
       --with-fc=${CMAKE_Fortran_COMPILER}
+      --with-blas-lapack-dir=/opt/intel/mkl
       CC=${CMAKE_C_COMPILER} CXX=mpicxx FC=${CMAKE_Fortran_COMPILER} F77=${CMAKE_Fortran_COMPILER} F90=${CMAKE_Fortran_COMPILER} 
       "--CFLAGS=-fPIC -fopenmp ${CMAKE_C_FLAGS}"
       "--CXXFLAGS=-fPIC -fopenmp ${CMAKE_CXX_FLAGS}"
