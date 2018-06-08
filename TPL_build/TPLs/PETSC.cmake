@@ -49,7 +49,7 @@ IF ( CMAKE_BUILD_PETSC )
       --prefix=${CMAKE_INSTALL_PREFIX}/petsc-${PETSC_VERSION}
       --with-x=0
       --with-pthread=0
-      --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/hypre-${HYPRE_VERSION}
+      --with-hypre-dir=${CMAKE_INSTALL_PREFIX}/hypre-${HYPRE_VERSION}/include/
       --with-batch=0
       --with-ssl=0
       --with-pic=1
