@@ -6,7 +6,7 @@ MESSAGE("================")
 MESSAGE("Configuring TPLS")
 MESSAGE("================")
 
-SET(CONFIGURE_HYPRE ON)
+#SET(CONFIGURE_HYPRE ON)
 
 SET(ENABLE_SHARED  ON
   CACHE BOOL
